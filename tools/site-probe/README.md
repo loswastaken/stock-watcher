@@ -31,7 +31,7 @@ In the page, paste product URLs or tick stores to use their sample URLs, then cl
 show up as each check finishes. Click **Download bundle** when it's done.
 
 **Recommended for a full sweep:** the sample URLs in `sites.json` go stale (404s, redirects to the homepage),
-which shows up as FAIL for stores that actually work. Refresh them first, then sweep:
+which shows up as STALE for stores that actually work. Refresh them first, then sweep:
 
 ```bash
 ./run.sh discover --write       # finds real, current product URLs for every store and updates sites.json
@@ -81,6 +81,8 @@ was fetched (http, curl or browser), duration, detection signals and a verdict:
 | Verdict | Meaning |
 |---|---|
 | **OK** | The checker got a definite in-stock or out-of-stock answer. Compare it with what you see on the site. |
+| **INFO** | An info page that sells nothing itself ("No direct sales on this page", NVIDIA's www.nvidia.com GPU pages: "Info page — watch the NVIDIA Marketplace listing instead"). Not a failure. |
+| **STALE** | The link is stale: 404 / "Listing not found" / "Product page not found", a redirect to the homepage or a non-product page, or the page now shows a different product. A failure: update the link (`discover --write`). Never reported as BLOCKED, even when a challenge page or 403 came up on the way. |
 | **FAIL** | Error, or the page loaded but the checker couldn't tell. |
 | **BLOCKED** | Bot protection (captcha, Akamai, PerimeterX, Cloudflare, …) stopped it. |
 | **QUEUE** | A waiting room / queue page was shown. |
@@ -91,15 +93,23 @@ was fetched (http, curl or browser), duration, detection signals and a verdict:
 real checker, keeping one in-stock and one sold-out item when it can. It uses the same browser and profile as
 the checks, so bot walls you have passed stay passed. Per store:
 
-1. `robots.txt` `Sitemap:` lines, plus `/sitemap.xml` and `/sitemap_index.xml`. Indexes are followed (product /
-   pdp sitemaps first, `.xml.gz` supported) within a cap on requests and bytes.
+1. `robots.txt` `Sitemap:` lines, plus `/sitemap.xml`, `/sitemap_index.xml` and `/<locale>/sitemap.xml` for
+   the samples' locale (`/us/`, `/en-us/`). Indexes are followed (product / pdp sitemaps first, `.xml.gz`
+   supported) within a cap on requests and bytes. When plain HTTP is blocked (403, a challenge, or an HTML
+   bot wall from a store that needs the browser), the sitemap is fetched through the real browser.
 2. Shopify stores also try `/products.json`.
-3. Failing that, the store's homepage (and up to two category pages linked from it) in the browser.
-4. Links are filtered with that store's product-URL pattern (`PRODUCT_PATTERNS` in `probe.py`), then up to
+3. Failing that, pages in the browser (up to 6): the store's own listing / search pages (`DISCOVER_SEEDS`:
+   eBay's Buy-It-Now search for `nintendo switch 2` and `/deals`, StockX category pages, the NVIDIA
+   Marketplace GPU list, PS Direct's HTML sitemap / accessories, NextWarehouse's `sitemap.cfm`, EVGA's
+   product list), then the current sample pages — even a stale product page links to live products — then
+   the homepage and up to two listing pages it links to (an HTML sitemap first).
+4. Links are filtered with that store's product-URL pattern (`PRODUCT_PATTERNS` in `probe.py`; US locale only,
+   no protection plans / warranties / gift cards; NVIDIA only on marketplace.nvidia.com), then up to
    6 candidates (`--max-tries`) are checked; only definite in-stock / sold-out answers are kept. If a store
-   only ever answers BLOCKED / QUEUE, those URLs are kept and shown with a `?`. A URL that FAILs is never kept.
+   only ever answers BLOCKED / QUEUE, those URLs are kept and shown with a `?`. A URL that is FAIL, STALE or
+   INFO is never kept.
 
-eBay and StockX are skipped (listings expire; resale pages are bot-walled), so their samples stay.
+eBay listings expire, so eBay is re-discovered from a live Buy-It-Now search each time.
 It goes easy on the stores: 2 stores at a time (`--discover-concurrency`), a gap between requests to one host,
 and a time cap of 90 s per store (`--store-timeout`).
 

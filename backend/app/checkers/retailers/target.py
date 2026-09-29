@@ -385,4 +385,17 @@ async def check(url: str, ctx: AdapterContext) -> CheckResult | None:
     if available:
         in_texts = [t for t in texts if t in SHIP_IN.values() or t.startswith("Pickup")]
         return result("in", " · ".join(in_texts) or "In stock", available=available, **common)
+    if rc.wants_delivery and not want_pickup and ship_status == "OUT_OF_STOCK":
+        # shipping is out, but the item is on the shelf nearby (2026-09-29, OLIPOP minis: shipping OUT_OF_STOCK,
+        # same-day delivery and pickup at the page's store IN_STOCK) — say so rather than a bare "Out of stock"
+        other = []
+        if dig(ful, "scheduled_delivery", "availability_status") in PICKUP_IN:
+            other.append("same-day delivery")
+        if any(dig(so, "order_pickup", "availability_status") in PICKUP_IN for so in ful.get("store_options") or []
+               if isinstance(so, dict)):
+            other.append("store pickup")
+        if other:
+            detail["other_fulfillment"] = other
+            texts = [f"Out of stock for shipping (only {' / '.join(other)})" if t == SHIP_OUT["OUT_OF_STOCK"] else t
+                     for t in texts]
     return result("out", " · ".join(texts) or "Out of stock", **common)

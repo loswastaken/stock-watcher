@@ -16,7 +16,7 @@ from urllib.parse import parse_qs, parse_qsl, quote, urlencode, urlsplit, urluns
 from .. import fetcher, generic
 from ..base import Availability, CheckResult
 from ..fetcher import FetchError, FetchResult
-from ..util import clean_text
+from ..util import clean_text, state_classes
 from . import base as rbase
 from .base import STOCK_KEY, AdapterContext, dig, result
 from .pagekit import (
@@ -208,6 +208,15 @@ def nvidia_gpu(url: str) -> str | None:
     return f"RTX {m.group(1)}" + (f" {suffix}" if suffix else "")
 
 
+def nv_marketplace_url(gpu: str | None) -> str | None:
+    """The US NVIDIA Marketplace page for a GPU ("RTX 5070 Ti" → .../nvidia-geforce-rtx-5070-ti/), the listing to
+    watch instead of a www.nvidia.com info page."""
+    if not gpu:
+        return None
+    return ("https://marketplace.nvidia.com/en-us/consumer/graphics-cards/nvidia-geforce-"
+            + re.sub(r"\s+", "-", gpu.strip().lower()) + "/")
+
+
 def _nv_locale(url: str) -> str:
     m = re.search(r"/([a-z]{2}-[a-z]{2})(?:/|$)", urlsplit(url).path, re.I)
     return m.group(1).lower() if m else "en-us"
@@ -230,7 +239,7 @@ def _nv_status(s: Any) -> str | None:
     return None
 
 
-NV_INFO_TEXT = "Info page — track the marketplace/FE listing"
+NV_INFO_TEXT = "Info page — watch the NVIDIA Marketplace listing instead"
 _NV_FE_SKU_RE = re.compile(r"\bNVGFT\d{3}[A-Z0-9]*\b")
 _NV_MPN_RE = re.compile(r'"mpn"\s*:\s*"([A-Z0-9_]{5,30})"')
 _nv_page_cache: dict[str, tuple[float, dict]] = {}
@@ -370,7 +379,8 @@ async def nvidia(url: str, ctx: AdapterContext) -> CheckResult | None:
         sku, guessed = _nv_guess_fe_sku(gpu), True
     if not sku:
         if info_page and gpu:
-            return finish(result(None, NV_INFO_TEXT, detail={"gpu": gpu, "info_only": True}), ctx)
+            return finish(result(None, NV_INFO_TEXT, detail={"gpu": gpu, "info_only": True,
+                                                              "watch_instead": nv_marketplace_url(gpu)}), ctx)
         return None
 
     title = (clean_text(product.get("productTitle")) if product else None) or page.get("title")
@@ -421,7 +431,7 @@ async def nvidia(url: str, ctx: AdapterContext) -> CheckResult | None:
                 else "Out of stock")
             return finish(result(verdict, text, price=price, title=title, image_url=image, detail=detail), ctx)
     if info_page:
-        detail["info_only"] = True
+        detail.update(info_only=True, watch_instead=nv_marketplace_url(gpu))
         return finish(result(None, NV_INFO_TEXT, title=title, image_url=image, detail=detail), ctx)
     dom = nv_dom_state(browser.text) if browser is not None else None
     if dom is not None:
@@ -678,7 +688,7 @@ def _antonline_dom(view: PageView) -> Hit | None:
         if el.name not in ("button", "a", "input"):
             continue
         txt = soup_text(el) or str(el.get("value") or "")
-        if el.has_attr("disabled") or "disabled" in " ".join(el.get("class") or []) \
+        if el.has_attr("disabled") or "disabled" in " ".join(state_classes(el)) \
                 or re.search(r"sold\s*out|unavailable|notify", txt, re.I):
             return Hit("out", "Sold out", f"button: '{txt or 'add to cart'}' (disabled)")
         return Hit("in", "In stock", f"button: '{txt or 'add to cart'}' (enabled)")

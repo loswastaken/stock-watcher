@@ -115,7 +115,11 @@ async def check(url: str, ctx: AdapterContext) -> CheckResult | None:
 
     if status in STATUS_IN:
         if third and ctx.retailer_config.official_only:
-            return result("out", THIRD_PARTY_TEXT, **common)
+            # the buy-box price is the marketplace seller's (HyperTech's $499.00 for a Switch 2 Walmart sells
+            # at $449, 2026-09-29), not the store's: kept aside so it never reads as the watched price
+            if price is not None:
+                detail["third_party_price"] = price
+            return result("out", THIRD_PARTY_TEXT, **{**common, "price": None})
         preorder = dig(product, "preOrder", "isPreOrder") is True
         return result("in", "Pre-order" if preorder else STATUS_IN[status], **common)
     if status in STATUS_OUT or "OUT_OF_STOCK" in status:

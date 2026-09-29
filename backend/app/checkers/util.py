@@ -175,3 +175,12 @@ def walk(obj: Any) -> Iterator[Any]:
             stack.extend(reversed(list(cur.values())))
         elif isinstance(cur, list):
             stack.extend(reversed(cur))
+
+
+def state_classes(el: Any) -> list[str]:
+    """An element's lower-cased class tokens minus Tailwind-style variants: "disabled:opacity-50" /
+    "[&:disabled]:..." style the *disabled state*, they don't mean the element is disabled (QVC's enabled
+    "Add to Cart", 2026-09-29, carries "disabled:pointer-events-none")."""
+    c = el.get("class") or []
+    toks = c if isinstance(c, list) else str(c).split()
+    return [x.lower() for x in toks if ":" not in x and "[" not in x]

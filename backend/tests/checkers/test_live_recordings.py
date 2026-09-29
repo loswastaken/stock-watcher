@@ -173,6 +173,9 @@ async def test_nvidia_geforce_info_page_is_never_in_stock():
     }) as calls:
         res = await check(url)
     assert res.status == "unknown" and res.status_text == electronics.NV_INFO_TEXT
+    assert res.status_text == "Info page — watch the NVIDIA Marketplace listing instead"
+    assert res.detail["info_only"] is True and res.detail["watch_instead"] == \
+        "https://marketplace.nvidia.com/en-us/consumer/graphics-cards/nvidia-geforce-rtx-5080/"
     assert "skus=NVGFT580" in next(c for c in calls if "feinventory" in c)
     assert not any(c.startswith("https://www.nvidia.com/") for c in calls)
 
@@ -408,7 +411,7 @@ async def test_leica_brand_page_follows_shop_now():
     # the 65" variant the URL names (OLED65C5PUA) — not the 77" one ($2,199.99) the old code priced
     ("https://www.lg.com/us/tvs/lg-oled65c5pua-oled-4k-tv", None, "lg/oled65c5.html", "$1,499.99"),
     ("https://us-store.msi.com/Graphics-Cards/NVIDIA-GPU/GeForce-RTX-50-Series/GeForce-RTX-5070-Ti-16G-GAMING-TRIO-OC",
-     None, "msi/rtx5070ti_trio.html", None),
+     None, "msi/rtx5070ti_trio.html", "$1,249.99"),  # #prices-new (MSI's OpenCart theme)
     ("https://www.meta.com/quest/quest-3/", None, "oculus/quest3.html", "$599.99"),
     ("https://www.nintendo.com/us/store/products/nintendo-switch-2-system-123669/", None, "nintendo/switch2.html",
      "$499.99"),
@@ -645,3 +648,80 @@ async def test_samsclub_unknown_item_is_not_found_not_out_of_stock():
     with replay({url: {"body": "samsclub/item_16634389868_not_found.html"}}):
         res = await check(url)
     assert res.status == "error" and res.status_text == generic.NOT_FOUND_TEXT and res.detail["dead_link"]
+
+
+# =========================================================================== verdict audit, 2026-09-29 19:0x run
+# (discovered links, headed Chrome, home connection): results that were wrong on the real pages
+
+
+async def test_qvc_tailwind_disabled_variant_is_not_a_disabled_button():
+    # QVC's enabled "Add to Cart" carries Tailwind's "disabled:pointer-events-none disabled:opacity-50" (styles
+    # for the disabled *state*); read as a disabled button it turned a JSON-LD InStock page into "Out of stock"
+    url = "https://www.qvc.com/qvc.product.K339228.html"
+    with replay({url: {"body": "qvc/K339228_tailwind_atc.html"}}) as calls:
+        res = await check(url)
+    assert res.status == "in_stock", (res.status_text, calls.missing)
+    assert res.price == "$199.98" and res.title.startswith("Blackstone 22")
+    from bs4 import BeautifulSoup
+    btn = BeautifulSoup('<button class="disabled:opacity-50 [&:disabled]:x">Add to Cart</button>', "lxml").button
+    assert generic._is_disabled(btn) is False
+
+
+async def test_gamestop_pre_owned_only_is_not_new_stock():
+    # The page sells the battery pack Pre-Owned only (gtmdata condition "Pre-Owned", JSON-LD UsedCondition
+    # InStock $5.99): watching New (the default), that's not stock — and $5.99 is not the New price.
+    url = ("https://www.gamestop.com/gaming-accessories/batteries/xbox-one/products/"
+           "microsoft-xbox-one-battery-pack/100820.html")
+    with replay({url: {"body": "gamestop/100820_pre_owned_only.html"}}):
+        res = await check(url)
+    assert res.status == "out_of_stock" and res.status_text == "No New copies — only Pre-Owned"
+    assert res.price is None and res.detail["other_condition_price"] == "$5.99"
+    with replay({url: {"body": "gamestop/100820_pre_owned_only.html"}}):
+        res = await check(url, {"condition": "any"})
+    assert res.status == "in_stock" and res.price == "$5.99" and res.detail["condition"] == "Pre-Owned"
+
+
+async def test_bjs_reads_product_state_not_stale_head():
+    # <title>/og:title named another product (an Amairah engagement ring) and no price was rendered; the
+    # page's __CSR_DATA__ has the bridal set's name, minItemPrice and per-size availInventory.
+    url = ("https://www.bjs.com/product/05-ct-tw-diamond-cushion-shape-double-halo-3-pc-bridal-set-in-sterling-silver/"
+           "3000000000003409747/")
+    with replay({url: {"body": "bjs/bridal_set_csr_state.html"}}) as calls:
+        res = await check(url)
+    assert res.status == "in_stock", (res.status_text, res.error, calls.missing)
+    assert res.price == "$599.99" and res.title.startswith("0.5 ct. t.w. Diamond Cushion Shape Double Halo")
+    assert res.detail["matched"] == "__CSR_DATA__ bjsItemsInventory: 4 of 4 item(s) available"
+
+
+async def test_zotac_repeated_microdata_name_is_one_title():
+    # two itemprop="name" (title + "[Refurbished]" variant) came back as "['ZOTAC ...', 'ZOTAC ... [Refurbished]']"
+    url = "https://www.zotacstore.com/us/geforce-rtx-3060-ti-amp-white-edition-lhr-refurbished"
+    with replay({url: {"body": "zotac/rtx3060ti_refurb.html"}}):
+        res = await check(url)
+    assert res.status == "in_stock" and res.price == "$323.99"
+    assert res.title == "ZOTAC GAMING GeForce RTX 3060 Ti AMP White Edition LHR"
+
+
+async def test_walmart_third_party_price_is_not_the_items_price():
+    # buy box: HyperTech (EXTERNAL) at $499.00 — a marketplace price, not Walmart's
+    url = "https://www.walmart.com/ip/Nintendo-Switch-2-Console/15949610846"
+    with replay({url: {"body": "walmart/switch2_third_party.html"}}):
+        res = await check(url)
+    assert res.status == "out_of_stock" and res.status_text == "Third-party sellers only"
+    assert res.price is None and res.detail["third_party_price"] == 499
+    assert res.detail["seller"] == "HyperTech" and res.detail["third_party"] is True
+
+
+async def test_target_shipping_out_but_on_the_shelf_nearby(_target_state):
+    # OLIPOP minis, delivery watched: shipping_options OUT_OF_STOCK (INVENTORY_UNAVAILABLE) while same-day
+    # delivery and pickup at the page's store (3363) are IN_STOCK — out, but not a bare "Out of stock"
+    url = "https://www.target.com/p/olipop-apple-crisp-45-fl-oz-6pk-mini-39-s/-/A-95178842"
+    with replay({
+        "https://www.target.com/p/-/A-95178842": {"body": "target/pdp_95178842.html"},
+        REDSKY + "pdp_client_v1*": {"body": "target/pdp_client_95178842.json"},
+        REDSKY + "product_fulfillment_v1*": {"body": "target/fulfillment_95178842_ship_oos.json"},
+    }) as calls:
+        res = await check(url)
+    assert res.status == "out_of_stock", (res.status_text, res.error, calls.missing)
+    assert res.status_text == "Out of stock for shipping (only same-day delivery / store pickup)"
+    assert res.price == "$11.39" and res.detail["other_fulfillment"] == ["same-day delivery", "store pickup"]

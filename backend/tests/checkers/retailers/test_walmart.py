@@ -54,6 +54,8 @@ async def test_marketplace_seller(monkeypatch):
     res = await walmart.check(URL, ctx())
     assert res.status == "out_of_stock" and res.status_text == "Third-party sellers only"
     assert res.detail["seller"] == "GameFlip Resale" and res.detail["third_party"] is True
+    # the marketplace seller's price is not the watched item's price
+    assert res.price is None and res.detail["third_party_price"] == 599.99
     res = await walmart.check(URL, ctx(official_only=False))
     assert res.status == "in_stock" and res.detail["price_value"] == 599.99
 

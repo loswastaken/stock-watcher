@@ -395,8 +395,59 @@ MACYS_RULES = [
 ]
 
 
+_BJS_CSR_RE = re.compile(r'<script[^>]*\bid=["\']__CSR_DATA__["\'][^>]*>(.*?)</script>', re.S | re.I)
+
+
+def bjs_state(html: str) -> dict | None:
+    """``pageData.pdpData.productDetailsData`` from the page's ``__CSR_DATA__`` JSON: the product's name,
+    per-item ``itemPrices`` / ``minItemPrice`` and ``bjsItemsInventory`` (availInventory per size/variant)."""
+    import json
+
+    m = _BJS_CSR_RE.search(html or "")
+    if not m:
+        return None
+    try:
+        data = json.loads(m.group(1))
+    except ValueError:
+        return None
+    pd = data.get("pageData", {}).get("pdpData", {}).get("productDetailsData") if isinstance(data, dict) else None
+    return pd if isinstance(pd, dict) else None
+
+
 async def bjs(url: str, ctx: AdapterContext) -> CheckResult | None:
-    return await dom_check(url, ctx, BJS_RULES)
+    """The page's own product state first: the 2026-09-29 recordings (headed Chrome) carried a stale <title> /
+    og:title of *another* product (an Amairah engagement ring on a bridal-set page) and no rendered price, while
+    ``__CSR_DATA__`` had the product's name, ``minItemPrice`` "$599.99" and ``bjsItemsInventory``."""
+    fetched = await fetch_page(url, ctx)
+    res = await dom_check(url, ctx, BJS_RULES, fetched=fetched)
+    if res.status == "error" or res.detail.get("queue"):
+        return res
+    pd = bjs_state(fetched.text)
+    if not pd:
+        return res
+    name = clean_text((pd.get("description") or {}).get("name") if isinstance(pd.get("description"), dict) else None)
+    if name:
+        res.title = name
+    price = pd.get("minItemPrice") or pd.get("maxItemPrice")
+    if isinstance(price, str) and parse_amount(price) is not None:
+        res.price = price
+        res.detail["price_value"] = float(parse_amount(price))
+    inv = [r for r in pd.get("bjsItemsInventory") or [] if isinstance(r, dict) and "availInventory" in r]
+    avail = pd.get("itemAvailDetails") if isinstance(pd.get("itemAvailDetails"), dict) else {}
+
+    def online(item_id: Any) -> bool:
+        a = avail.get(str(item_id))
+        return not isinstance(a, dict) or str(a.get("itemAvailableOnline") or "Y").upper() == "Y"
+
+    if inv:
+        n_in = sum(1 for r in inv if r.get("availInventory") is True and online(r.get("itemId")))
+        why = f"__CSR_DATA__ bjsItemsInventory: {n_in} of {len(inv)} item(s) available"
+        res.detail["signals"] = [why] + [x for x in res.detail.get("signals") or [] if x != why]
+        if n_in:
+            override(res, "in", "In stock", matched=why)
+        else:
+            override(res, "out", "Out of stock", matched=why)
+    return res
 
 
 def _costco_needs(html: str) -> bool:

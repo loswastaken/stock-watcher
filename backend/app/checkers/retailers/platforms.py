@@ -25,7 +25,7 @@ from bs4 import BeautifulSoup, Tag
 
 from ..base import Availability, CheckResult
 from ..fetcher import QUEUE_STATUS_TEXT, FetchError
-from ..util import absolutize, clean_text, extract_balanced, loads_lenient, parse_amount, walk
+from ..util import absolutize, clean_text, extract_balanced, loads_lenient, parse_amount, state_classes, walk
 from .base import RetailerConfig, dig, get_json, next_data, result, soup_of
 
 log = logging.getLogger("stockwatcher.checkers.platforms")
@@ -388,7 +388,7 @@ def _woo_dom(html: str) -> tuple[str | None, str | None, str | None]:
             return "in", "In stock", f"woocommerce: p.stock '{txt}'"
     btn = scope.select_one("button.single_add_to_cart_button, .single_add_to_cart_button")
     if isinstance(btn, Tag):
-        cls = " ".join(btn.get("class") or [])
+        cls = " ".join(state_classes(btn))
         if btn.has_attr("disabled") or "disabled" in cls:
             return None, None, None  # variable products disable the button until a variant is picked
         return "in", "In stock", "woocommerce: add-to-cart button"
@@ -566,7 +566,7 @@ async def check_magento(url: str, html: str, final_url: str, headers: dict, rcfg
     if verdict is None:
         btn = soup.select_one("#product-addtocart-button")
         if isinstance(btn, Tag):
-            dis = btn.has_attr("disabled") or "disabled" in " ".join(btn.get("class") or [])
+            dis = btn.has_attr("disabled") or "disabled" in " ".join(state_classes(btn))
             verdict, st = ("out", "Out of stock") if dis else ("in", "In stock")
             sig = f"magento: add-to-cart button ({'disabled' if dis else 'enabled'})"
     if verdict is None:
@@ -584,8 +584,16 @@ async def check_opencart(url: str, html: str, final_url: str, headers: dict, rcf
     scope = soup.select_one("#product-product, #product-info, #content") or soup
     m = _OC_AVAIL_RE.search(scope.get_text("\n", strip=True))
     avail = clean_text(m.group(1)) if m else ""
+    if not avail:
+        # MSI's store theme: no "Availability:" label, a bare "In Stock" / "Out of stock" under the price
+        pw = soup.select_one("#prices-wrapper")
+        if isinstance(pw, Tag):
+            pv, _ = classify_text(clean_text(pw.get_text(" ", strip=True)))
+            if pv:
+                avail = next((clean_text(sp.get_text(" ", strip=True)) for sp in pw.find_all("span")
+                              if classify_text(clean_text(sp.get_text(" ", strip=True)))[0]), "")
     btn = soup.select_one("#button-cart")
-    btn_disabled = isinstance(btn, Tag) and (btn.has_attr("disabled") or "disabled" in " ".join(btn.get("class") or []))
+    btn_disabled = isinstance(btn, Tag) and (btn.has_attr("disabled") or "disabled" in " ".join(state_classes(btn)))
     tv, tt = classify_text(avail)
     if avail and not tv and re.fullmatch(r"\d+", avail):
         tv, tt = ("in", "In stock") if int(avail) > 0 else ("out", "Out of stock")
@@ -602,7 +610,8 @@ async def check_opencart(url: str, html: str, final_url: str, headers: dict, rcf
     else:
         return None
     price = None
-    pel = scope.select_one(".price-new, ul.list-unstyled h2, .product-price, [itemprop=price]")
+    pel = soup.select_one("#prices-new") or scope.select_one(".price-new, ul.list-unstyled h2, .product-price, "
+                                                             "[itemprop=price]")
     if isinstance(pel, Tag):
         price = pel.get("content") or clean_text(pel.get_text(" ", strip=True)) or None
     return result(verdict, st, price=price, detail={"signals": [sig], "matched": sig})

@@ -490,7 +490,9 @@ def _gs_infos(view: PageView, pid: str | None = None) -> list[dict]:
         info = data.get("productInfo") if isinstance(data, dict) else None
         if not (isinstance(info, dict) and info.get("availability")):
             continue
-        ids = {str(info.get(k)) for k in ("productID", "productId", "pid", "masterID") if info.get(k)}
+        # the URL's number is the SKU (".../microsoft-xbox-one-battery-pack/100820.html": sku 100820,
+        # productID 10121310), older pages used the productID
+        ids = {str(info.get(k)) for k in ("sku", "productID", "productId", "pid", "masterID") if info.get(k)}
         if pid and ids and pid not in ids:
             continue
         out.append(info)
@@ -504,9 +506,19 @@ async def gamestop(url: str, ctx: AdapterContext) -> CheckResult | None:
     pid = pm.group(1) if pm else None
 
     def dom(view: PageView) -> Hit | None:
-        infos = _gs_infos(view, pid)
+        found = _gs_infos(view, pid)
+        infos = found
         if want:  # a different condition (Pre-Owned, Digital) never stands in for the one watched
-            infos = [i for i in infos if str(i.get("condition") or "").lower() in (want, "")]
+            infos = [i for i in found if str(i.get("condition") or "").lower() in (want, "")]
+            if found and not infos:
+                # only other conditions are sold here (2026-09-29: an Xbox One battery pack sold Pre-Owned
+                # only — the page's JSON-LD says InStock for that used offer, which the generic checker took)
+                other = sorted({str(i.get("condition")) for i in found if i.get("condition")})
+                i0 = found[0]
+                det = {"sku": i0.get("sku") or i0.get("productID"), "condition": ", ".join(other) or None,
+                       **seller_detail(ctx, "GameStop")}
+                return Hit("out", f"No {want.title()} copies — only {' / '.join(other)}", "data-gtmdata condition",
+                           det, title=clean_text(i0.get("name")) or None)
         if not infos:
             return None
         info = next((i for i in infos if str(i.get("condition") or "").lower() == want), infos[0])
@@ -521,7 +533,13 @@ async def gamestop(url: str, ctx: AdapterContext) -> CheckResult | None:
             return Hit("out", _GS_OUT[a], sig, det, price=info.get("price"), title=name)
         return None
 
-    return await check_page(url, ctx, dom=dom, fall_through=True)
+    res = await check_page(url, ctx, dom=dom, fall_through=True)
+    if res is not None and res.detail.get("matched") == "data-gtmdata condition" and res.price:
+        # the page's price is the other condition's (Pre-Owned $5.99), not the watched one's
+        res.detail["other_condition_price"] = res.price
+        res.price = None
+        res.detail["price_value"] = None
+    return res
 
 
 # =========================================================================== Bandai / Play-Asia

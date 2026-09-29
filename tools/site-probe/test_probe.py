@@ -98,6 +98,21 @@ def test_scrub_entry_strips_request_and_response_headers():
                                            "body": "<title>Just a moment...</title>"}], "BLOCKED"),
         ("error", "Check failed", "Timed out fetching www.x.test", {}, [], "FAIL"),
         ("unknown", "Unknown", None, {}, [{"status": 200, "body": "<html>fine</html>"}], "FAIL"),
+        # stale links are STALE even when a 403 / challenge page was met on the way (2026-09-29: eBay's
+        # "Listing not found" after a challenge page and B&H's "different product" were reported BLOCKED)
+        ("error", "Listing not found", "Listing not found", {},
+         [{"status": 200, "url": "https://www.ebay.com/itm/1", "body": "<title>Just a moment...</title>"}], "STALE"),
+        ("error", "Product page not found (HTTP 404)", "Product page not found (HTTP 404) — update the link",
+         {"dead_link": True}, [{"status": 403, "url": "https://x.test/"}], "STALE"),
+        ("error", "This link now shows a different product (Apple 32GB iPod touch) — update the link", None, {}, [],
+         "STALE"),
+        ("error", "Product page redirects to the homepage — the link may be stale", None, {}, [], "STALE"),
+        ("error", "Walmart redirects this item to a different product (PS5) — update the link", None, {}, [],
+         "STALE"),
+        # info pages aren't failures, even with api.store.nvidia.com's Akamai 403 in the log
+        ("unknown", "Info page — watch the NVIDIA Marketplace listing instead", None, {"info_only": True},
+         [{"status": 403, "url": "https://api.store.nvidia.com/partner/v1/feinventory"}], "INFO"),
+        ("unknown", "No direct sales on this page", None, {"info_only": True}, [], "INFO"),
     ],
 )
 def test_classify(status, text, error, detail, entries, expected):
@@ -225,12 +240,12 @@ def test_sweep_report_from_fake_results(tmp_path, fake_backend):
     md, js = probe.write_report(results, tmp_path)
     text = md.read_text()
     assert "| Store | URL | Status | Adapter | Price | Verdict | Error |" in text
-    assert "**5 checks:** 2 OK, 1 FAIL, 1 BLOCKED, 1 QUEUE" in text
+    assert "**5 checks:** 2 OK, 0 INFO, 0 STALE, 1 FAIL, 1 BLOCKED, 1 QUEUE" in text
     row = next(line for line in text.splitlines() if line.startswith("| target |"))
     assert "$449.99" in row and "**OK**" in row and "| target |" in row
     assert "Blocked by bot protection" in text
     report = json.loads(js.read_text())
-    assert report["counts"] == {"OK": 2, "FAIL": 1, "BLOCKED": 1, "QUEUE": 1}
+    assert report["counts"] == {"OK": 2, "INFO": 0, "STALE": 0, "FAIL": 1, "BLOCKED": 1, "QUEUE": 1}
     assert len(report["results"]) == 5
     assert all("bundle_path" not in r for r in report["results"])  # no local paths in the shared report
 
@@ -523,6 +538,41 @@ def test_sitemap_rank_prefers_product_sitemaps():
     ("target", "https://www.walmart.com/ip/x/15949610846", None),  # another store's URL
     ("target", "https://www.target.com/p/x/-/A-94693225.jpg", None),  # asset
     ("target", "https://www.target.com/cart", None),
+    # 2026-09-29 discover gaps
+    ("bhphoto", "https://www.bhphotovideo.com/c/product/758628-REG/Shure_SE215_CL.html",
+     "https://www.bhphotovideo.com/c/product/758628-REG/Shure_SE215_CL.html"),
+    ("bhphoto", "https://www.bhphotovideo.com/c/product/1809440-REG/apple_ipod_touch.html/specs", None),
+    ("homedepot", "https://www.homedepot.com/p/315143462", "https://www.homedepot.com/p/315143462"),
+    ("homedepot", "https://www.homedepot.com/p/reviews/RYOBI/315143462/1", None),
+    ("psdirect", "https://direct.playstation.com/en-us/buy-accessories/dualsense-edge-wireless-controller.1000036452",
+     "https://direct.playstation.com/en-us/buy-accessories/dualsense-edge-wireless-controller.1000036452"),
+    ("psdirect", "https://direct.playstation.com/en-us/games/ghost-of-yotei.1000048912",
+     "https://direct.playstation.com/en-us/games/ghost-of-yotei.1000048912"),
+    ("psdirect", "https://direct.playstation.com/en-us/buy-consoles/playstation5-pro-console-2-tb",
+     "https://direct.playstation.com/en-us/buy-consoles/playstation5-pro-console-2-tb"),
+    ("psdirect", "https://direct.playstation.com/en-us/accessories/headsets", None),
+    ("asus", "https://shop.asus.com/us/90nr0ib1-m00m10-rog-strix-g16-2025-g615.html",
+     "https://shop.asus.com/us/90nr0ib1-m00m10-rog-strix-g16-2025-g615.html"),
+    ("asus", "https://shop.asus.com/us/rog/90mb1ir0-m0aay0-rog-strix-b850-f-gaming-wifi.html",
+     "https://shop.asus.com/us/rog/90mb1ir0-m0aay0-rog-strix-b850-f-gaming-wifi.html"),
+    ("asus", "https://shop.asus.com/us/id-me-page.html", None),
+    ("evga", "https://www.evga.com/products/product.aspx?pn=220-G7-1000-X1",
+     "https://www.evga.com/products/product.aspx?pn=220-G7-1000-X1"),
+    ("evga", "https://www.evga.com/products/product.aspx.pn=220-G7-1000-X1.html",
+     "https://www.evga.com/products/product.aspx.pn=220-G7-1000-X1.html"),
+    ("evga", "https://www.evga.com/products/productlist.aspx.type=10.html", None),
+    ("nextwarehouse", "https://www.nextwarehouse.com/item/?2573476_g10e", "https://www.nextwarehouse.com/item/?2573476_g10e"),
+    ("nvidia", "https://marketplace.nvidia.com/en-us/consumer/graphics-cards/nvidia-geforce-rtx-5090/",
+     "https://marketplace.nvidia.com/en-us/consumer/graphics-cards/nvidia-geforce-rtx-5090/"),
+    ("nvidia", "https://www.nvidia.com/en-us/geforce/graphics-cards/50-series/rtx-5080/", None),  # info page
+    ("nvidia", "https://marketplace.nvidia.com/en-sg/consumer/graphics-cards/nvidia-geforce-rtx-5090/", None),
+    ("microcenter", "https://www.microcenter.com/product/427343/2-year-accidental-damage-protection-plan", None),
+    ("stockx", "https://stockx.com/nintendo-switch-2-console-us-version", "https://stockx.com/nintendo-switch-2-console-us-version"),
+    ("stockx", "https://stockx.com/category/electronics", None),
+    ("stockx", "https://stockx.com/brands/pop-mart", None),
+    ("ebay", "https://www.ebay.com/itm/387123456789?_skw=switch&hash=item5a", "https://www.ebay.com/itm/387123456789"),
+    ("ebay", "https://www.ebay.com/itm/Nintendo-Switch-2/387123456789", "https://www.ebay.com/itm/Nintendo-Switch-2/387123456789"),
+    ("ebay", "https://www.ebay.com/sch/i.html?_nkw=switch", None),
 ])
 def test_normalize_candidate_per_retailer(key, url, expected):
     assert probe.normalize_candidate(url, key) == expected
@@ -533,7 +583,8 @@ def test_every_registry_store_has_a_pattern_and_samples_match_it():
     assert len(keys) == 59
     assert keys - set(probe.PRODUCT_PATTERNS) - set(probe.DISCOVER_SKIP) == set(), "stores without a product pattern"
     assert set(probe.PRODUCT_PATTERNS) - keys == set()
-    assert set(probe.DISCOVER_SKIP) == {"ebay", "stockx"}
+    assert probe.DISCOVER_SKIP == {}  # eBay (Buy-It-Now search) and StockX (category pages) are discovered too
+    assert set(probe.DISCOVER_SEEDS) <= keys and set(probe.DISCOVER_BASES) <= keys
     # a store the table does not know falls back to generic heuristics
     assert probe.product_pattern("nope-store").search("/products/thing") and probe.product_pattern("x").search("/p/abc")
     for key, entries in probe.load_sites(probe.DEFAULT_SITES).items():
@@ -676,8 +727,6 @@ def test_discover_store_all_dead_and_skipped_and_homepage_fallback(fake_checks):
     target = registry.retailer_by_key("target")
     res = _run(probe.discover_store(target, None, _target_net([10000010, 10000020, 10000030]), per_store=2))
     assert res.chosen == [] and res.notes and res.tried == 3
-    assert _run(probe.discover_store(registry.retailer_by_key("ebay"), None, FakeNet())).skipped
-    assert _run(probe.discover_store(registry.retailer_by_key("stockx"), None, FakeNet())).skipped
     # no sitemap at all: falls back to the homepage
     home = FakeNet(pages={"https://www.target.com/": '<a href="/p/x/-/A-10000051">x</a><a href="/p/y/-/A-10000062">y</a>'})
     res = _run(probe.discover_store(target, None, home, per_store=2))
@@ -851,3 +900,61 @@ def test_livenet_plain_first_then_browser_and_soft_404(monkeypatch):
     n = len(calls)
     _run(net.get("https://s.test/again.xml"))  # the host is known to need the browser: no plain attempt
     assert calls[n][0] == "browser"
+    # a store the registry marks as bot-walled answering a sitemap with an HTML page (Akamai's "Oops!!
+    # Something went wrong" at Home Depot): the wall, not a soft 404 — the browser gets a turn
+    status, body = _run(net.get("https://www.homedepot.com/soft.xml"))
+    assert status == 200 and ("browser", "https://www.homedepot.com/", "https://www.homedepot.com/soft.xml") in calls
+
+
+def test_discover_ebay_from_buy_it_now_search(fake_checks):
+    # eBay listings expire: each run picks live Buy-It-Now /itm/ links from a search page (no sitemaps read)
+    search = probe.DISCOVER_SEEDS["ebay"][0]
+    net = FakeNet(pages={search: '<a href="https://www.ebay.com/itm/123456789011?hash=x">a</a>'
+                                 '<a href="/itm/Switch-2/123456789022">b</a><a href="/sch/i.html?_nkw=x&_pgn=2">next</a>'})
+    ebay = registry.retailer_by_key("ebay")
+    res = _run(probe.discover_store(ebay, [{"url": "https://www.ebay.com/itm/387123456789"}], net, per_store=2,
+                                    check=lambda u, rc: _fake_itm(u)))
+    assert net.gets == [] and net.paged[0] == search
+    assert res.source == "pages" and res.found == 2
+    assert sorted(c["url"] for c in res.chosen) == ["https://www.ebay.com/itm/123456789011",
+                                                     "https://www.ebay.com/itm/Switch-2/123456789022"]
+
+
+async def _fake_itm(url):
+    return {"status": "in_stock" if url.endswith("11") else "out_of_stock", "verdict": "OK", "price": "$1"}
+
+
+def test_discover_uses_stale_sample_pages_and_html_sitemaps():
+    # the stale B&H sample page (an open-box iPod now) still links to live products; its /specs sub-page doesn't count
+    stale = "https://www.bhphotovideo.com/c/product/1809440-REG/fujifilm_x100vi.html"
+    page = ('<a href="/c/product/1809440-REG/apple_ipod_touch.html/specs">s</a>'
+            '<a href="/c/product/758628-REG/Shure_SE215_CL.html">1</a>'
+            '<a href="https://www.bhphotovideo.com/c/product/1735751-REG/belkin_boostcharge.html">2</a>')
+    net, pool, notes = FakeNet(pages={stale: page}), {}, []
+    n = _run(probe.collect_from_pages(net, probe.Budget(), "https://www.bhphotovideo.com", "bhphoto", pool, notes,
+                                      [stale], want=2))
+    assert n == 2 and net.paged == [stale]  # enough found: the homepage isn't opened
+    # a homepage with no products: its HTML sitemap is opened before other listing pages
+    base = "https://www.nextwarehouse.com"
+    net = FakeNet(pages={f"{base}/": '<a href="/categoryList.cfm">c</a><a href="/sitemap.cfm">s</a>',
+                         f"{base}/sitemap.cfm": '<a href="/item/?2573476_g10e">x</a>'})
+    pool = {}
+    assert _run(probe.collect_from_pages(net, probe.Budget(), base, "nextwarehouse", pool, [])) == 1
+    assert net.paged == [f"{base}/", f"{base}/sitemap.cfm"]
+
+
+def test_discover_bases_and_locale_sitemaps():
+    nv = registry.retailer_by_key("nvidia")
+    # the www.nvidia.com info-page samples don't send discovery there
+    assert probe.store_bases(nv, [{"url": "https://www.nvidia.com/en-sg/geforce/graphics-cards/50-series/rtx-5050/"}]) \
+        == ["https://marketplace.nvidia.com"]
+    samples = [{"url": "https://shop.asus.com/us/90mb1ir0-m0aay0-rog-strix-b850-f-gaming-wifi.html"},
+               {"url": "https://www.lego.com/en-us/product/orchid-10311"}]
+    assert probe.locale_sitemaps("https://shop.asus.com", samples) == ["https://shop.asus.com/us/sitemap.xml"]
+    assert probe.locale_sitemaps("https://www.lego.com", samples) == ["https://www.lego.com/en-us/sitemap.xml"]
+    base = "https://shop.asus.com"
+    net = FakeNet({f"{base}/us/sitemap.xml": _urlset(f"{base}/us/90nr0ib1-m00m10-rog-strix-g16-2025-g615.html",
+                                                     f"{base}/us/deals.html")})
+    pool = {}
+    assert _run(probe.collect_from_sitemaps(net, probe.Budget(), base, "asus", pool, [],
+                                            extra_seeds=probe.locale_sitemaps(base, samples))) == 1

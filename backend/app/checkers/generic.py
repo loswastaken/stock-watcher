@@ -41,7 +41,7 @@ from bs4 import BeautifulSoup, Tag
 from .base import Availability, CheckResult
 from .fetcher import fetch_html, has_product_signals, host_of
 from .retailers.platforms import detect_and_check, queue_result
-from .util import absolutize, clean_text, format_price, loads_lenient, parse_amount
+from .util import absolutize, clean_text, format_price, loads_lenient, parse_amount, state_classes
 
 log = logging.getLogger("stockwatcher.checkers.generic")
 
@@ -363,7 +363,10 @@ def analyze_structured(roots: list, source: str, page_url: str) -> StructuredRes
     if main is None:
         main = ranked[0]
 
-    res.name = clean_text(main.get("name")) or None
+    # microdata repeats itemprop="name" (Zotac's Magento page: the title and the "[Refurbished]" variant name
+    # come back as a list): the first one is the product's own
+    name = next((n for n in _as_list(main.get("name")) if isinstance(n, str) and clean_text(n)), None)
+    res.name = clean_text(name) or None
     res.image = main.get("image")
     if not res.image:
         for v in _as_list(main.get("hasVariant")):
@@ -585,7 +588,7 @@ def _button_text(el: Tag) -> str:
 def _is_disabled(el: Tag) -> bool:
     if el.has_attr("disabled") or str(el.get("aria-disabled", "")).lower() == "true":
         return True
-    cls = " ".join(_classes(el))
+    cls = " ".join(state_classes(el))
     if re.search(r"disabled|sold-?out|out-?of-?stock|unavailable|inactive", cls):
         return True
     fs = el.find_parent("fieldset")

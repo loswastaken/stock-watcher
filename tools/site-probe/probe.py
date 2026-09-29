@@ -48,7 +48,9 @@ LIVE_FIXTURES = BACKEND / "tests" / "checkers" / "fixtures" / "live"
 PROBE_VERSION = 1
 MAX_BODY = 2_000_000
 DEFAULT_CAP_MB = 25
-VERDICTS = ("OK", "FAIL", "BLOCKED", "QUEUE")
+VERDICTS = ("OK", "INFO", "STALE", "FAIL", "BLOCKED", "QUEUE")
+# verdicts that are not a failure of the store check (``check`` exits 0 on these)
+PASSING = frozenset({"OK", "INFO"})
 
 if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
@@ -289,16 +291,35 @@ _BLOCK_RE = re.compile(
 )
 
 
+# The link itself is dead or points elsewhere: the store answered (often through the browser, after a
+# challenge page or a 403 on the way), so this is never bot protection.
+_STALE_RE = re.compile(
+    r"listing not found|product page not found|page not found|link now shows a different product"
+    r"|redirects? (?:this item )?to (?:the homepage|a non-product page|a different product)|link may be stale"
+    r"|update the link|no longer exists",
+    re.I,
+)
+# Pages that don't sell anything themselves (brand spec sheets, NVIDIA's www.nvidia.com GPU pages): nothing
+# failed, there is just no stock to watch there.
+_INFO_RE = re.compile(r"^\s*(?:no direct sales on this page|info page\b)", re.I)
+
+
 def classify(status: str, status_text: str | None, error: str | None, detail: dict,
              entries: list[dict] | None = None, looks_like_challenge: Callable[[str], bool] | None = None
              ) -> tuple[str, str]:
-    """→ (verdict, reason). OK = the checker reached a definite in/out answer."""
+    """→ (verdict, reason). OK = the checker reached a definite in/out answer; INFO = an info page with no
+    direct sales (not a failure); STALE = the link is dead / shows another product (a failure: update the
+    link) — decided before BLOCKED, whatever 403s or challenge pages were met on the way."""
     detail = detail or {}
     if detail.get("queue"):
         return "QUEUE", status_text or "Waiting room active"
     if status in ("in_stock", "out_of_stock"):
         return "OK", status_text or status
     msg = error or status_text or ""
+    if status != "error" and _INFO_RE.search(status_text or ""):
+        return "INFO", status_text or "Info page"
+    if detail.get("dead_link") or _STALE_RE.search(msg) or _STALE_RE.search(status_text or ""):
+        return "STALE", msg or status_text or "Stale link"
     if _BLOCK_RE.search(msg):
         return "BLOCKED", msg
     for e in entries or []:
@@ -616,13 +637,14 @@ def write_report(results: list[dict], out_root: Path = DEFAULT_OUT, *, title: st
         "",
         f"**{len(results)} checks:** " + ", ".join(f"{counts[v]} {v}" for v in VERDICTS),
         "",
-        "Verdicts: OK = definite in/out-of-stock answer; FAIL = error or could not decide; "
-        "BLOCKED = bot protection / captcha; QUEUE = waiting room.",
+        "Verdicts: OK = definite in/out-of-stock answer; INFO = info page, no direct sales (not a failure); "
+        "STALE = stale link (404, delisted, redirects away or shows another product — update it); "
+        "FAIL = error or could not decide; BLOCKED = bot protection / captcha; QUEUE = waiting room.",
         "",
         "| Store | URL | Status | Adapter | Price | Verdict | Error |",
         "|---|---|---|---|---|---|---|",
     ]
-    order = {"BLOCKED": 0, "FAIL": 1, "QUEUE": 2, "OK": 3}
+    order = {"BLOCKED": 0, "FAIL": 1, "STALE": 2, "QUEUE": 3, "INFO": 4, "OK": 5}
     ordered = sorted(results, key=lambda r: (order.get(r.get("verdict") or "", 9), r.get("store") or r.get("retailer") or ""))
     for r in ordered:
         status = r.get("status") or ""
@@ -848,6 +870,7 @@ th{color:var(--muted);font-weight:500;font-size:12px}td.url{max-width:340px;word
 .b{display:inline-block;padding:1px 8px;border-radius:99px;font-size:12px;font-weight:600}
 .OK{color:var(--ok);background:var(--okbg)}.FAIL{color:var(--fail);background:var(--failbg)}.BLOCKED{color:var(--blk);background:var(--blkbg)}
 .QUEUE{color:var(--q);background:var(--qbg)}.PENDING{color:var(--muted);background:var(--line)}
+.STALE{color:var(--fail);background:var(--line)}.INFO{color:var(--muted);background:var(--line)}
 details{font-size:12px;color:var(--muted)}details pre{white-space:pre-wrap;word-break:break-word;margin:6px 0 0}
 .muted{color:var(--muted)}.table-wrap{overflow-x:auto}
 </style></head><body><main>
@@ -1076,14 +1099,40 @@ def start_server(port: int = 8765, out_root: Path = DEFAULT_OUT, sites_path: Pat
 # --------------------------------------------------------------------------- discover
 #
 # Finds real, current product URLs for each store so sites.json does not rot: sitemaps first
-# (robots.txt -> Sitemap: lines, /sitemap.xml, /sitemap_index.xml, indexes followed, .xml.gz),
-# Shopify's /products.json, then the store's homepage in the real browser; candidates are
-# filtered with a per-store product-URL pattern and verified with the real checker.
+# (robots.txt -> Sitemap: lines, /sitemap.xml, /sitemap_index.xml, /<locale>/sitemap.xml, indexes
+# followed, .xml.gz; through the real browser when plain HTTP is blocked), Shopify's /products.json,
+# then pages opened in the real browser: the store's own listing/search pages (DISCOVER_SEEDS), the
+# current sample pages (even a stale product page links to live ones) and the homepage, plus the HTML
+# sitemap / category pages they link to. Candidates are filtered with a per-store product-URL pattern
+# (US locale, no protection plans / gift cards) and verified with the real checker.
 
-DISCOVER_SKIP = {
-    "ebay": "listings expire, so a discovered listing would be dead by the next sweep; keeping the sample",
-    "stockx": "resale product pages are bot-walled and have no public sitemap; keeping the sample",
+DISCOVER_SKIP: dict[str, str] = {}
+# Listing / search pages whose product links are the best candidates (opened in the browser before the
+# homepage). eBay listings expire, so eBay is re-discovered from a Buy-It-Now search each run.
+DISCOVER_SEEDS: dict[str, list[str]] = {
+    "ebay": ["https://www.ebay.com/sch/i.html?_nkw=nintendo+switch+2&LH_BIN=1", "https://www.ebay.com/deals"],
+    "stockx": ["https://stockx.com/category/electronics", "https://stockx.com/brands/pop-mart"],
+    "nvidia": ["https://marketplace.nvidia.com/en-us/consumer/graphics-cards/"],
+    "psdirect": ["https://direct.playstation.com/en-us/sitemap", "https://direct.playstation.com/en-us/accessories",
+                 "https://direct.playstation.com/en-us/hardware/ps5"],
+    "nextwarehouse": ["https://www.nextwarehouse.com/sitemap.cfm", "https://www.nextwarehouse.com/categoryList.cfm"],
+    "evga": ["https://www.evga.com/products/productlist.aspx.type=10.html"],
+    "asus": ["https://shop.asus.com/us/"],
 }
+# (all seed pages above were linked from the stores' own pages in the 2026-09-29 recordings; B&H and Home
+# Depot get theirs from the sample pages — B&H's stale product page linked 13 live products — and the
+# homepage's /b/ and /c/browse listing links)
+# Where to look instead of the sample URLs' hosts (NVIDIA: marketplace product pages sell; www.nvidia.com
+# GPU pages are spec sheets the checker reports as INFO).
+DISCOVER_BASES: dict[str, list[str]] = {
+    "nvidia": ["https://marketplace.nvidia.com"],
+    "asus": ["https://shop.asus.com"],
+}
+# Stores with no useful public sitemap: straight to the seed pages.
+NO_SITEMAP = frozenset({"ebay", "stockx"})
+# Only these hosts give candidates (NVIDIA's info pages on www.nvidia.com match the same GPU paths).
+CANDIDATE_HOSTS: dict[str, tuple[str, ...]] = {"nvidia": ("marketplace.nvidia.com",)}
+MAX_PAGE_REQUESTS = 6  # browser page opens per store (seeds, samples, homepage, listings)
 DEFAULT_PER_STORE = 2
 DEFAULT_MAX_TRIES = 6
 DEFAULT_STORE_TIMEOUT = 90.0
@@ -1102,28 +1151,30 @@ POOL_TARGET = 80  # stop reading sitemaps once this many matching URLs are known
 _SHOPIFY = r"/products/[^/?#]+"
 PRODUCT_PATTERNS: dict[str, str] = {
     "amd": r"/direct-buy/\d+/us|/products/[^?#]+\.html$",
-    "asus": r"/us/[^/?#]+\.html$",
+    # shop.asus.com/us/90mb1ir0-m0aay0-rog-strix-b850-f-gaming-wifi.html (part number + name), also under a
+    # section (/us/rog/...): a name with a digit, never CMS pages (/us/id-me-page)
+    "asus": r"^/us/(?:[a-z0-9-]+/)?[a-z0-9][a-z0-9-]*\d[a-z0-9-]*\.html$",
     "acegraphics": _SHOPIFY,
     "adorama": r"^/[A-Za-z0-9]{4,}\.html$",
     "amazon": r"/dp/[A-Z0-9]{10}|/gp/product/[A-Z0-9]{10}",
     "antonline": r"^/[^/]+/.+/\d{5,}/?$",
-    "bhphoto": r"/c/product/\d+-REG/",
+    "bhphoto": r"^/c/product/\d+-REG/[^/?#]+\.html$",  # not .../specs, /print, /ask-question
     "bjs": r"/product/[^/?#]+/\d{8,}",
     "bandai": r"/item/[A-Z]?\d{6,}[A-Z0-9]*",
     "bestbuy": r"/site/.+\.p\?skuId=\d+|/product/.+/sku/\d+",
     "canon": r"/shop/p/[^/?#]+",
-    "consutronix": _SHOPIFY,
+    "consutronix": r"/products?/[^/?#]+|/[^/?#]*\d{4,}[^/?#]*\.html$",  # not Shopify (plain 404 page, 2026-09-29)
     "costco": r"\.product\.\d+\.html|/p/-/",
     "dell": r"/(?:spd|apd)/[^/?#]+",
     "disney": r"-\d{8,}\.html$",
-    "evga": r"/products/product\.aspx\?pn=[\w-]+",
+    "evga": r"/products/product\.aspx(?:\?|\.)pn=[\w-]+",  # ?pn=220-G7-1000-X1 or the rewritten .pn=...html
     "fujifilm": r"^/[a-z0-9]+(?:-[a-z0-9]+){1,}/?$",
     "gamefly": r"/(?:game|product|gear)/[^/?#]+/\d+",
     "gamestop": r"/products/.+/\d+\.html",
     "gigabyte": r"/(?:Graphics-Card|Motherboard|Laptop|Monitor|Gaming-PCs?|Mini-PcBarebone)/(?=[^/?#]*\d)[A-Za-z0-9][\w.-]*/?$",
     "govee": _SHOPIFY,
     "hallmark": r"-[0-9A-Z]{6,}\.html$",
-    "homedepot": r"/p/.+/\d{9}",
+    "homedepot": r"^/p/(?:[^/?#]+/)?\d{9}/?$",
     "jazwares": _SHOPIFY,
     "kohls": r"/product/prd-\d+/",
     "kroger": r"/p/[^/?#]+/\d{10,}",
@@ -1140,23 +1191,31 @@ PRODUCT_PATTERNS: dict[str, str] = {
     "nyxi": _SHOPIFY,
     "neutronusa": _SHOPIFY,
     "newegg": r"/p/(?:N82E\d+|[0-9A-Z]{4}-[0-9A-Z]{4}-[0-9A-Z]{4,5}|[0-9A-Z]{15})",
-    "nextwarehouse": r"/item/\?(?:[^#]*&)?p_num=\d+",
+    "nextwarehouse": r"/item/\?(?:(?:[^#]*&)?p_num=\d+|\d{4,}_\w+)",  # /item/?p_num=123 or /item/?2573476_g10e
     "ninja": r"/pdp/[^/?#]+/[^/?#]+\.html",
     "nintendo": r"/us/store/products/[^/?#]+",
+    # marketplace product pages only (CANDIDATE_HOSTS): /en-us/consumer/graphics-cards/nvidia-geforce-rtx-5090/
     "nvidia": r"/graphics-cards/(?:[a-z0-9-]+/)*[a-z0-9-]*(?:rtx|gtx)-?\d{3,4}[a-z0-9-]*/?$",
     "oculus": r"/quest/[a-z0-9-]+(?:/[a-z0-9-]+)?/?$",
     "officedepot": r"/a/products/\d+/",
     "popmart": r"/products/\d+/",
     "playasia": r"^/[^/?#]+/\d+/[0-9a-z]{6,}/?$",
-    "psdirect": r"/buy-[a-z-]+/[^/?#]+\.\d{7,}",
+    # consoles, accessories and games: /en-us/<section>/<name>.<product code>, and the code-less
+    # /en-us/buy-consoles/playstation5-pro-console-2-tb pages the 2026-09-29 menus link to
+    "psdirect": r"^/en-us/(?:[a-z0-9-]+/)+[a-z0-9-]+\.\d{7,}/?$|^/en-us/buy-[a-z-]+/[a-z0-9-]+/?$",
     "pokemoncenter": r"/product/[\d-]+/[^/?#]+",
     "qvc": r"\.product\.[A-Z]?\d+\.html",
     "robertscamera": r"^/[a-z0-9]+(?:-[a-z0-9]+){3,}/?$",
     "samsclub": r"/ip/(?:.+/)?\d{6,}",
+    # one-segment slugs (stockx.com/nintendo-switch-2-console-us-version), not the site's own sections
+    "stockx": r"^/(?!(?:brands?|category|browse|help|search|login|signup|sell|news|about|live|listings|dp|buy|"
+              r"stockx-gift-card|sneakers|apparel|electronics|collectibles|trading-cards|accessories|"
+              r"retail-price|release-dates?|careers|privacy|terms)(?:[/-]|$))[a-z0-9]+(?:-[a-z0-9]+){2,}/?$",
     "target": r"/p/.+/-/A-\d+",
     "toysrus": _SHOPIFY,
     "verizon": r"/(?:smartphones|tablets|smartwatches|connected-devices|accessories|home-internet)/[^/?#]+/?$",
     "walmart": r"/ip/(?:.+/)?\d{6,}",
+    "ebay": r"^/itm/(?:[^/?#]+/)?\d{9,}/?$",
     "zotac": r"/us/[a-z0-9]+(?:-[a-z0-9]+){2,}/?$",
 }
 GENERIC_PRODUCT_PATTERN = (
@@ -1166,9 +1225,14 @@ SHOPIFY_KEYS = frozenset(k for k, v in PRODUCT_PATTERNS.items() if v == _SHOPIFY
 
 _DENY_PATH = re.compile(
     r"\.(?:jpe?g|png|gif|webp|svg|css|js|json|pdf|xml|gz|zip|ico|mp4|woff2?)$"
-    r"|/(?:cart|checkout|account|login|signin|sign-in|register|wishlist|search|reviews?|gift-cards?)(?:/|$)",
+    r"|/(?:cart|checkout|account|login|signin|sign-in|register|wishlist|search|reviews?|gift-cards?)(?:/|$)"
+    # not stock-watching material: protection / service plans (Micro Center's 2-year-accidental-damage-
+    # protection-plan was picked on 2026-09-29), warranties, gift cards
+    r"|(?:protection|service|replacement|care|damage)[-_]?plans?\b|\bwarrant(?:y|ies)\b|gift[-_]?cards?\b|\be[-_]?gift",
     re.I,
 )
+# a locale segment other than the US one (NVIDIA's /en-sg/ GPU pages were chosen on 2026-09-29)
+_FOREIGN_LOCALE = re.compile(r"^/(?!en[-_]us(?:/|$))[a-z]{2}[-_][a-z]{2}(?:/|$)", re.I)
 _compiled: dict[str, re.Pattern[str]] = {}
 
 
@@ -1194,7 +1258,10 @@ def normalize_candidate(url: str, key: str) -> str | None:
     if r is None or r.key != key:
         return None
     path = parts.path or "/"
-    if _DENY_PATH.search(path):
+    if _DENY_PATH.search(path) or _FOREIGN_LOCALE.search(path):
+        return None
+    hosts = CANDIDATE_HOSTS.get(key)
+    if hosts and parts.hostname.lower() not in hosts:
         return None
     pat = product_pattern(key)
     if pat.search(path):
@@ -1321,14 +1388,32 @@ async def budgeted_get(net: Any, budget: Budget, url: str) -> tuple[int | None, 
     return status, body
 
 
+_LOCALE_PREFIX = re.compile(r"^/((?:[a-z]{2}[-_][a-z]{2}|us)(?:/[a-z]{2})?)/", re.I)
+
+
+def locale_sitemaps(base: str, samples: list[dict] | None) -> list[str]:
+    """``{base}/<locale>/sitemap.xml`` for the locale prefixes of the store's sample URLs on ``base``
+    (Magento / AEM stores such as shop.asus.com/us/ keep their sitemap under the store view)."""
+    out: list[str] = []
+    for smp in samples or []:
+        u = urlsplit(smp.get("url") or "")
+        if f"{u.scheme}://{u.netloc}" != base:
+            continue
+        m = _LOCALE_PREFIX.match(u.path or "")
+        if m and f"{base}/{m.group(1)}/sitemap.xml" not in out:
+            out.append(f"{base}/{m.group(1)}/sitemap.xml")
+    return out
+
+
 async def collect_from_sitemaps(net: Any, budget: Budget, base: str, key: str, pool: dict[str, str | None],
-                                notes: list[str], *, want: int = POOL_TARGET, max_leaves: int = MAX_LEAF_SITEMAPS) -> int:
+                                notes: list[str], *, want: int = POOL_TARGET, max_leaves: int = MAX_LEAF_SITEMAPS,
+                                extra_seeds: list[str] | None = None) -> int:
     """Read ``base``'s sitemaps and add matching product URLs to ``pool`` ({url: lastmod}).
     Returns how many were added."""
     start = len(pool)
     status, body = await budgeted_get(net, budget, f"{base}/robots.txt")
     seeds = parse_robots_sitemaps(body.decode("utf-8", "replace"), base) if status == 200 else []
-    for extra in (f"{base}/sitemap.xml", f"{base}/sitemap_index.xml"):
+    for extra in (f"{base}/sitemap.xml", f"{base}/sitemap_index.xml", *(extra_seeds or [])):
         if extra not in seeds:
             seeds.append(extra)
     queue: list[tuple[str, int]] = [(u, 0) for u in seeds]
@@ -1420,8 +1505,12 @@ def extract_links(html: str, base: str) -> list[str]:
 
 
 _LISTING_HINT = re.compile(
-    r"/(?:collections?|c|category|categories|browse|shop|deals|new|new-arrivals|best-?sellers?|gaming|toys|"
-    r"video-games|electronics|cameras|graphics-cards|consoles|laptops|tvs|products)(?:/|$)", re.I)
+    r"/(?:collections?|c|b|category|categories|browse|shop|deals|new|new-arrivals|best-?sellers?|gaming|toys|"
+    r"video-games|electronics|cameras|graphics-cards|consoles|laptops|tvs|products|accessories|hardware)(?:/|$)"
+    # HTML sitemaps and old-style listing pages (NextWarehouse /sitemap.cfm, /categoryList.cfm, /mfg_browse.html;
+    # EVGA /products/productlist.aspx.type=10.html; PS Direct /en-us/sitemap)
+    r"|/[^/]*(?:sitemap|categorylist|productlist|mfg_browse)[^/]*$", re.I)
+_HTML_SITEMAP = re.compile(r"sitemap", re.I)
 
 
 def pick_listing_links(links: list[str], key: str, limit: int = 2) -> list[str]:
@@ -1434,22 +1523,39 @@ def pick_listing_links(links: list[str], key: str, limit: int = 2) -> list[str]:
         except ValueError:
             continue
         r = registry.match_retailer(u)
-        if r is None or r.key != key or parts.query or _DENY_PATH.search(parts.path):
+        if r is None or r.key != key or parts.query or _DENY_PATH.search(parts.path) \
+                or _FOREIGN_LOCALE.search(parts.path):
             continue
         if _LISTING_HINT.search(parts.path) and not product_pattern(key).search(parts.path):
             u2 = urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
             if u2 not in out:
                 out.append(u2)
-        if len(out) >= limit:
-            break
-    return out
+    # an HTML sitemap lists every product: open it first
+    out.sort(key=lambda u: 0 if _HTML_SITEMAP.search(urlsplit(u).path) else 1)
+    return out[:limit]
+
+
+def _origin(url: str) -> str:
+    p = urlsplit(url)
+    return f"{p.scheme}://{p.netloc}"
 
 
 async def collect_from_pages(net: Any, budget: Budget, base: str, key: str, pool: dict[str, str | None],
-                             notes: list[str]) -> int:
-    """Open the homepage (in the real browser) and collect product links; when it shows none, up to two
-    listing pages linked from it."""
+                             notes: list[str], seeds: list[str] | None = None, *, want: int = 12) -> int:
+    """Open pages in the real browser and collect product links: ``seeds`` first (the store's own listing /
+    search pages, then its current sample pages — a stale product page still links to live ones), then the
+    homepage; when the homepage shows none, up to two listing pages (an HTML sitemap first) linked from it.
+    Stops once ``want`` product links are known."""
     start = len(pool)
+
+    def harvest(links: list[str]) -> int:
+        n = 0
+        for u in links:
+            cand = normalize_candidate(u, key)
+            if cand and cand not in pool:
+                pool[cand] = None
+                n += 1
+        return n
 
     async def page(url: str) -> str:
         if not budget.left:
@@ -1463,22 +1569,21 @@ async def collect_from_pages(net: Any, budget: Budget, base: str, key: str, pool
         budget.bytes += len(html or "")
         return html or ""
 
+    for seed in seeds or []:
+        if len(pool) - start >= want or not budget.left:
+            break
+        harvest(extract_links(await page(seed), _origin(seed)))
+    if len(pool) - start >= want:
+        return len(pool) - start
     html = await page(f"{base}/")
     links = extract_links(html, base)
-    for u in links:
-        cand = normalize_candidate(u, key)
-        if cand and cand not in pool:
-            pool[cand] = None
-    if len(pool) == start and links:
+    found = harvest(links)
+    if not found and links:
         for listing in pick_listing_links(links, key):
-            for u in extract_links(await page(listing), base):
-                cand = normalize_candidate(u, key)
-                if cand and cand not in pool:
-                    pool[cand] = None
-            if len(pool) > start:
+            if harvest(extract_links(await page(listing), base)):
                 break
     if len(pool) == start:
-        notes.append("homepage: no product links found")
+        notes.append("pages: no product links found" if seeds else "homepage: no product links found")
     return len(pool) - start
 
 
@@ -1554,16 +1659,27 @@ class StoreResult:
 
 
 def store_bases(retailer: Any, samples: list[dict] | None) -> list[str]:
-    """Origins to look for sitemaps on: the hosts of the store's current sample URLs, else its registry host."""
+    """Origins to look for sitemaps on: DISCOVER_BASES, else the hosts of the store's current sample URLs, else
+    its registry host."""
+    if retailer.key in DISCOVER_BASES:
+        return list(DISCOVER_BASES[retailer.key])
     bases: list[str] = []
     for s in samples or []:
         host = urlsplit(s.get("url") or "").hostname
+        if host and CANDIDATE_HOSTS.get(retailer.key) and host not in CANDIDATE_HOSTS[retailer.key]:
+            continue
         if host and f"https://{host}" not in bases:
             bases.append(f"https://{host}")
     if not bases:
         host = retailer.hosts[0]
         bases.append(f"https://{'www.' + host if host.count('.') == 1 else host}")
     return bases[:2]
+
+
+def registry_key(url: str) -> str | None:
+    _, _, registry = backend()
+    r = registry.match_retailer(url)
+    return r.key if r is not None else None
 
 
 async def verify_url(url: str, retailer_config: dict | None = None) -> dict:
@@ -1590,15 +1706,26 @@ async def discover_store(retailer: Any, samples: list[dict] | None, net: Any, *,
 
     async def gather_pool() -> None:
         bases = store_bases(retailer, samples)
-        for base in bases:
-            if await collect_from_sitemaps(net, budget, base, key, pool, res.notes) and "sitemap" not in sources:
-                sources.append("sitemap")
+        if key not in NO_SITEMAP:
+            for base in bases:
+                if await collect_from_sitemaps(net, budget, base, key, pool, res.notes,
+                                               extra_seeds=locale_sitemaps(base, samples)) \
+                        and "sitemap" not in sources:
+                    sources.append("sitemap")
         if len(pool) < max_tries and key in SHOPIFY_KEYS:
             if await collect_from_shopify(net, budget, bases[0], key, pool):
                 sources.append("shopify")
         if len(pool) < max_tries:
-            if await collect_from_pages(net, budget, bases[0], key, pool, res.notes):
-                sources.append("homepage")
+            # the store's listing / search pages, then its current sample pages (stale ones included: they
+            # still link to live products), then the homepage — on their own, smaller budget
+            seeds = list(DISCOVER_SEEDS.get(key, []))
+            for smp in samples or []:
+                u = smp.get("url")
+                if u and u not in seeds and registry_key(u) == key:
+                    seeds.append(u)
+            if await collect_from_pages(net, Budget(max_requests=MAX_PAGE_REQUESTS), bases[0], key, pool, res.notes,
+                                        seeds):
+                sources.append("pages" if seeds else "homepage")
 
     try:
         await asyncio.wait_for(gather_pool(), timeout=max(1.0, time_cap * 0.6))
@@ -1669,8 +1796,13 @@ class LiveNet:
                 blocked = resp.status_code in (403, 429, 503) or fetcher.looks_like_challenge(head)
                 if resp.status_code in (404, 410):
                     return resp.status_code, b""
+                is_html = head.lstrip()[:15].lower().startswith(("<!doctype html", "<html"))
+                if is_html and self._walled(url):
+                    # a bot-walled store (Home Depot's Akamai "Oops!! Something went wrong", B&H...) answering
+                    # a sitemap with an HTML page: that's the wall, not a missing file — ask the browser
+                    blocked = True
                 if not blocked:
-                    if head.lstrip()[:15].lower().startswith(("<!doctype html", "<html")):
+                    if is_html:
                         return 404, b""  # an HTML page where XML/text was expected: soft 404
                     return resp.status_code, (body if resp.status_code < 400 else b"")
         if fetcher.browser_enabled():
@@ -1682,6 +1814,13 @@ class LiveNet:
                 return None, b""
             return status, text.encode("utf-8", "replace")
         return (resp.status_code if resp is not None else None), b""
+
+    @staticmethod
+    def _walled(url: str) -> bool:
+        """Stores the registry marks as needing the real browser."""
+        _, _, registry = backend()
+        r = registry.match_retailer(url)
+        return bool(r is not None and getattr(r, "browser", False))
 
     async def page(self, url: str) -> str:
         _, fetcher, _ = backend()
@@ -1750,7 +1889,7 @@ def merge_sites(raw: dict, results: list[StoreResult], *, when: dt.date | None =
     out = {k: v for k, v in doc.items() if k.startswith("_")}
     out["_comment"] = (f"Discovered {when.isoformat()} by `probe.py discover` for {len(changed)} store(s): real product URLs "
                f"from sitemaps / the storefront, verified with the real checker (in-stock and sold-out mixed). "
-               f"Stores it skips (ebay, stockx) keep hand-picked samples.")
+               f"Stores it finds nothing for keep their previous samples.")
     out["sites"] = sites
     return out
 
@@ -1941,7 +2080,7 @@ def cmd_check(a: argparse.Namespace) -> int:
     for s in results:
         print(format_summary(s))
         print()
-    return 0 if all(s.get("verdict") == "OK" for s in results) else 1
+    return 0 if all(s.get("verdict") in PASSING for s in results) else 1
 
 
 def _discover_args(a: argparse.Namespace) -> dict:
