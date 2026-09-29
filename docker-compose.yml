@@ -8,7 +8,7 @@ services:
     volumes:
       - /volume2/stock-watcher/data:/data
     environment:
-      TZ: America/Chicago  # Change to your timezone
+      TZ: America/New_York  # Change to your timezone
       COOKIE_SECURE: "true"  # Set to false only for plain HTTP on LAN
       # SECRET_KEY: ""  # Optional; otherwise generated and stored in /data/secret.key
     labels:

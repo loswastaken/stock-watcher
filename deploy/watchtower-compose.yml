@@ -13,5 +13,5 @@ services:
       WATCHTOWER_LABEL_ENABLE: "true"
       WATCHTOWER_CLEANUP: "true"
       WATCHTOWER_INCLUDE_RESTARTING: "true"
-      TZ: America/Chicago  # Change to your timezone
+      TZ: America/New_York  # Change to your timezone
       # WATCHTOWER_NOTIFICATION_URL: "ntfy://ntfy.sh/your-topic"  # ntfy ping on updates
