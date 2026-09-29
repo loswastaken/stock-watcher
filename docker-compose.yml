@@ -1,0 +1,30 @@
+services:
+  stock-watcher:
+    image: ghcr.io/loswastaken/stock-watcher:latest
+    container_name: stock-watcher
+    restart: unless-stopped
+    ports:
+      - "8080:8000"
+    volumes:
+      - /volume1/docker/stock-watcher/data:/data
+    environment:
+      TZ: America/Chicago  # Change to your timezone
+      COOKIE_SECURE: "true"  # Set to false only for plain HTTP on LAN
+      # SECRET_KEY: ""  # Uncomment to set a persistent secret key
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
+    shm_size: 1gb  # Required for Chromium in Playwright
+
+  watchtower:
+    image: containrrr/watchtower:latest
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /volume1/docker/watchtower/config.json:/config.json:ro
+    environment:
+      WATCHTOWER_POLL_INTERVAL: "300"
+      WATCHTOWER_LABEL_ENABLE: "true"
+      WATCHTOWER_CLEANUP: "true"
+      WATCHTOWER_INCLUDE_RESTARTING: "true"
+      TZ: America/Chicago  # Change to your timezone
+      # WATCHTOWER_NOTIFICATION_URL: "ntfy://ntfy.sh/your-topic"  # Uncomment for ntfy notifications
