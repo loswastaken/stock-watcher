@@ -31,8 +31,26 @@ def keys(res):
 
 # ------------------------------------------------------------------ parse_fulfillment
 
-def test_mixed_pickup_and_courier():
+def test_pickup_today_only_is_default():
     r = parse_fulfillment(load_json("apple_fulfillment_mixed.json"), [A, B], LABELS, 25, True, True)
+    # Stanford is "available tomorrow": shown in the store table, but not an alert.
+    assert keys(r) == [f"pickup:R014:{A}", f"delivery2h:{A}"]
+    assert r.status_text == "Pickup at 1 store · 2h delivery"
+    stanford = next(s for s in r.detail["stores"] if s["store_number"] == "R033")
+    assert [(p["available"], p["today"]) for p in stanford["parts"] if p["part_number"] == B] == [(True, False)]
+
+
+@pytest.mark.parametrize("quote,today", [
+    ("Available Today", True), ("Today", True), ("Available", True), (None, True),
+    ("Available Tomorrow", False), ("Available Oct 3", False), ("Available Fri, Oct 3", False),
+])
+def test_pickup_is_today(quote, today):
+    assert apple._pickup_is_today(quote) is today
+
+
+def test_mixed_pickup_and_courier():
+    r = parse_fulfillment(load_json("apple_fulfillment_mixed.json"), [A, B], LABELS, 25, True, True,
+                          pickup_today_only=False)
     assert r.status == "in_stock"
     assert r.status_text == "Pickup at 2 stores · 2h delivery"
     assert keys(r) == [f"pickup:R014:{A}", f"pickup:R033:{B}", f"delivery2h:{A}"]
@@ -49,8 +67,8 @@ def test_mixed_pickup_and_courier():
     assert vf == {
         "store_number": "R014", "name": "Valley Fair", "city": "Santa Clara", "distance_miles": 3.2,
         "parts": [
-            {"part_number": A, "label": "256GB Cosmic Orange", "available": True, "quote": "Available Today", "display": "available"},
-            {"part_number": B, "label": "256GB Deep Blue", "available": False, "quote": "Currently unavailable", "display": "unavailable"},
+            {"part_number": A, "label": "256GB Cosmic Orange", "available": True, "today": True, "quote": "Available Today", "display": "available"},
+            {"part_number": B, "label": "256GB Deep Blue", "available": False, "today": False, "quote": "Currently unavailable", "display": "unavailable"},
         ],
     }
     delivery = {d["part_number"]: d for d in r.detail["delivery"]}
@@ -288,7 +306,7 @@ async def test_many_parts_are_chunked_and_merged(monkeypatch):
         return httpx.Response(200, json=body)
 
     route = respx.route(**FULFILL).mock(side_effect=responder)
-    r = await check_apple(PRODUCT_URL, {"parts": [A, B], "zip": "95014"})
+    r = await check_apple(PRODUCT_URL, {"parts": [A, B], "zip": "95014", "pickup_today_only": False})
     assert route.call_count == 2
     assert keys(r) == [f"pickup:R014:{A}", f"pickup:R033:{B}", f"delivery2h:{A}"]
 
@@ -346,3 +364,23 @@ async def test_resolve_apple_failure_returns_url_part():
 
 async def test_resolve_non_apple_url_is_empty():
     assert (await apple.resolve_apple("https://example.com/x"))["variants"] == []
+
+
+@respx.mock
+async def test_after_block_next_check_goes_straight_to_browser(monkeypatch):
+    monkeypatch.setenv("ENABLE_BROWSER", "true")
+    _mock_warmup()
+    route = respx.route(**FULFILL).mock(return_value=httpx.Response(541, text=""))
+    calls = []
+
+    async def fake_from_page(page_url, target_url, accept="application/json"):
+        calls.append(target_url)
+        return 200, load("apple_fulfillment_mixed.json"), []
+
+    monkeypatch.setattr(fetcher, "browser_fetch_from_page", fake_from_page)
+    await check_apple(PRODUCT_URL, {"parts": [A], "zip": "95014"})
+    assert route.call_count == 1 and len(calls) == 1
+    apple._cache.clear()
+    r = await check_apple(PRODUCT_URL, {"parts": [A], "zip": "95014"})
+    assert route.call_count == 1 and len(calls) == 2
+    assert r.status == "in_stock"

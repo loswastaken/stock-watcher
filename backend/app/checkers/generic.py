@@ -395,7 +395,8 @@ def extract_micro_rdfa(html: str, url: str) -> tuple[list, list]:
     want = []
     if re.search(r"\bitemscope\b", html, re.I):
         want.append("microdata")
-    if re.search(r"\btypeof\s*=", html, re.I):
+    # RDFa parsing (rdflib) is slow; only run it when schema.org RDFa is plausibly present.
+    if re.search(r"\btypeof\s*=", html, re.I) and re.search(r"schema\.org|\bschema:", html, re.I) and len(html) < 3_000_000:
         want.append("rdfa")
     if not want:
         return micro, rdfa

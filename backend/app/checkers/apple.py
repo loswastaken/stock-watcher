@@ -112,16 +112,6 @@ def _dig(d: Any, *path: str) -> Any:
     return cur
 
 
-def _truthy(v: Any) -> bool:
-    if isinstance(v, bool):
-        return v
-    if isinstance(v, str):
-        return v.strip().lower() in {"true", "yes", "1", "available"}
-    if isinstance(v, (int, float)):
-        return v != 0
-    return False
-
-
 def _distance_miles(store: dict) -> float | None:
     for k in ("storedistance", "storeDistance", "distance"):
         v = _get_ci(store, k)
@@ -177,6 +167,23 @@ def _pickup_available(info: dict, quote: str | None) -> tuple[bool, str]:
     if quote and _AVAILABLE_QUOTE_RE.search(quote) and not _UNAVAILABLE_QUOTE_RE.search(quote):
         return True, "available"
     return False, "unavailable" if quote else "unknown"
+
+
+_TODAY_QUOTE_RE = re.compile(r"\b(today|now)\b", re.I)
+_FUTURE_QUOTE_RE = re.compile(
+    r"\btomorrow\b|\b(mon|tue|wed|thu|fri|sat|sun)[a-z]*\b|\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\b|\d",
+    re.I,
+)
+
+
+def _pickup_is_today(quote: str | None) -> bool:
+    """True unless the quote names a later day ("Tomorrow", "Available Oct 3").
+
+    An available store with no quote, or a bare "Available", is treated as same-day.
+    """
+    if not quote or _TODAY_QUOTE_RE.search(quote):
+        return True
+    return not _FUTURE_QUOTE_RE.search(quote)
 
 
 def _pickup_title(info: dict) -> str | None:
@@ -324,6 +331,7 @@ def parse_fulfillment(
     max_distance: float | None = 25,
     watch_pickup: bool = True,
     watch_delivery: bool = True,
+    pickup_today_only: bool = True,
 ) -> CheckResult:
     """Turn a fulfillment-messages JSON payload into a CheckResult (pure, no I/O)."""
     part_labels = dict(part_labels or {})
@@ -369,9 +377,10 @@ def parse_fulfillment(
             label = part_labels.get(part) or title or part
             quote = _pickup_quote(info)
             ok, display = _pickup_available(info, quote) if info else (False, "unknown")
-            store_parts.append({"part_number": part, "label": label, "available": ok,
+            today = ok and _pickup_is_today(quote)
+            store_parts.append({"part_number": part, "label": label, "available": ok, "today": today,
                                 "quote": quote, "display": display})
-            if ok and watch_pickup:
+            if ok and watch_pickup and (today or not pickup_today_only):
                 stores_with_pickup.add(number)
                 available.append(Availability(key=f"pickup:{number}:{part}",
                                               label=_pickup_label(quote, name, dist, label)))
@@ -637,6 +646,7 @@ class AppleConfig:
     max_distance_miles: float | None = 25
     watch_pickup: bool = True
     watch_delivery: bool = True
+    pickup_today_only: bool = True
 
     @classmethod
     def from_dict(cls, d: dict | None) -> "AppleConfig":
@@ -659,9 +669,10 @@ class AppleConfig:
             md = float(md) if md not in (None, "") else None
         except (TypeError, ValueError):
             md = 25.0
-        wp, wd = d.get("watch_pickup"), d.get("watch_delivery")
+        wp, wd, pt = d.get("watch_pickup"), d.get("watch_delivery"), d.get("pickup_today_only")
         return cls(parts=parts, labels=labels, zip=normalize_zip(d.get("zip")), max_distance_miles=md,
-                   watch_pickup=True if wp is None else bool(wp), watch_delivery=True if wd is None else bool(wd))
+                   watch_pickup=True if wp is None else bool(wp), watch_delivery=True if wd is None else bool(wd),
+                   pickup_today_only=True if pt is None else bool(pt))
 
 
 async def check_apple(url: str, apple_config: dict | None) -> CheckResult:
@@ -675,7 +686,8 @@ async def check_apple(url: str, apple_config: dict | None) -> CheckResult:
         data = await fetch_fulfillment(cfg.parts, cfg.zip, referer=url)
     except (AppleError, FetchError) as e:
         return CheckResult(status="error", status_text="Apple check failed", error=str(e))
-    result = parse_fulfillment(data, cfg.parts, cfg.labels, cfg.max_distance_miles, cfg.watch_pickup, cfg.watch_delivery)
+    result = parse_fulfillment(data, cfg.parts, cfg.labels, cfg.max_distance_miles, cfg.watch_pickup,
+                               cfg.watch_delivery, cfg.pickup_today_only)
     result.detail["zip"] = cfg.zip
     return result
 
@@ -969,7 +981,7 @@ async def resolve_apple(url: str) -> dict:
 
 
 async def shutdown() -> None:
-    global _sess
+    global _sess, _prefer_browser_until
     s = _sess
     same = False
     with contextlib.suppress(RuntimeError):
@@ -977,7 +989,6 @@ async def shutdown() -> None:
     if same and s.client is not None:
         with contextlib.suppress(Exception):
             await s.client.aclose()
-    global _prefer_browser_until
     _sess = _AppleSession()
     _cache.clear()
     _prefer_browser_until = 0.0

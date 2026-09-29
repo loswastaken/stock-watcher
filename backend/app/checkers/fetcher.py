@@ -247,11 +247,15 @@ async def fetch_html(
     use_browser = browser_enabled()
     if use_browser and (render_js or _host_prefers_browser(url)):
         try:
-            return await browser_fetch(url)
+            bres = await browser_fetch(url)
+            if not looks_like_challenge(bres.text):
+                return bres
+            if render_js:
+                raise FetchError(f"Blocked by bot protection on {host_of(url)}", status=bres.status)
         except FetchError:
             if render_js:
                 raise
-            # host preference was only a hint; try plain HTTP below
+        # host preference was only a hint; try plain HTTP below
 
     resp = await http_get(url)
     text = resp.text if resp.content else ""

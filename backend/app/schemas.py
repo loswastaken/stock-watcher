@@ -187,6 +187,7 @@ class AppleConfig(BaseModel):
     zip: str | None = Field(default=None, max_length=16)
     max_distance_miles: float = Field(default=25, ge=1, le=500)
     watch_pickup: bool = True
+    pickup_today_only: bool = True
     watch_delivery: bool = True
 
 
