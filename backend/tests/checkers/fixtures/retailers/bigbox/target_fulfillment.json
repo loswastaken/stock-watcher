@@ -1,0 +1,9 @@
+{"data":{"product":{"tcin":"89444444","fulfillment":{"product_id":"89444444","is_out_of_stock_in_all_store_locations":false,
+"sold_out":false,
+"shipping_options":{"availability_status":"IN_STOCK","loyalty_availability_status":"IN_STOCK","available_to_promise_quantity":40.0},
+"store_options":[
+ {"location_id":"1234","location_name":"Oak Park","location_address":"1129 Madison St","location_available_to_promise_quantity":3.0,
+  "order_pickup":{"availability_status":"IN_STOCK","pickup_date":"2026-09-29"},"in_store_only":{"availability_status":"IN_STOCK"}},
+ {"location_id":"2345","location_name":"Forest Park","location_available_to_promise_quantity":0.0,
+  "order_pickup":{"availability_status":"UNAVAILABLE"},"in_store_only":{"availability_status":"OUT_OF_STOCK"}}
+]}}}}

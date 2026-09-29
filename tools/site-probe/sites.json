@@ -89,7 +89,7 @@
       {"url": "https://www.target.com/p/pokemon-trading-card-game-scarlet-38-violet-prismatic-evolutions-elite-trainer-box/-/A-93954435",
        "retailer_config": {"fulfillment": "pickup", "zip": "60601", "radius_miles": 25}, "note": "store pickup near ZIP"}
     ],
-    "toysrus": ["https://www.macys.com/shop/product/toys-r-us-geoffrey-plush?ID=12345678"],
+    "toysrus": ["https://www.toysrus.com/"],
     "verizon": ["https://www.verizon.com/smartphones/apple-iphone-17-pro/"],
     "walmart": [
       "https://www.walmart.com/ip/PlayStation-5-Pro-Console/5113183757",

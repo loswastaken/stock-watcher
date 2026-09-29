@@ -1,0 +1,4 @@
+{"data":[
+ {"locationId":"01400943","chain":"KROGER","name":"Kroger - Hyde Park Plaza","address":{"addressLine1":"3760 Paxton Ave","city":"Cincinnati","state":"OH","zipCode":"45209"},"geolocation":{"latitude":39.15,"longitude":-84.43}},
+ {"locationId":"01400376","chain":"KROGER","name":"Kroger - Oakley","address":{"addressLine1":"3000 Madison Rd"}}],
+ "meta":{"pagination":{"start":0,"limit":5,"total":2}}}
