@@ -7,10 +7,11 @@ Every adapter returns a ``CheckResult`` or None (platform recipes + generic chec
 from __future__ import annotations
 
 import re
+import time
 from typing import Any
 from urllib.parse import parse_qs, parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
-from .. import fetcher
+from .. import fetcher, generic
 from ..base import Availability, CheckResult
 from ..fetcher import FetchError
 from ..util import clean_text
@@ -205,11 +206,56 @@ def _nv_status(s: Any) -> str | None:
     return None
 
 
+NV_INFO_TEXT = "Info page — track the marketplace/FE listing"
+_NV_FE_SKU_RE = re.compile(r"\bNVGFT\d{3}[A-Z0-9]*\b")
+_NV_MPN_RE = re.compile(r'"mpn"\s*:\s*"([A-Z0-9_]{5,30})"')
+_nv_page_cache: dict[str, tuple[float, dict]] = {}
+NV_PAGE_TTL = 12 * 3600
+
+
+def _nv_is_store_host(url: str) -> bool:
+    host = fetcher.host_of(url)
+    return host.startswith(("marketplace.", "store.")) and host.endswith("nvidia.com")
+
+
+def _nv_guess_fe_sku(gpu: str | None) -> str | None:
+    """Founders Edition SKUs follow NVGFT + model digits (RTX 5090 → NVGFT590, as the marketplace page's
+    JSON-LD ``mpn`` shows). Only plain models have an FE; Ti/Super guesses are not made."""
+    m = re.fullmatch(r"RTX (\d)\d(\d{2})", gpu or "")
+    return f"NVGFT{m.group(1)}{m.group(2)}" if m else None
+
+
+async def _nv_page_info(url: str) -> dict:
+    """{"sku", "title", "image", "price"} from a marketplace product page's JSON-LD (cached)."""
+    hit = _nv_page_cache.get(url)
+    if hit and hit[0] > time.monotonic():
+        return hit[1]
+    info: dict[str, Any] = {}
+    try:
+        fetched = await fetcher.fetch_html(url, needs=None)
+    except FetchError:
+        return info
+    html = fetched.text or ""
+    m = _NV_MPN_RE.search(html) or _NV_FE_SKU_RE.search(html)
+    if m:
+        info["sku"] = (m.group(1) if m.re is _NV_MPN_RE else m.group(0)).upper()
+    g = generic.analyze(html, url, None, base_url=fetched.url)
+    info.update(title=g.title, image=g.image_url, price=g.price)
+    _nv_page_cache[url] = (time.monotonic() + NV_PAGE_TTL, info)
+    return info
+
+
 async def nvidia(url: str, ctx: AdapterContext) -> CheckResult | None:
+    """Founders Edition stock from NVIDIA's ``feinventory`` API. The SKU comes from ``?sku=`` / the item's
+    store_id, the partner search API, the marketplace page's JSON-LD ``mpn`` (e.g. NVGFT590), or — for a
+    www.nvidia.com GPU page — the FE naming scheme. www.nvidia.com pages are spec/marketing pages (their
+    JSON-LD says InStock at MSRP whatever the stock), so they are never judged from the page itself."""
     locale = _nv_locale(url)
     sku = _nv_sku(url, ctx)
     gpu = nvidia_gpu(url)
+    info_page = not _nv_is_store_host(url)
     product: dict | None = None
+    guessed = False
     if gpu:
         try:
             data = await rbase.get_json(NV_SEARCH.format(locale=locale, gpu=quote(gpu)), headers=_NV_HEADERS)
@@ -218,24 +264,36 @@ async def nvidia(url: str, ctx: AdapterContext) -> CheckResult | None:
         product = _nv_pick(data, gpu, sku)
         if product and not sku:
             sku = str(product.get("productSKU") or "").strip().upper() or None
+    page: dict = {}
+    if not sku and not info_page:
+        page = await _nv_page_info(url)
+        sku = page.get("sku")
+    if not sku and gpu:
+        sku, guessed = _nv_guess_fe_sku(gpu), True
     if not sku:
+        if info_page and gpu:
+            return finish(result(None, NV_INFO_TEXT, detail={"gpu": gpu, "info_only": True}), ctx)
         return None
 
-    title = clean_text(product.get("productTitle")) if product else None
-    image = product.get("imageURL") if product else None
-    price: Any = product.get("productPrice") if product else None
+    title = (clean_text(product.get("productTitle")) if product else None) or page.get("title")
+    image = (product.get("imageURL") if product else None) or page.get("image")
+    price: Any = (product.get("productPrice") if product else None) or page.get("price")
     detail: dict[str, Any] = {"sku": sku, "gpu": gpu}
+    if guessed:
+        detail["sku_guessed"] = True
     try:
         inv = await rbase.get_json(NV_INVENTORY.format(sku=quote(sku), locale=locale), headers=_NV_HEADERS)
     except FetchError:
         inv = None
-    rows = [r for r in (dig(inv, "listMap") or []) if isinstance(r, dict)]
+    rows = [r for r in (dig(inv, "listMap") or []) if isinstance(r, dict)
+            and str(r.get("fe_sku") or sku).upper().startswith(sku)]  # never another SKU's row
     if rows:
         active = [r for r in rows if str(r.get("is_active")).strip().lower() == "true"]
         row = (active or rows)[0]
         price = row.get("price") or price
         link = row.get("product_url") or None
         seller = "Best Buy" if link and "bestbuy.com" in link else "NVIDIA"
+        title = title or (f"NVIDIA GeForce {gpu} Founders Edition" if gpu else None)
         detail.update(fe_sku=row.get("fe_sku"), matched=f"feinventory is_active={row.get('is_active')}",
                       seller=seller, third_party=False, source="feinventory")
         if active:
@@ -254,13 +312,20 @@ async def nvidia(url: str, ctx: AdapterContext) -> CheckResult | None:
             detail["cart_url"] = link
         detail.update(matched=f"product search prdStatus={product.get('prdStatus')}", seller="NVIDIA",
                       third_party=False, source="search")
-        if verdict is None:
-            return None
-        text = "In stock" if verdict == "in" else (
-            "Retailers only (check availability)" if str(product.get("prdStatus")).lower() == "check_availability"
-            else "Out of stock")
-        return finish(result(verdict, text, price=price, title=title, image_url=image, detail=detail), ctx)
-    return None
+        if verdict is not None:
+            text = "In stock" if verdict == "in" else (
+                "Retailers only (check availability)" if str(product.get("prdStatus")).lower() == "check_availability"
+                else "Out of stock")
+            return finish(result(verdict, text, price=price, title=title, image_url=image, detail=detail), ctx)
+    if info_page:
+        detail["info_only"] = True
+        return finish(result(None, NV_INFO_TEXT, title=title, image_url=image, detail=detail), ctx)
+    if guessed:
+        return None
+    # a known FE SKU (pinned, or the marketplace page's own) whose inventory didn't answer
+    detail["matched"] = "feinventory: no answer for this SKU"
+    return finish(result(None, "NVIDIA didn't report Founders Edition stock", price=price, title=title,
+                         image_url=image, detail=detail), ctx)
 
 
 def _nv_pick(data: Any, gpu: str, sku: str | None) -> dict | None:
@@ -510,8 +575,11 @@ def _amd_dom(view: PageView) -> Hit | None:
 
 
 async def amd(url: str, ctx: AdapterContext) -> CheckResult | None:
+    if fetcher.host_of(url).startswith("shop-"):
+        return None  # AMD's store (shop-us-en.amd.com, where direct-buy links now land): platform recipes
     if not re.search(r"/direct-buy/", url, re.I):
-        return None  # amd.com product-info pages: let the generic checker look
+        # amd.com product pages are spec sheets (AMD sells through retailers / its direct-buy store)
+        return await _info_or_shop(url, ctx)
     return await _store_page(url, ctx, dom=_amd_dom)
 
 
@@ -541,8 +609,42 @@ LEICA_RULES = [
 ]
 
 
+def _leica_shop_link(html: str, base: str) -> str | None:
+    """leica-camera.com product pages are brand pages; their hero "Shop now" button (``a.online-shop``)
+    goes to the country's online store (leicacamerausa.com for en-US)."""
+    soup = rbase.soup_of(html)
+    for a in soup.select("a.online-shop[href], a[data-gtm-label='Shop now'][href]"):
+        href = str(a.get("href") or "").strip()
+        host = fetcher.host_of(href)
+        if href.startswith("https://") and host and not host.endswith("leica-camera.com"):
+            return href
+    return None
+
+
 async def leica(url: str, ctx: AdapterContext) -> CheckResult | None:
-    return await _store_page(url, ctx, rules=LEICA_RULES)
+    host = fetcher.host_of(url)
+    if not host.endswith("leica-camera.com"):
+        return await _store_page(url, ctx, rules=LEICA_RULES)
+    fetched = await fetch_page(url, ctx)
+    if is_queued(fetched):
+        return queue_result(ctx)
+    res = analyze_page(fetched.text, url, ctx, fetched.url, rules=LEICA_RULES)
+    if res is None or res.status == "error" or (res.status != "unknown" and _sells_here(res)):
+        return res
+    shop = _leica_shop_link(fetched.text, fetched.url)
+    if shop:
+        try:
+            followed = await generic.check_generic(shop, ctx.generic_config)
+        except FetchError as e:
+            info = result(None, f"Sold at {fetcher.host_of(shop)} (couldn't check it: {e})"[:200], title=res.title,
+                          image_url=res.image_url, detail={"followed": shop, "info_only": True})
+            return finish(info, ctx)
+        followed.title = followed.title or res.title
+        followed.image_url = followed.image_url or res.image_url
+        return finish(followed, ctx, followed=shop, seller="Leica Store", third_party=False)
+    info = result(None, NO_DIRECT_SALES, title=res.title, image_url=res.image_url,
+                  detail={"signals": res.detail.get("signals", []), "matched": None, "info_only": True})
+    return finish(info, ctx)
 
 
 LENOVO_RULES = [

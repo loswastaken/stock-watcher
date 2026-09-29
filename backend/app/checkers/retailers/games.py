@@ -270,6 +270,18 @@ def _popmart_price(sku: dict) -> float | None:
     return None
 
 
+# A spuId that is no longer sold renders the product's SEO title over this notice + "BACK TO HOMEPAGE"
+# (the same sentence also sits in the i18n bundle of every page, so only a rendered element counts).
+_PM_EMPTY_RE = re.compile(r"\bthe\s+product\s+you\s+are\s+looking\s+for\s+is\s+not\s+available\b", re.I)
+
+
+def _popmart_unavailable(view: PageView) -> bool:
+    for node in view.soup.find_all(string=_PM_EMPTY_RE):
+        if node.parent is not None and node.parent.name not in ("script", "style", "template", "noscript"):
+            return True
+    return False
+
+
 async def popmart(url: str, ctx: AdapterContext) -> CheckResult | None:
     fetched = await fetch_page(url, ctx)
     if is_queued(fetched):
@@ -279,6 +291,9 @@ async def popmart(url: str, ctx: AdapterContext) -> CheckResult | None:
 
     def dom(view: PageView) -> Hit | None:
         if not skus:
+            if _popmart_unavailable(view):
+                return Hit("out", "Not available (removed from sale)",
+                           "text: 'The product you are looking for is not available'", seller_detail(ctx, "POP MART"))
             return None
         considered = [s for s in skus if pin and str(s.get("id")) == pin] or skus
         counts = []

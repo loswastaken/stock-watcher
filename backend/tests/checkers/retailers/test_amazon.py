@@ -63,12 +63,51 @@ async def test_third_party_buy_box(monkeypatch):
     assert res.status == "in_stock" and res.status_text == "Only 3 left in stock"
 
 
-async def test_only_see_all_buying_options(monkeypatch):
+def serve_aod(monkeypatch, html: str | None, status: int = 200) -> list:
+    """The "See All Buying Options" offer list (``aodAjaxMain``); ``None`` = the request fails."""
+    import httpx
+
+    calls: list = []
+
+    async def fake(url, *, headers=None, client=None):
+        calls.append(url)
+        if html is None:
+            raise FetchError("Network error: ConnectError")
+        return httpx.Response(status, text=html, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(fetcher, "http_get", fake)
+    return calls
+
+
+async def test_only_see_all_buying_options_unreadable_offer_list(monkeypatch):
+    # No buy box and the offer list can't be read: the page names no seller, so don't claim
+    # "Third-party sellers only" (that would hide an Amazon restock behind a false reason).
     serve(monkeypatch, fx("amazon_see_all_buying.html"))
+    calls = serve_aod(monkeypatch, None)
     res = await amazon.check(URL, ctx())
-    assert res.status == "out_of_stock" and res.status_text == "Third-party sellers only"
+    assert res.status == "out_of_stock" and res.status_text == "No featured offer (see all buying options)"
+    assert res.detail["third_party"] is None and "aodAjaxMain" in calls[0]
     res = await amazon.check(URL, ctx(official_only=False))
     assert res.status == "in_stock" and res.status_text == "Available from other sellers"
+
+
+async def test_only_see_all_buying_options_amazon_offer_is_in_stock(monkeypatch):
+    serve(monkeypatch, fx("amazon_see_all_buying.html"))
+    serve_aod(monkeypatch, fx("amazon_aod_amazon.html"))
+    res = await amazon.check(URL, ctx())
+    assert res.status == "in_stock" and res.detail["seller"] == "Amazon.com" and res.detail["third_party"] is False
+    assert res.price == "$749.99" and res.detail["offers"] == 1  # the used offer doesn't count for "new"
+
+
+async def test_only_see_all_buying_options_third_party_offers(monkeypatch):
+    serve(monkeypatch, fx("amazon_see_all_buying.html"))
+    serve_aod(monkeypatch, fx("amazon_aod_3p.html"))
+    res = await amazon.check(URL, ctx())
+    assert res.status == "out_of_stock" and res.status_text == "Third-party sellers only"
+    assert res.detail["seller"] == "Console Kings" and res.detail["third_party"] is True
+    serve_aod(monkeypatch, "<div id='aod-container'><div id='aod-offer-list'></div></div>")
+    res = await amazon.check(URL, ctx())
+    assert res.status == "out_of_stock" and res.status_text == "No offers"
 
 
 async def test_currently_unavailable(monkeypatch):

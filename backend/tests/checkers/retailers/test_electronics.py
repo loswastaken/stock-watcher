@@ -186,13 +186,16 @@ async def test_nvidia_never_reports_another_gpus_founders_edition():
     # RTX 5070 page: the search lists the 5090 / 5080 FEs but not a 5070 FE -> no product, no SKU
     url = "https://marketplace.nvidia.com/en-us/consumer/graphics-cards/nvidia-geforce-rtx-5070/"
     respx.get(NV_SEARCH).mock(return_value=httpx.Response(200, json=fxj("nvidia_search.json")))
+    respx.get(url).mock(return_value=httpx.Response(404))
+    # the inventory answers with the 5090's row only: never taken for the (guessed) NVGFT570
     inv = respx.get(NV_INV).mock(return_value=httpx.Response(200, json=fxj("nvidia_feinventory_active.json")))
     assert await el.nvidia(url, ctx_for(url)) is None
-    assert not inv.called
+    assert inv.calls.last.request.url.params["skus"] == "NVGFT570"
     # a pinned SKU missing from the search must not borrow the 5080 FE's buy_now status
     url = "https://marketplace.nvidia.com/en-us/consumer/graphics-cards/nvidia-geforce-rtx-5080/"
     respx.get(NV_INV).mock(return_value=httpx.Response(503))
-    assert await el.nvidia(url, ctx_for(url, store_id="NVGFT999")) is None
+    res = await el.nvidia(url, ctx_for(url, store_id="NVGFT999"))
+    assert res.status == "unknown" and res.detail["sku"] == "NVGFT999"
 
 
 async def test_nvidia_without_gpu_or_sku_falls_through():
@@ -344,9 +347,16 @@ async def test_amd_direct_buy(page):
     assert res.status == "in_stock" and res.detail["seller"] == "AMD"
 
 
-async def test_amd_info_page_falls_through():
-    url = "https://www.amd.com/en/products/graphics/desktops/radeon/9000-series/amd-radeon-rx-9070xt.html"
-    assert await el.amd(url, ctx_for(url)) is None
+async def test_amd_info_page_is_not_a_store(page):
+    # real amd.com product page (recorded 2026-09): a spec sheet with no offer -> clear reason, not "Unknown"
+    import gzip
+
+    live = Path(__file__).parent.parent / "fixtures" / "live" / "amd" / "ryzen7_9800x3d_info.html.gz"
+    url = "https://www.amd.com/en/products/processors/desktops/ryzen/9000-series/amd-ryzen-7-9800x3d.html"
+    page(gzip.decompress(live.read_bytes()).decode("utf-8"))
+    res = await el.amd(url, ctx_for(url))
+    assert res.status == "unknown" and res.status_text == el.NO_DIRECT_SALES
+    assert res.title and "9800X3D" in res.title
 
 
 async def test_dell_temporarily_out_beats_stale_jsonld(page):

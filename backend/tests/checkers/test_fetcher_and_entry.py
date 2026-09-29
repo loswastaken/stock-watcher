@@ -162,10 +162,20 @@ async def test_run_check_generic():
 
 @respx.mock
 async def test_run_check_wraps_site_errors():
-    respx.get(URL).mock(return_value=httpx.Response(404, text="not found"))
+    respx.get(URL).mock(return_value=httpx.Response(500, text="oops"))
     r = await checkers.run_check("generic", URL, None, None)
     assert r.status == "error" and r.status_text == "Check failed"
-    assert "404" in r.error
+    assert "500" in r.error
+
+
+@respx.mock
+@pytest.mark.parametrize("code", [404, 410])
+async def test_run_check_names_dead_product_links(code):
+    # a 404/410 from the product's own site is a stale link, not a generic failure
+    respx.get(URL).mock(return_value=httpx.Response(code, text="not found"))
+    r = await checkers.run_check("generic", URL, None, None)
+    assert r.status == "error" and r.status_text == f"Product page not found (HTTP {code})"
+    assert "update the link" in r.error and r.detail["dead_link"] is True
 
 
 async def test_run_check_wraps_unexpected_exceptions(monkeypatch):

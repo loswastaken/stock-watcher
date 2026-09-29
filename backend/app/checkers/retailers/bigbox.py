@@ -37,7 +37,23 @@ def base_detail(ctx: AdapterContext, **extra: Any) -> dict:
 
 
 def is_queued(fetched: Any) -> bool:
+    status = getattr(fetched, "status", None)
+    if status in (404, 410):
+        return False  # a "Page Not Found" error page is never a waiting room
     return bool(getattr(fetched, "queued", False))
+
+
+def dead_link(fetched: Any, url: str, ctx: AdapterContext, **extra: Any) -> CheckResult | None:
+    """An error result when the fetched page is a "not found" page or a redirect away from the
+    product (see ``generic.missing_page``), else None."""
+    status = getattr(fetched, "status", None)
+    reason = generic.missing_page(url, getattr(fetched, "url", None), getattr(fetched, "text", ""),
+                                  status if status in (404, 410) else None)
+    if not reason:
+        return None
+    res = generic.missing_result(reason, url, getattr(fetched, "url", None))
+    res.detail.update(base_detail(ctx, **extra))
+    return res
 
 
 def queued_result(ctx: AdapterContext, **extra: Any) -> CheckResult:
@@ -46,6 +62,17 @@ def queued_result(ctx: AdapterContext, **extra: Any) -> CheckResult:
 
 def error_result(ctx: AdapterContext, message: str, **extra: Any) -> CheckResult:
     return CheckResult(status="error", status_text=message, error=message, detail=base_detail(ctx, **extra))
+
+
+# Akamai Bot Manager's behavioural challenge (served with HTTP 200) and the "Oops!! Something went
+# wrong" error page Home Depot's Akamai edge serves to automated browsers instead of the product.
+_AKAMAI_BLOCK_RE = re.compile(
+    r'id=["\']sec-if-cpt-container|class=["\'][^"\']*\bbehavioral-content\b|scf-akamai-protected-by'
+    r"|<title>\s*Error Page\s*</title>[\s\S]{0,3000}Something went wrong", re.IGNORECASE)
+
+
+def looks_blocked(html: str) -> bool:
+    return bool(_AKAMAI_BLOCK_RE.search((html or "")[:20_000]))
 
 
 def blocked(host: str) -> FetchError:
@@ -266,6 +293,11 @@ async def dom_check(url: str, ctx: AdapterContext, rules: list[Rule], *, render_
         fetched = await fetch_page(url, ctx, render_js=render_js, needs=needs)
     if is_queued(fetched):
         return queued_result(ctx)
+    if looks_blocked(fetched.text):
+        raise blocked(fetcher.host_of(fetched.url or url))
+    dead = dead_link(fetched, url, ctx)
+    if dead is not None:
+        return dead
     html = clean_html(fetched.text)
     res = generic_result(fetched, url, ctx, html=html)
     mv = _main_view(html, rules)
@@ -404,19 +436,80 @@ async def qvc(url: str, ctx: AdapterContext) -> CheckResult | None:
     return await dom_check(url, ctx, QVC_RULES)
 
 
+_VZ_OUT_RE = re.compile(r"\bout\s+of\s+stock\b|\bsold\s+out\b|\bunavailable\b|\bnot\s+available\b", re.IGNORECASE)
+_VZ_SHIP_RE = re.compile(r"\bships\s+(?:between|by|in|on|today|tomorrow)\b|\barrives\b|\bpick\s*up\s+in\b"
+                         r"|\bbackordered\b", re.IGNORECASE)
+
+
+def verizon_dom(html: str) -> tuple[str | None, str, str] | None:
+    """Verizon device pages (2026): the checked Storage option's aria-label says "… out of stock" when
+    that configuration is sold out, and ``[data-testid=fulfillment-section]`` holds "Ships between …" /
+    "Pick up in as little as 1 hour" for the selected configuration."""
+    soup = soup_of(html)
+    for inp in soup.select("input[type=radio][name]"):
+        if not (inp.has_attr("checked") or str(inp.get("aria-checked", "")).lower() == "true"):
+            continue
+        if str(inp.get("name")).lower() not in ("storage", "size", "capacity", "memory"):
+            continue
+        label = clean_text(inp.get("aria-label") or inp.get("value") or "")
+        if _VZ_OUT_RE.search(label):
+            return "out", f"Out of stock ({inp.get('value') or label})", f"selected option: '{label}'"
+    box = soup.select_one("[data-testid=fulfillment-section]")
+    if box is not None:
+        t = clean_text(box.get_text(" ", strip=True))
+        if _VZ_OUT_RE.search(t):
+            return "out", "Out of stock", f"fulfillment: '{t[:60]}'"
+        parts = [clean_text(el.get_text(" ", strip=True)) for el in box.select("[data-testid]")
+                 if el.get("data-testid") in ("shipping", "ispu", "delivery")] or [t]
+        what = next((p for p in parts if p and _VZ_SHIP_RE.search(p)), None)
+        if what:
+            if re.search(r"\bbackordered\b", what, re.IGNORECASE):
+                return "in", "Backordered (orderable)", f"fulfillment: '{what[:60]}'"
+            return "in", f"In stock ({what[:50]})", f"fulfillment: '{what[:60]}'"
+    return None
+
+
 async def verizon(url: str, ctx: AdapterContext) -> CheckResult | None:
-    return await dom_check(url, ctx, VERIZON_RULES)
+    fetched = await fetch_page(url, ctx)
+    if is_queued(fetched):
+        return queued_result(ctx)
+    hit = verizon_dom(fetched.text)
+    if hit is None:
+        return await dom_check(url, ctx, VERIZON_RULES, fetched=fetched)
+    res = await dom_check(url, ctx, [], fetched=fetched)  # title / price / dead-link handling
+    if res.status == "error":
+        return res
+    verdict, text, why = hit
+    h1 = soup_of(fetched.text).find("h1")
+    if h1 is not None and clean_text(h1.get_text(" ", strip=True)):
+        res.title = clean_text(h1.get_text(" ", strip=True))  # the <title> is "Buy New …: Price, Colors, Specs"
+    return override(res, verdict, text, label="In stock" if verdict == "in" else None, matched=why)
 
 
 _MACYS_LINK_RE = re.compile(r"https?://(?:www\.)?macys\.com/shop/product/[^\"'\s<>]*?ID=\d+[^\"'\s<>]*", re.IGNORECASE)
 
 
 async def toysrus(url: str, ctx: AdapterContext) -> CheckResult | None:
-    """toysrus.com is a content site; the US store runs on macys.com. A toysrus.com page that links to a
-    Macy's product is followed to that product."""
+    """toysrus.com: since 2026 a Shopify store (``/products/<handle>`` pages, answered by the Shopify
+    recipe); older pages linked to a Macy's product, which is followed."""
+    host = (urlsplit(url).hostname or "").lower()
+    if host.endswith("toysrus.com") and generic.is_homepage_path(urlsplit(url).path or "/"):
+        return result(None, "Not a product page — link a toysrus.com product (…/products/…)",
+                      detail=base_detail(ctx, matched="homepage URL"))
     fetched = await fetch_page(url, ctx)
     if is_queued(fetched):
         return queued_result(ctx)
+    if host.endswith("toysrus.com"):
+        from .platforms import detect_and_check
+
+        plat = await detect_and_check(url, fetched.text, fetched.url, fetched.headers, None)
+        if plat is not None and plat.status in ("in_stock", "out_of_stock"):
+            generic.merge_page_meta(plat, generic.analyze(fetched.text, url, ctx.generic_config, base_url=fetched.url))
+            plat.detail.update(base_detail(ctx))
+            pv = price_value(plat.price)
+            if pv is not None:
+                plat.detail.setdefault("price_value", pv)
+            return plat
     res = await dom_check(url, ctx, MACYS_RULES, fetched=fetched)
     host = (urlsplit(fetched.url).hostname or urlsplit(url).hostname or "").lower()
     if res.status == "unknown" and host.endswith("toysrus.com"):

@@ -1,4 +1,4 @@
-"""Target adapter: Redsky pdp_client / pdp_fulfillment / nearby_stores (respx-mocked)."""
+"""Target adapter: Redsky pdp_client / product_fulfillment / nearby_stores (respx-mocked)."""
 from __future__ import annotations
 
 import json
@@ -36,10 +36,10 @@ def q(request: httpx.Request) -> dict[str, str]:
 
 @pytest.fixture(autouse=True)
 def _reset():
-    target._key_cache.update(key=None, exp=0.0)
+    target._key_cache.update(key=None, exp=0.0, loc=None)
     target._stores_cache.clear()
     yield
-    target._key_cache.update(key=None, exp=0.0)
+    target._key_cache.update(key=None, exp=0.0, loc=None)
     target._stores_cache.clear()
 
 
@@ -59,7 +59,7 @@ def test_tcin_parsing():
 @respx.mock
 async def test_delivery_in_stock_uses_scraped_key():
     client = mock_common()
-    ful = respx.get(url__startswith=REDSKY + "pdp_fulfillment_v1").mock(
+    ful = respx.get(url__startswith=REDSKY + "product_fulfillment_v1").mock(
         return_value=httpx.Response(200, json=fj("target_fulfillment.json")))
     res = await target.check(URL, ctx())
     assert res.status == "in_stock" and res.status_text == "In stock"
@@ -76,10 +76,15 @@ async def test_delivery_in_stock_uses_scraped_key():
 @respx.mock
 async def test_fallback_key_when_pdp_unavailable():
     client = mock_common(pdp_status=404)
-    respx.get(url__startswith=REDSKY + "pdp_fulfillment_v1").mock(
+    # no page → no geo store: the nearest store to the default ZIP is used (never digital store 3991)
+    stores = respx.get(url__startswith=REDSKY + "nearby_stores_v1").mock(
+        return_value=httpx.Response(200, json=fj("target_nearby_stores.json")))
+    respx.get(url__startswith=REDSKY + "product_fulfillment_v1").mock(
         return_value=httpx.Response(200, json=fj("target_fulfillment_oos.json")))
     res = await target.check(URL, ctx())
     assert q(client.calls.last.request)["key"] == target.FALLBACK_KEY
+    assert q(stores.calls.last.request)["place"] == target.DEFAULT_ZIP
+    assert q(client.calls.last.request)["store_id"] == "1234"
     assert res.status == "out_of_stock" and res.status_text == "Out of stock"
 
 
@@ -92,7 +97,9 @@ async def test_rejected_key_is_rescraped_once():
         return httpx.Response(401 if q(request)["key"] == "f" * 40 else 200, json=fj("target_pdp_client.json"))
 
     respx.get(url__startswith=REDSKY + "pdp_client_v1").mock(side_effect=client_side)
-    respx.get(url__startswith=REDSKY + "pdp_fulfillment_v1").mock(
+    respx.get(url__startswith=REDSKY + "nearby_stores_v1").mock(side_effect=lambda request: httpx.Response(
+        401 if q(request)["key"] == "f" * 40 else 200, json=fj("target_nearby_stores.json")))
+    respx.get(url__startswith=REDSKY + "product_fulfillment_v1").mock(
         return_value=httpx.Response(200, json=fj("target_fulfillment.json")))
     res = await target.check(URL, ctx())
     assert res.status == "in_stock" and target._key_cache["key"] == SCRAPED_KEY
@@ -109,7 +116,7 @@ async def test_pickup_nearby_stores_within_radius():
         return httpx.Response(200, json=fj("target_fulfillment_store3.json" if sid == "3456"
                                            else "target_fulfillment.json"))
 
-    ful = respx.get(url__startswith=REDSKY + "pdp_fulfillment_v1").mock(side_effect=ful_side)
+    ful = respx.get(url__startswith=REDSKY + "product_fulfillment_v1").mock(side_effect=ful_side)
     res = await target.check(URL, ctx(fulfillment="pickup", zip="60302", radius_miles=25))
     assert q(stores.calls.last.request)["place"] == "60302"
     assert q(stores.calls.last.request)["within"] == "25"
@@ -129,7 +136,7 @@ async def test_pickup_nearby_stores_within_radius():
 @respx.mock
 async def test_pickup_pinned_store_single_label():
     mock_common()
-    ful = respx.get(url__startswith=REDSKY + "pdp_fulfillment_v1").mock(
+    ful = respx.get(url__startswith=REDSKY + "product_fulfillment_v1").mock(
         return_value=httpx.Response(200, json=fj("target_fulfillment.json")))
     res = await target.check(URL, ctx(fulfillment="pickup", store_id="1234"))
     assert q(ful.calls.last.request)["required_store_id"] == "1234"
@@ -149,7 +156,7 @@ async def test_any_mode_out_online_but_pickup_available():
             return httpx.Response(200, json=fj("target_fulfillment_store3.json"))
         return httpx.Response(200, json=fj("target_fulfillment_oos.json"))
 
-    respx.get(url__startswith=REDSKY + "pdp_fulfillment_v1").mock(side_effect=ful_side)
+    respx.get(url__startswith=REDSKY + "product_fulfillment_v1").mock(side_effect=ful_side)
     res = await target.check(URL, ctx(fulfillment="any", zip="60302"))
     assert res.status == "in_stock"
     assert [a.key for a in res.available] == ["pickup:3456"]
@@ -161,7 +168,7 @@ async def test_pickup_none_available_is_out():
     mock_common()
     respx.get(url__startswith=REDSKY + "nearby_stores_v1").mock(
         return_value=httpx.Response(200, json=fj("target_nearby_stores.json")))
-    respx.get(url__startswith=REDSKY + "pdp_fulfillment_v1").mock(
+    respx.get(url__startswith=REDSKY + "product_fulfillment_v1").mock(
         return_value=httpx.Response(200, json=fj("target_fulfillment_oos.json")))
     res = await target.check(URL, ctx(fulfillment="pickup", zip="60302", radius_miles=10))
     assert res.status == "out_of_stock"
@@ -176,7 +183,7 @@ async def test_pickup_without_zip_is_error():
 @respx.mock
 async def test_target_plus_seller_blocked_when_official_only():
     mock_common("target_pdp_client_marketplace.json")
-    ful = respx.get(url__startswith=REDSKY + "pdp_fulfillment_v1").mock(
+    ful = respx.get(url__startswith=REDSKY + "product_fulfillment_v1").mock(
         return_value=httpx.Response(200, json=fj("target_fulfillment.json")))
     res = await target.check(URL, ctx())
     assert res.status == "out_of_stock" and res.status_text == "Third-party sellers only"
@@ -191,7 +198,7 @@ async def test_preorder_and_run_adapter_dispatch():
     mock_common()
     body = fj("target_fulfillment.json")
     body["data"]["product"]["fulfillment"]["shipping_options"]["availability_status"] = "PRE_ORDER_SELLABLE"
-    respx.get(url__startswith=REDSKY + "pdp_fulfillment_v1").mock(return_value=httpx.Response(200, json=body))
+    respx.get(url__startswith=REDSKY + "product_fulfillment_v1").mock(return_value=httpx.Response(200, json=body))
     res = await run_adapter(URL, None, None)
     assert res.status == "in_stock" and res.status_text == "Pre-order"
     assert res.detail["adapter"] == "target"
@@ -205,7 +212,7 @@ async def test_empty_nearby_stores_answer_is_not_cached_for_hours():
     mock_common()
     stores = respx.get(url__startswith=REDSKY + "nearby_stores_v1").mock(
         return_value=httpx.Response(200, json={"data": None}))
-    respx.get(url__startswith=REDSKY + "pdp_fulfillment_v1").mock(
+    respx.get(url__startswith=REDSKY + "product_fulfillment_v1").mock(
         return_value=httpx.Response(200, json=fj("target_fulfillment.json")))
     res = await target.check(URL, ctx(fulfillment="pickup", zip="60302"))
     assert res.status == "unknown"  # no answer about stores is not "no pickup"
@@ -225,7 +232,7 @@ async def test_empty_nearby_stores_answer_is_not_cached_for_hours():
 async def test_nearby_stores_failure_keeps_delivery_for_any():
     mock_common()
     respx.get(url__startswith=REDSKY + "nearby_stores_v1").mock(return_value=httpx.Response(500))
-    respx.get(url__startswith=REDSKY + "pdp_fulfillment_v1").mock(
+    respx.get(url__startswith=REDSKY + "product_fulfillment_v1").mock(
         return_value=httpx.Response(200, json=fj("target_fulfillment.json")))
     res = await target.check(URL, ctx(fulfillment="any", zip="60302"))
     assert res.status == "in_stock" and [a.key for a in res.available] == ["stock"]
@@ -246,7 +253,7 @@ async def test_warm_any_check_makes_at_most_four_requests():
             "shipping_options": {"availability_status": "OUT_OF_STOCK"},
             "store_options": [{"location_id": sid, "order_pickup": {"availability_status": "OUT_OF_STOCK"}}]}}}})
 
-    ful = respx.get(url__startswith=REDSKY + "pdp_fulfillment_v1").mock(side_effect=ful_side)
+    ful = respx.get(url__startswith=REDSKY + "product_fulfillment_v1").mock(side_effect=ful_side)
     await target.check(URL, ctx(fulfillment="any", zip="60601"))
     before = len(respx.calls)
     res = await target.check(URL, ctx(fulfillment="any", zip="60601"))
@@ -263,7 +270,7 @@ async def test_marketplace_vendor_when_is_marketplace_missing():
     item["product_vendors"] = [{"id": "77", "vendor_name": "GameStopDeals LLC", "relationship_type": "MARKETPLACE"}]
     respx.get(PDP).mock(return_value=httpx.Response(200, text=fx("target_pdp.html")))
     respx.get(url__startswith=REDSKY + "pdp_client_v1").mock(return_value=httpx.Response(200, json=body))
-    respx.get(url__startswith=REDSKY + "pdp_fulfillment_v1").mock(
+    respx.get(url__startswith=REDSKY + "product_fulfillment_v1").mock(
         return_value=httpx.Response(200, json=fj("target_fulfillment.json")))
     res = await target.check(URL, ctx())
     assert res.status == "out_of_stock" and res.status_text == "Third-party sellers only"

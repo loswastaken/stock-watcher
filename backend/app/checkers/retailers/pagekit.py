@@ -49,6 +49,9 @@ def is_queue_url(url: str | None) -> bool:
 def is_queued(fetched: Any) -> bool:
     """True for a waiting-room page: the fetcher's ``queued`` flag (when it has one), a
     redirect to a queue host, or waiting-room wording in the page head."""
+    status = getattr(fetched, "status", None)
+    if status in (404, 410):
+        return False  # a "Page Not Found" error page is never a waiting room
     if getattr(fetched, "queued", False):
         return True
     if is_queue_url(getattr(fetched, "url", None)):
@@ -239,6 +242,9 @@ def analyze_page(
     """Apply site rules over the generic analysis (see module docstring). With
     ``fall_through`` an inconclusive page returns None (platform recipes run next)."""
     rules = list(rules)
+    missing = generic.missing_page(url, final_url, html)
+    if missing:
+        return finish(generic.missing_result(missing, url, final_url), ctx)
     g = generic.analyze(html, url, ctx.generic_config, base_url=final_url or url)
     view = page_view(html)
     if _foreign_buy_button(g, view):
@@ -289,6 +295,9 @@ async def check_page(url: str, ctx: AdapterContext, **kw: Any) -> CheckResult | 
     fetched = await fetch_page(url, ctx, needs=needs)
     if is_queued(fetched):
         return queue_result(ctx)
+    status = getattr(fetched, "status", None)
+    if status in (404, 410):
+        return finish(generic.missing_result(f"{generic.NOT_FOUND_TEXT} (HTTP {status})", url, fetched.url), ctx)
     res = analyze_page(fetched.text, url, ctx, fetched.url, **kw)
     if res is not None:
         res.detail.setdefault("fetched_via", "browser" if getattr(fetched, "via_browser", False) else "http")

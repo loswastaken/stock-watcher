@@ -187,7 +187,7 @@ def test_back_in_stock_phrase_is_not_in_stock():
 def test_nothing_conclusive_is_unknown():
     r = run("no_signals.html")
     assert r.status == "unknown"
-    assert r.status_text == "Unknown"
+    assert r.status_text == "No stock info on the page"
     assert r.available == []
     assert r.detail["matched"] is None
 

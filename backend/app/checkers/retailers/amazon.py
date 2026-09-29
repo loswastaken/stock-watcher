@@ -1,8 +1,14 @@
 """Amazon: product-page DOM (buy box, #availability, seller) with first-party detection.
 
 Amazon itself is merchant ``ATVPDKIKX0DER`` / "Ships from and sold by Amazon". When the buy box
-belongs to another seller (or there is no buy box, only "See all buying options") and the item is set to
-official sellers only, the item reads out of stock with "Third-party sellers only".
+belongs to another seller and the item is set to official sellers only, the item reads out of stock
+with "Third-party sellers only".
+
+With no buy box at all ("No featured offers available" — only a "See All Buying Options" button, as
+on the PS5 Pro / AirPods Pro 2 pages recorded 2026-09) the page names no seller, so the offer list
+(``aodAjaxMain``, what that button opens) is read: an Amazon.com offer there is in stock, only other
+sellers is "Third-party sellers only"; if the list can't be read the text says what is known —
+"No featured offer" — instead of claiming the sellers are third parties.
 """
 from __future__ import annotations
 
@@ -41,6 +47,11 @@ PRICE_SELECTORS = (
 def asin_from_url(url: str) -> str | None:
     m = ASIN_RE.search(url)
     return m.group(1).upper() if m else None
+
+
+AOD_URL = ("https://www.amazon.com/gp/product/ajax/aodAjaxMain/ref=dp_aod_ALL_mbc?asin={asin}&m=&qid=&smid="
+           "&sourcecustomerorglistid=&sourcecustomerorglistitemid=&sr=&pc=dp&experienceId=aodAjaxMain")
+NO_FEATURED_TEXT = "No featured offer (see all buying options)"
 
 
 def cart_url(asin: str) -> str:
@@ -153,13 +164,76 @@ async def check(url: str, ctx: AdapterContext) -> CheckResult | None:
     if soup.select_one("#outOfStock") is not None or re.search(r"currently\s+unavailable", availability, re.IGNORECASE):
         return override(res, "out", "Currently unavailable", matched="#outOfStock")
     if soup.select_one("#buybox-see-all-buying-choices, #buybox-see-all-buying-choices-announce") is not None:
-        res.detail.update(seller=None, third_party=True)
+        # No featured offer: the page itself doesn't say who sells it — ask the offer list.
+        offers = await all_offers(asin, page)
+        if ctx.retailer_config.condition == "new":
+            offers = [o for o in offers or [] if o["new"]] if offers is not None else None
+        res.detail["offers"] = len(offers) if offers is not None else None
+        amazon_offer = next((o for o in offers or [] if o["amazon"]), None)
+        if amazon_offer is not None:
+            res.detail.update(seller="Amazon.com", third_party=False)
+            if amazon_offer.get("price") and not res.price:
+                tmp = result(None, price=amazon_offer["price"])
+                res.price = tmp.price
+                res.detail["price_value"] = tmp.detail.get("price_value")
+            return override(res, "in", "In stock (Amazon offer, no buy box)", matched="aod: sold by Amazon.com")
+        if offers:
+            res.detail.update(seller=offers[0]["seller"], third_party=True)
+            if official:
+                return override(res, "out", THIRD_PARTY_TEXT, matched=f"aod: {len(offers)} offer(s), none by Amazon")
+            return override(res, "in", "Available from other sellers", matched="aod: third-party offers")
+        res.detail.update(seller=None, third_party=None)
+        if offers is not None:  # the offer list is empty
+            return override(res, "out", "No offers", matched="aod: no offers")
         if official:
-            return override(res, "out", THIRD_PARTY_TEXT, matched="only 'See all buying options'")
+            return override(res, "out", NO_FEATURED_TEXT, matched="only 'See all buying options'")
         return override(res, "in", "Available from other sellers", matched="'See all buying options'")
     if re.search(r"temporarily\s+out\s+of\s+stock|out\s+of\s+stock", availability, re.IGNORECASE):
         return override(res, "out", "Out of stock", matched="#availability")
     return res
+
+
+_AOD_BLOCK_SEL = "#aod-pinned-offer, #aod-offer, [id^='aod-offer-'][class*='aod-information-block'], .aod-information-block"
+_SELLER_ID_RE = re.compile(r"[?&]seller=([A-Z0-9]{10,16})")
+
+
+async def all_offers(asin: str, referer: str) -> list[dict] | None:
+    """Offers from Amazon's "See All Buying Options" list: [{"seller", "amazon", "new", "price"}], [] when
+    it lists none, None when it couldn't be read (blocked, network, unknown markup)."""
+    try:
+        resp = await fetcher.http_get(AOD_URL.format(asin=asin), headers={
+            "Referer": referer, "Accept": "text/html,*/*", "X-Requested-With": "XMLHttpRequest",
+            "Sec-Fetch-Dest": "empty", "Sec-Fetch-Mode": "cors", "Sec-Fetch-Site": "same-origin"})
+    except FetchError:
+        return None
+    html = resp.text or ""
+    if resp.status_code >= 400 or _CAPTCHA_RE.search(html[:60_000]) or "aod-" not in html:
+        return None
+    return parse_offers(html)
+
+
+def parse_offers(html: str) -> list[dict]:
+    soup = soup_of(html)
+    offers: list[dict] = []
+    seen: set[int] = set()
+    for block in soup.select(_AOD_BLOCK_SEL):
+        if id(block) in seen or block.find_parent(id="aod-offer") is not None:
+            continue
+        seen.add(id(block))
+        sold = block.select_one("[id='aod-offer-soldBy']")
+        if sold is None:
+            continue
+        link = sold.select_one("a[href]")
+        name = clean_text((link.get_text(" ", strip=True) if link is not None else "")
+                          or re.sub(r"^\s*sold\s+by\s*", "", sold.get_text(" ", strip=True), flags=re.I))
+        sid = _SELLER_ID_RE.search(str(link.get("href") or "")) if link is not None else None
+        is_amazon = (sid is not None and sid.group(1) == AMAZON_MERCHANT_ID) or bool(
+            _AMAZON_SELLER_RE.match(name) or re.match(r"^amazon(?:\.com)?\b", name, re.I))
+        heading = clean_text(_text(block, "[id='aod-offer-heading']")) or ""
+        price = _text(block, ".a-price .a-offscreen")
+        offers.append({"seller": name or None, "amazon": is_amazon,
+                       "new": not heading or bool(re.match(r"^\s*new\b", heading, re.I)), "price": price or None})
+    return offers
 
 
 def _in_text(availability: str) -> str:

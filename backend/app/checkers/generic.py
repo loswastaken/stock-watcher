@@ -18,6 +18,11 @@ Before any of that, ``check_generic`` (auto mode) lets the platform recipes in
 answer from the platform's own product data; their conclusive verdict wins. A virtual
 waiting room yields ``unknown`` with ``detail["queue"] = True`` (see ``queue_result``).
 
+Dead links are reported as such (``missing_page``): an error page (HTTP 404/410, a "Page not found"
+title/heading, a ``/404`` or ``/pageerror`` final URL) → "Product page not found"; a product URL that
+redirects to the store's homepage or to a non-product page → "…redirects to the homepage/elsewhere —
+the link may be stale". Those are ``error`` results so the user knows to update the link.
+
 Availability semantics: *orderable* counts as in stock — InStock, LimitedAvailability,
 OnlineOnly, InStoreOnly, PreOrder, PreSale, BackOrder, MadeToOrder. The status text says
 which ("Pre-order", "Backorder", ...). OutOfStock, SoldOut, Discontinued → out of stock.
@@ -735,6 +740,98 @@ def extract_page_meta(soup: BeautifulSoup, url: str, structured: list[Structured
     return PageMeta(title=title, image_url=image_url, price=price)
 
 
+# --------------------------------------------------------------------------- dead links
+
+NOT_FOUND_TEXT = "Product page not found"
+NO_STOCK_INFO_TEXT = "No stock info on the page"
+HOME_REDIRECT_TEXT = "Product page redirects to the homepage — the link may be stale"
+MOVED_TEXT = "Product page redirects to a non-product page — the link may be stale"
+
+_NF_URL_RE = re.compile(
+    r"(?:^|[/_.=-])(?:404|pageerror|page-?not-?found|not-?found|errorpages?|smarterror)(?:$|[/_.?&=-])", re.I)
+_NF_TITLE_SEG_RE = re.compile(
+    r"^\W*(?:(?:error\s*)?404\b.*|page\s+(?:not\s+found|cannot\s+be\s+found|could\s+not\s+be\s+found"
+    r"|does\s*n[o']t\s+exist)|(?:product|item|page)\s+not\s+found|not\s+found|oops[!.,]*\s+(?:page\s+)?not\s+found"
+    r"|this\s+page\s+(?:could\s+not\s+be\s+found|does\s*n[o']t\s+exist))\W*$",
+    re.I,
+)
+_NF_HEADING_RE = re.compile(
+    r"^\W*(?:we\s+)?(?:could\s*n[o']t|can\s*n[o']t|cannot|were\s+unable\s+to)\s+find\s+(?:anything|that\s+page|the\s+page"
+    r"|the\s+product|this\s+(?:page|product))\b|^\W*(?:sorry[,!.]*\s+)?(?:this\s+|the\s+)?page\s+(?:not\s+found|cannot\s+be"
+    r"\s+found|could\s+not\s+be\s+found|does\s*n[o']t\s+exist|you\s+(?:are|were)\s+looking\s+for\s+"
+    r"(?:does\s*n[o']t|does\s+not|could\s+not|can\s*n[o']t))|^\W*(?:product|item)\s+not\s+found\W*$|^\W*404\b",
+    re.I,
+)
+_TITLE_TAG_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.I | re.S)
+_H1_RE = re.compile(r"<h1\b[^>]*>(.*?)</h1>", re.I | re.S)
+_TAGS_RE = re.compile(r"<[^>]+>")
+_PRODUCT_PATH_RE = re.compile(r"/(?:products?|p|dp|ip|itm|item|pdp|sku)/", re.I)
+_NON_PRODUCT_PATH_RE = re.compile(r"^/(?:pages|collections|search|c|category|categories|brands?|shop)(?:/|$)", re.I)
+_LOCALE_SEG = r"(?:[a-z]{2}[-_][a-z]{2}|en|us|ca|uk|gb|au|de|fr|es|it|nl|jp|kr|mx|br|in)"
+_HOME_PATH_RE = re.compile(
+    rf"^/?(?:{_LOCALE_SEG}/){{0,2}}{_LOCALE_SEG}?/?(?:(?:default|index|home)\.(?:aspx?|html?|php|jsp|cfm))?$", re.I)
+
+
+def _site(host: str) -> str:
+    parts = (host or "").lower().split(".")
+    return ".".join(parts[-2:]) if len(parts) >= 2 else host
+
+
+def _same_retailer(a: str, b: str) -> bool:
+    from .retailers.registry import match_retailer
+
+    ra, rb = match_retailer(a), match_retailer(b)
+    return ra is not None and ra is rb
+
+
+def _strip_path(u: str) -> str:
+    path = urlsplit(u).path or "/"
+    return path.split(";", 1)[0]
+
+
+def is_homepage_path(path: str) -> bool:
+    return bool(_HOME_PATH_RE.match(path or "/"))
+
+
+def missing_page(url: str, final_url: str | None, html: str | None, status: int | None = None) -> str | None:
+    """Why ``url`` is a dead link, or None: an error status / "not found" page, or a redirect from a
+    product URL to the site's homepage or to a non-product page (same site only — a waiting room or
+    a sister store is not a dead link)."""
+    if status in (404, 410):
+        return f"{NOT_FOUND_TEXT} (HTTP {status})"
+    final = final_url or url
+    same_site = _site(host_of(final)) == _site(host_of(url)) or _same_retailer(url, final)
+    fpath = _strip_path(final)
+    if same_site and _NF_URL_RE.search(fpath):
+        return NOT_FOUND_TEXT
+    head = (html or "")[:400_000]
+    m = _TITLE_TAG_RE.search(head)
+    if m:
+        title = clean_text(_TAGS_RE.sub(" ", m.group(1)))
+        if title and any(_NF_TITLE_SEG_RE.match(seg) for seg in [title] + _TITLE_SEPS.split(title)):
+            return NOT_FOUND_TEXT
+    for hm in _H1_RE.finditer(html or ""):
+        h1 = clean_text(_TAGS_RE.sub(" ", hm.group(1)))
+        if h1 and len(h1) <= 160 and _NF_HEADING_RE.search(h1):
+            return NOT_FOUND_TEXT
+    rpath = _strip_path(url)
+    if same_site and final_url and not is_homepage_path(rpath):
+        if is_homepage_path(fpath):
+            return HOME_REDIRECT_TEXT
+        if _PRODUCT_PATH_RE.search(rpath) and not _PRODUCT_PATH_RE.search(fpath) \
+                and _NON_PRODUCT_PATH_RE.match(fpath):
+            return MOVED_TEXT
+    return None
+
+
+def missing_result(reason: str, url: str, final_url: str | None = None, **detail: Any) -> CheckResult:
+    d: dict[str, Any] = {"matched": reason, "dead_link": True}
+    if final_url and final_url != url:
+        d["final_url"] = final_url
+    d.update({k: v for k, v in detail.items() if v is not None})
+    return CheckResult(status="error", status_text=reason, available=[], error=reason, detail=d)
+
+
 # --------------------------------------------------------------------------- analysis entry points
 
 
@@ -853,7 +950,8 @@ def analyze(html: str, url: str, config: dict | GenericConfig | None = None, *, 
         detail["matched"] = heur.matched
         return _result(heur.verdict, heur.status_text, meta, detail)
     detail["matched"] = None
-    return _result(None, "Unknown", meta, detail)
+    # nothing at all to go on (no structured data, buy/sold-out buttons or stock wording): say so
+    return _result(None, "Unknown" if detail["signals"] else NO_STOCK_INFO_TEXT, meta, detail)
 
 
 def _needs_for(cfg: GenericConfig) -> Callable[[str], bool]:
@@ -896,17 +994,23 @@ async def check_generic(url: str, config: dict | None) -> CheckResult:
     cfg = GenericConfig.from_dict(config)
     fetched = await fetch_html(url, render_js=cfg.render_js, needs=_needs_for(cfg))
     via = "browser" if fetched.via_browser else "http"
-    if fetched.queued:
+    status = getattr(fetched, "status", None)
+    errored = status in (404, 410)  # a "not found" page is never a waiting room
+    if fetched.queued and not errored:
         res = queue_result(mode=cfg.mode, fetched_via=via)
         res.detail["matched"] = "waiting room"
         return res
-    if cfg.mode == "auto":
+    missing = missing_page(url, fetched.url, fetched.text, status if errored else None)
+    if cfg.mode == "auto" and not errored:
         plat = await detect_and_check(url, fetched.text, fetched.url, fetched.headers, None)
-        if plat is not None:
+        # a platform API keyed by the URL's own product id can still answer after a homepage redirect
+        if plat is not None and (missing is None or plat.status in ("in_stock", "out_of_stock")):
             merge_page_meta(plat, analyze(fetched.text, url, cfg, base_url=fetched.url))
             plat.detail.setdefault("mode", cfg.mode)
             plat.detail["fetched_via"] = via
             return plat
+    if missing:
+        return missing_result(missing, url, fetched.url, fetched_via=via, adapter="generic")
     result = analyze(fetched.text, url, cfg, base_url=fetched.url)
     result.detail["fetched_via"] = via
     result.detail.setdefault("adapter", "generic")

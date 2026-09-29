@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import re
 
 from . import apple as _apple
 from . import fetcher as _fetcher
@@ -30,6 +31,21 @@ _DEADLINE_MARGIN = 3.0  # seconds kept for analysis after the last fetch
 def _error(e: BaseException | str) -> CheckResult:
     msg = e if isinstance(e, str) else (str(e) or type(e).__name__)
     return CheckResult(status="error", status_text="Check failed", available=[], error=msg[:500])
+
+
+_HTTP_ERROR_RE = re.compile(r"^HTTP (\d{3}) from (\S+)")
+
+
+def _fetch_error(e: _fetcher.FetchError, url: str) -> CheckResult:
+    """A 404/410 from the product's own site means a dead link: say so, so users update it."""
+    m = _HTTP_ERROR_RE.match(str(e))
+    # only the page's own host counts (an API 404 on e.g. redsky.target.com is not a dead product link)
+    if e.status in (404, 410) and m and m.group(2).lower().removeprefix("www.") == \
+            _fetcher.host_of(url).removeprefix("www."):
+        text = f"{_generic.NOT_FOUND_TEXT} (HTTP {e.status})"
+        return CheckResult(status="error", status_text=text, available=[], error=f"{text} — update the link",
+                           detail={"dead_link": True})
+    return _error(str(e))
 
 
 async def _with_deadline(coro, seconds: float):
@@ -64,7 +80,7 @@ async def run_check(kind: str, url: str, generic_config: dict | None, apple_conf
     except asyncio.TimeoutError:
         return _error("Check timed out")
     except _fetcher.FetchError as e:
-        return _error(str(e))
+        return _fetch_error(e, url)
     except Exception as e:  # noqa: BLE001 - contract: checkers never raise for site problems
         log.exception("checker crashed for %s", url)
         return _error(f"{type(e).__name__}: {e}")

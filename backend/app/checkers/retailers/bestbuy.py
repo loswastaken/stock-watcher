@@ -116,6 +116,30 @@ def _build(ctx: AdapterContext, sku: str, verdict: str | None, text: str, *, sou
     return result(verdict, text, available=available, price=price, title=title, image_url=image, detail=detail)
 
 
+_SLUG_RES = (re.compile(r"/site/([^/?#]+)/\d{5,9}\.p"), re.compile(r"/product/([^/?#]+)/"))
+_WORD_RE = re.compile(r"[a-z0-9]{2,}")
+
+
+def _slug_words(path_or_url: str | None) -> set[str]:
+    path = urlsplit(path_or_url or "").path
+    for rx in _SLUG_RES:
+        m = rx.search(path)
+        if m:
+            return set(_WORD_RE.findall(m.group(1).lower()))
+    return set()
+
+
+def other_product(url: str, sku_block: dict) -> str | None:
+    """Best Buy reuses SKU numbers: when the product behind the URL's SKU shares not one word with the
+    URL's slug (a PS5 Pro link whose SKU is now a LEGO set), return that product's name."""
+    want = _slug_words(url)
+    name = clean_text(dig(sku_block, "names", "short") or dig(sku_block, "names", "title")) or ""
+    have = _slug_words(sku_block.get("url")) | set(_WORD_RE.findall(name.lower()))
+    if len(want) < 2 or not have or want & have:
+        return None
+    return name or sku_block.get("url") or "another product"
+
+
 def _pickup_note(text: str, ctx: AdapterContext) -> str:
     """fulfillment=any without the API: the verdict is delivery-only; say pickup wasn't checked."""
     return f"{text} · {PICKUP_NEEDS_KEY}" if ctx.retailer_config.wants_pickup else text
@@ -257,6 +281,10 @@ async def check(url: str, ctx: AdapterContext) -> CheckResult | None:
         block, network_down = None, e.status is None  # stalled/reset: the sibling endpoint will be too
     if block:
         s = block["sku"]
+        other = other_product(url, s)
+        if other:
+            return error_result(ctx, f"This Best Buy SKU is now a different product ({other[:80]}) — update the link",
+                                sku=sku, other_product=other, dead_link=True)
         state = dig(s, "buttonState", "buttonState")
         verdict, text = map_button(state)
         if verdict is not None:

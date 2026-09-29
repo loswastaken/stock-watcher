@@ -14,7 +14,7 @@ from ..base import CheckResult
 from ..fetcher import FetchError
 from ..util import clean_text
 from .base import AdapterContext, dig, next_data, result
-from .bigbox import THIRD_PARTY_TEXT, base_detail, blocked, generic_result, is_queued, queued_result
+from .bigbox import THIRD_PARTY_TEXT, base_detail, blocked, dead_link, error_result, generic_result, is_queued, queued_result
 
 ITEM_RE = re.compile(r"/ip/(?:[^/?#]+/)?(\d{5,})(?:[/?#]|$)")
 _BLOCK_RE = re.compile(r"<title>\s*robot or human\??\s*</title>|px-captcha|\brobot or human\?", re.IGNORECASE)
@@ -70,8 +70,22 @@ async def check(url: str, ctx: AdapterContext) -> CheckResult | None:
         return queued_result(ctx, item_id=iid)
     if _is_block_page(fetched):
         raise blocked(host)
+    delisted = '"product":null' in fetched.text.replace(" ", "")  # handled below as "No longer available"
+    dead = None if delisted else dead_link(fetched, url, ctx, item_id=iid)
+    if dead is not None:
+        return dead
+    final_iid = item_id(fetched.url or "")
+    if iid and final_iid and final_iid != iid and iid not in fetched.text:
+        # Walmart redirects a retired item to a *different* product (e.g. PS5 Pro → PS5 Digital Slim):
+        # that product's stock says nothing about the one being watched.
+        other = None
+        nd_other = dig(next_data(fetched.text), "props", "pageProps", "initialData", "data", "product", "name")
+        if isinstance(nd_other, str):
+            other = clean_text(nd_other)[:80]
+        msg = f"Walmart redirects this item to a different product{f' ({other})' if other else ''} — update the link"
+        return error_result(ctx, msg, item_id=iid, redirected_to=fetched.url, dead_link=True)
 
-    iid = iid or item_id(fetched.url)
+    iid = iid or final_iid
     cart = cart_url(iid) if (iid and is_walmart) else None
     nd = next_data(fetched.text)
     data = dig(nd, "props", "pageProps", "initialData", "data")
