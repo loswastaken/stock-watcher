@@ -193,9 +193,15 @@ def _nin_product(html: str, url: str) -> dict | None:
     prods = [d for d in iter_dicts(nd) if d.get("__typename") == "StoreProduct"]
     if not prods:
         return None
-    slug = [s for s in urlsplit(url).path.split("/") if s][-1:] or [""]
-    prods.sort(key=lambda d: 0 if slug[0] and str(d.get("urlKey") or "").strip("/") == slug[0] else 1)
-    p = prods[0]
+    segs = [s.lower() for s in urlsplit(url).path.split("/") if s]
+    slug = segs[-1] if segs else ""
+    # only the StoreProduct this URL names (urlKey = last path segment, or its SKU in the path);
+    # bundles / "related" products on the page never stand in for it
+    p = next((d for d in prods if slug and str(d.get("urlKey") or "").strip("/").lower() == slug), None)
+    if p is None:
+        p = next((d for d in prods if d.get("sku") and str(d["sku"]).lower() in segs), None)
+    if p is None:
+        return None
     return {k: _deref(v, refs) for k, v in p.items()}
 
 
@@ -314,27 +320,40 @@ def _pc_state(html: str, code: str | None) -> tuple[str | None, dict | None]:
     if not roots:
         return None, None
 
-    def avail_in(node: Any) -> str | None:
-        for d in iter_dicts(node):
-            a = d.get("availability")
-            if isinstance(a, dict):
-                a = a.get("state")
-            if isinstance(a, str) and a.upper() in _PC_STATES:
-                return a.upper()
+    def own_state(d: dict) -> str | None:
+        a = d.get("availability")
+        if isinstance(a, dict):
+            a = a.get("state")
+        return a.upper() if isinstance(a, str) and a.upper() in _PC_STATES else None
+
+    def avail_in(node: dict) -> str | None:
+        """The node's own availability, or one in a direct child object (not in lists, which hold
+        related products / bundles)."""
+        s = own_state(node)
+        if s:
+            return s
+        for v in node.values():
+            if isinstance(v, dict) and not any(k in v for k in _PC_ID_KEYS):
+                s = own_state(v)
+                if s:
+                    return s
         return None
 
     want = (code or "").lower()
+    if not want:
+        return None, None
     for root in roots:
-        if want:
-            for d in iter_dicts(root):
-                if any(str(d.get(k) or "").lower() == want for k in _PC_ID_KEYS):
-                    s = avail_in(d)
-                    if s:
-                        return s, d
-    for root in roots:
-        s = avail_in(root)
-        if s:
-            return s, None
+        for d in iter_dicts(root):
+            node = None
+            if any(str(d.get(k) or "").lower() == want for k in _PC_ID_KEYS):
+                node = d
+            else:
+                node = next((v for k, v in d.items() if isinstance(v, dict) and str(k).lower() == want), None)
+            if node is not None:
+                s = avail_in(node)
+                if s:
+                    return s, node
+    # no availability tied to this product code: never borrow another product's state
     return None, None
 
 
@@ -443,25 +462,39 @@ _GS_OUT = {"not available": "Out of stock", "notavailable": "Out of stock", "una
            "out of stock": "Out of stock", "outofstock": "Out of stock", "sold out": "Sold out"}
 
 
-def _gs_infos(view: PageView) -> list[dict]:
+_GS_PID_RE = re.compile(r"/(\d{6,8})\.html", re.I)
+
+
+def _gs_infos(view: PageView, pid: str | None = None) -> list[dict]:
+    """productInfo blobs for this product: those in the main product area (carousels / recommended
+    tiles stripped) whose productID, when present, is the URL's pid."""
+    scope = view.scope if view.scope is not None else view.soup
     out = []
-    for el in view.soup.select("[data-gtmdata]"):
+    for el in scope.select("[data-gtmdata]"):
         data = loads_lenient(str(el.get("data-gtmdata") or ""))
         info = data.get("productInfo") if isinstance(data, dict) else None
-        if isinstance(info, dict) and info.get("availability"):
-            out.append(info)
+        if not (isinstance(info, dict) and info.get("availability")):
+            continue
+        ids = {str(info.get(k)) for k in ("productID", "productId", "pid", "masterID") if info.get(k)}
+        if pid and ids and pid not in ids:
+            continue
+        out.append(info)
     return out
 
 
 async def gamestop(url: str, ctx: AdapterContext) -> CheckResult | None:
     want = (parse_qs(urlsplit(url).query).get("condition") or [None])[0]
     want = (want or ("New" if ctx.retailer_config.condition == "new" else "")).lower()
+    pm = _GS_PID_RE.search(urlsplit(url).path)
+    pid = pm.group(1) if pm else None
 
     def dom(view: PageView) -> Hit | None:
-        infos = _gs_infos(view)
+        infos = _gs_infos(view, pid)
+        if want:  # a different condition (Pre-Owned, Digital) never stands in for the one watched
+            infos = [i for i in infos if str(i.get("condition") or "").lower() in (want, "")]
         if not infos:
             return None
-        info = next((i for i in infos if want and str(i.get("condition") or "").lower() == want), infos[0])
+        info = next((i for i in infos if str(i.get("condition") or "").lower() == want), infos[0])
         a = str(info.get("availability") or "").strip().lower()
         det = {"sku": info.get("sku") or info.get("productID"), "condition": info.get("condition"),
                **seller_detail(ctx, "GameStop")}
@@ -495,10 +528,12 @@ async def bandai(url: str, ctx: AdapterContext) -> CheckResult | None:
     return res
 
 
+# Only the stock-status element counts: "(Discontinued)" also labels *other* editions in the notes,
+# and "In stock, usually ships" must not beat a generic out-of-stock verdict.
 PLAYASIA_RULES = [
-    rule(r"\bin\s+stock,?\s+usually\s+ships\b", "in", "In stock", where="text"),
-    rule(r"\bdiscontinued\b", "out", "Discontinued", where="text"),
-    rule(r"\bout\s+of\s+stock\b", "out", "Out of stock", where="text"),
+    rule(r"\bout\s+of\s+stock\b|\bsold\s*out\b", "out", "Out of stock", where="status"),
+    rule(r"\bin\s+stock,?\s+usually\s+ships\b", "in", "In stock", where="status"),
+    rule(r"\bdiscontinued\b", "out", "Discontinued", where="status"),
 ]
 
 

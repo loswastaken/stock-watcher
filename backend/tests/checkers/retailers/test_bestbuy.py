@@ -177,3 +177,52 @@ async def test_official_api_failure_falls_back_to_website(monkeypatch):
 async def test_pickup_only_without_zip_is_error():
     res = await bestbuy.check(OLD, ctx(fulfillment="pickup"))
     assert res.status == "error" and res.status_text == "Set a ZIP code for pickup"
+
+
+# ------------------------------------------------------------------ review fixes
+
+def test_page_button_state_requires_the_pinned_sku():
+    pinned = '<div class="pdp"><button data-sku-id="6111111" data-button-state="SOLD_OUT" disabled>Sold Out</button></div>'
+    assert bestbuy.page_button_state(pinned, "6111111") == "SOLD_OUT"
+    carousel = ('<div class="pdp"></div><ul><li><button data-sku-id="6999999" data-button-state="ADD_TO_CART">Add'
+                '</button></li></ul>')
+    assert bestbuy.page_button_state(carousel, "6111111") is None
+    anonymous = '<ul><li><button data-button-state="ADD_TO_CART">Add</button></li></ul>'
+    assert bestbuy.page_button_state(anonymous, "6111111") is None
+    json_other = '<script>{"skuId":"6999999","buttonState":"ADD_TO_CART"}</script>'
+    assert bestbuy.page_button_state(json_other, "6111111") is None
+    json_mine = ('<script>[{"skuId":"6999999","buttonState":"ADD_TO_CART"},{"buttonState":"SOLD_OUT","skuId":"6111111"}]'
+                 '</script>')
+    assert bestbuy.page_button_state(json_mine, "6111111") == "SOLD_OUT"
+
+
+@respx.mock
+async def test_page_without_the_skus_button_is_not_carousel_in_stock():
+    respx.get(url__startswith=PRICE_BLOCKS).mock(return_value=httpx.Response(500))
+    respx.get(url__startswith=BUTTON_STATE).mock(return_value=httpx.Response(500))
+    respx.get(url__startswith="https://www.bestbuy.com/site/").mock(return_value=httpx.Response(200, text=(
+        "<html><body><main><h1>RTX 5090</h1><p>Specifications and overview text for this card.</p></main>"
+        "<section><ul><li><button data-sku-id='6500000' data-button-state='ADD_TO_CART'>Add to Cart</button></li>"
+        "</ul></section></body></html>")))
+    res = await bestbuy.check(OLD, ctx())
+    assert res.detail.get("button_state") is None
+    assert res.status != "in_stock"
+
+
+@respx.mock
+async def test_pickup_only_without_api_key_is_unknown():
+    pb = respx.get(url__startswith=PRICE_BLOCKS).mock(
+        return_value=httpx.Response(200, json=fj("bestbuy_priceblocks_in.json")))
+    res = await bestbuy.check(OLD, ctx(fulfillment="pickup", zip="55423"))
+    assert res.status == "unknown" and res.status_text == "Pickup needs BESTBUY_API_KEY"
+    assert res.available == [] and not pb.called
+
+
+@respx.mock
+async def test_pickup_only_with_failing_api_is_unknown(monkeypatch):
+    monkeypatch.setenv("BESTBUY_API_KEY", "bad")
+    respx.get(url__startswith=API + ".json").mock(return_value=httpx.Response(403, json={"error": "quota"}))
+    respx.get(url__startswith=PRICE_BLOCKS).mock(
+        return_value=httpx.Response(200, json=fj("bestbuy_priceblocks_in.json")))
+    res = await bestbuy.check(OLD, ctx(fulfillment="pickup", zip="55423"))
+    assert res.status == "unknown" and res.available == []

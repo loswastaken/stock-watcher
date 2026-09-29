@@ -264,19 +264,16 @@ async def nvidia(url: str, ctx: AdapterContext) -> CheckResult | None:
 
 
 def _nv_pick(data: Any, gpu: str, sku: str | None) -> dict | None:
+    """The search result for exactly this product: the pinned SKU when there is one, else the Founders
+    Edition of exactly this GPU. Never another GPU's FE (a 5080 page must not report the 5090)."""
     sp = dig(data, "searchedProducts") or {}
     cands = [p for p in [sp.get("featuredProduct")] + list(sp.get("productDetails") or []) if isinstance(p, dict)]
     if sku:
-        for p in cands:
-            if str(p.get("productSKU") or "").upper() == sku:
-                return p
+        return next((p for p in cands if str(p.get("productSKU") or "").upper() == sku), None)
     want = re.sub(r"\s+", "", gpu).lower()
     for p in cands:
         fe = p.get("isFounderEdition") is True or str(p.get("manufacturer") or "").upper() == "NVIDIA"
         if fe and re.sub(r"\s+", "", str(p.get("gpu") or "")).lower() == want:
-            return p
-    for p in cands:
-        if p.get("isFounderEdition") is True:
             return p
     return None
 
@@ -291,11 +288,13 @@ _MC_JS_NAME_RE = re.compile(r"""['"]productName['"]\s*:\s*['"]([^'"]+)""", re.I)
 _MC_STORE_NAME_RES = (
     re.compile(r"""['"]storeName['"]\s*:\s*['"]([^'"]+)""", re.I),
 )
+# The page's own selected store (dataLayer / cookie echo) — never ?storeid= in arbitrary links,
+# which point at other stores.
 _MC_PAGE_STORE_RES = (
-    re.compile(r"storeSelected=(\d{2,4})", re.I),
     re.compile(r"""['"]store(?:Num|Number|Id|ID)['"]\s*:\s*['"]?(\d{2,4})""", re.I),
-    re.compile(r"[?&]storeid=(\d{2,4})", re.I),
+    re.compile(r"""\bstoreSelected\s*[=:]\s*['"]?(\d{2,4})""", re.I),
 )
+_MC_OTHER_CONDITION_RE = re.compile(r"\b(?:open\s*-?\s*box|refurb\w*|used|pre-?owned)\b", re.I)
 
 
 def _with_query(url: str, **params: str) -> str:
@@ -320,12 +319,16 @@ async def _mc_fetch(url: str, ctx: AdapterContext, store: str | None) -> Any:
     return await fetch_page(url, ctx)
 
 
-def _mc_inventory(view: PageView, html: str) -> tuple[str | None, str | None, str]:
-    """-> (verdict, count, raw text)."""
+def _mc_inventory(view: PageView, html: str, condition: str = "new") -> tuple[str | None, str | None, str]:
+    """-> (verdict, count, raw text). With condition "new", open-box / refurbished counts are ignored."""
     els = view.soup.select("span.inventoryCnt, .inventoryCnt, [class*=inventory-count]")
+    skipped_other = False
     for el in els:
         t = soup_text(el)
         if not t:
+            continue
+        if condition == "new" and _MC_OTHER_CONDITION_RE.search(t):
+            skipped_other = True
             continue
         low = t.lower()
         m = _MC_COUNT_RE.search(t)
@@ -336,6 +339,8 @@ def _mc_inventory(view: PageView, html: str) -> tuple[str | None, str | None, st
             return "out", None, t
         if "limited availability" in low or "in stock" in low:
             return "in", None, t
+    if skipped_other:
+        return "out", None, "no new stock (open box / refurbished only)"
     m = _MC_JS_INSTOCK_RE.search(html or "")
     if m:
         return ("in" if m.group(1).lower() == "true" else "out"), None, f"inStock: {m.group(1)}"
@@ -372,7 +377,7 @@ async def microcenter(url: str, ctx: AdapterContext) -> CheckResult | None:
                 break
 
     def dom(view: PageView) -> Hit | None:
-        verdict, count, raw = _mc_inventory(view, html)
+        verdict, count, raw = _mc_inventory(view, html, rcfg.condition)
         if verdict is None:
             return None
         name = _mc_store_name(view, html)
@@ -384,7 +389,8 @@ async def microcenter(url: str, ctx: AdapterContext) -> CheckResult | None:
                   "third_party": False, "store_configured": bool(store)}
         if verdict == "in":
             label = f"In stock at {where}" + (f" ({count})" if count else "")
-            key = f"pickup:{page_store or 'default'}"
+            # only a store the user chose is a pickup location; the site's default store is just "stock"
+            key = f"pickup:{store}" if store else "stock"
             return Hit("in", label + suffix, f"inventory: '{raw}'", detail=detail,
                        available=[Availability(key=key, label=label)],
                        price=pm.group(1) if pm else None, title=clean_text(nm.group(1)) if nm else None)
@@ -446,7 +452,9 @@ async def bhphoto(url: str, ctx: AdapterContext) -> CheckResult | None:
 ADORAMA_RULES = [
     rule(r"\btemporarily\s+not\s+available\b", "out", "Temporarily not available", strong=True),
     rule(r"^\W*notify\s+me\s+when\s+available\W*$", "out", "Out of stock", strong=True, where="button"),
-    rule(r"\bspecial\s+order\b", "in", "Special order"),
+    # only the stock-status / buy-box wording counts ("special order" also appears in policies and
+    # accessory blurbs), and a generic out-of-stock verdict still wins (weak rule)
+    rule(r"\bspecial\s+order\b", "in", "Special order", where="status"),
 ]
 
 
@@ -472,12 +480,17 @@ async def evga(url: str, ctx: AdapterContext) -> CheckResult | None:
 
 
 def _antonline_dom(view: PageView) -> Hit | None:
-    for el in view.soup.select(".add_to_cart_button, .add-to-cart-button, [class*=add_to_cart]"):
-        if el.name in ("button", "a", "input") and not el.has_attr("disabled") and "disabled" not in " ".join(el.get("class") or []):
-            txt = soup_text(el) or str(el.get("value") or "")
-            if re.search(r"sold\s*out|unavailable|notify", txt, re.I):
-                return Hit("out", "Sold out", f"button: '{txt}'")
-            return Hit("in", "In stock", f"button: '{txt or 'add to cart'}' (enabled)")
+    """The first add-to-cart control in the main product area decides; related-product buttons
+    elsewhere on the page (or a later enabled one) never stand in for a disabled main button."""
+    scope = view.scope if view.scope is not None else view.soup
+    for el in scope.select(".add_to_cart_button, .add-to-cart-button, [class*=add_to_cart]"):
+        if el.name not in ("button", "a", "input"):
+            continue
+        txt = soup_text(el) or str(el.get("value") or "")
+        if el.has_attr("disabled") or "disabled" in " ".join(el.get("class") or []) \
+                or re.search(r"sold\s*out|unavailable|notify", txt, re.I):
+            return Hit("out", "Sold out", f"button: '{txt or 'add to cart'}' (disabled)")
+        return Hit("in", "In stock", f"button: '{txt or 'add to cart'}' (enabled)")
     return None
 
 

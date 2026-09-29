@@ -133,3 +133,19 @@ async def test_bad_credentials_raise():
     respx.post(f"{API}/connect/oauth2/token").mock(return_value=httpx.Response(401, json={"error": "invalid"}))
     with pytest.raises(FetchError, match="rejected the client credentials"):
         await kroger.check(URL, ctx(fulfillment="pickup", zip="45209"))
+
+
+@respx.mock
+async def test_fulfillment_flags_are_case_insensitive():
+    body = fj("kroger_product.json")
+    body["data"]["items"][0]["inventory"]["stockLevel"] = "HIGH"
+    # the API spells it "shipToHome" in some responses and "shiptohome" in others
+    body["data"]["items"][0]["fulfillment"] = {"curbside": False, "delivery": False, "instore": True,
+                                               "shiptohome": True}
+    mock_api(body)
+    res = await kroger.check(URL, ctx(fulfillment="delivery", zip="45209"))
+    assert res.status == "in_stock" and [a.key for a in res.available] == ["stock"]
+    body["data"]["items"][0]["fulfillment"] = {"Curbside": False, "Delivery": False, "ShipToHome": False}
+    mock_api(body)
+    res = await kroger.check(URL, ctx(fulfillment="any", zip="45209"))
+    assert res.status == "out_of_stock"

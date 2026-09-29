@@ -117,6 +117,7 @@ def _build(ctx: AdapterContext, sku: str, verdict: str | None, text: str, *, sou
 
 
 def _pickup_note(text: str, ctx: AdapterContext) -> str:
+    """fulfillment=any without the API: the verdict is delivery-only; say pickup wasn't checked."""
     return f"{text} · {PICKUP_NEEDS_KEY}" if ctx.retailer_config.wants_pickup else text
 
 
@@ -231,13 +232,21 @@ async def check(url: str, ctx: AdapterContext) -> CheckResult | None:
             return generic_result(fetched, url, ctx)
 
     key = os.environ.get("BESTBUY_API_KEY", "").strip()
+    api_error: FetchError | None = None
     if key:
         try:
             return await _api_check(sku, key, ctx)
         except FetchError as e:
+            api_error = e
             log.warning("bestbuy API failed for %s (%s); falling back to the website", sku, e)
     elif rc.fulfillment == "pickup" and not rc.zip:
         return error_result(ctx, "Set a ZIP code for pickup", sku=sku, cart_url=cart_url(sku))
+    if rc.fulfillment == "pickup":
+        # The website endpoints only describe shipping: an online "Add to cart" says nothing about
+        # any store, so a pickup-only watch can't be answered without the official API.
+        text = PICKUP_NEEDS_KEY if api_error is None else "Pickup check failed (Best Buy API error)"
+        return result(None, text, detail=base_detail(ctx, sku=sku, source="none", cart_url=cart_url(sku),
+                                                     pickup_unavailable=True))
 
     # ---- priceBlocks, then the button-state service
     network_down = False
@@ -297,16 +306,26 @@ async def check(url: str, ctx: AdapterContext) -> CheckResult | None:
 _SOLD_BY_RE = re.compile(r"\bSold\s+(?:and\s+shipped\s+)?by\s+([A-Z0-9][\w&.'-]*(?:\s+[A-Z0-9][\w&.'-]*){0,4})")
 
 
+_SKU_JSON_RE = re.compile(r'\\?"sku(?:Id|ID|_id)?\\?"\s*:\s*\\?"?(\d{5,9})')
+
+
 def page_button_state(html: str, sku: str) -> str | None:
-    """The add-to-cart button state for ``sku`` (falls back to the first one on the page)."""
+    """The add-to-cart button state for ``sku`` only. Buttons / JSON blobs of other SKUs (carousels,
+    bundles, "frequently bought together") never stand in for it: no match → None."""
     soup = soup_of(html)
-    el = (soup.select_one(f'[data-sku-id="{sku}"][data-button-state]')
-          or soup.select_one(f'[data-sku-id="{sku}"] [data-button-state]')
-          or soup.select_one("[data-button-state]"))
-    if el is not None and el.get("data-button-state"):
-        return str(el["data-button-state"]).strip().upper()
-    m = BUTTON_STATE_JSON_RE.search(html)
-    return m.group(1) if m else None
+    for el in soup.select(f'[data-sku-id="{sku}"][data-button-state], [data-sku-id="{sku}"] [data-button-state]'):
+        own = el.get("data-sku-id")
+        if own and str(own) != sku:
+            continue
+        if el.get("data-button-state"):
+            return str(el["data-button-state"]).strip().upper()
+    # JSON: a buttonState belongs to the nearest SKU id in the same blob
+    skus = [(m.start(), m.group(1)) for m in _SKU_JSON_RE.finditer(html)]
+    for m in BUTTON_STATE_JSON_RE.finditer(html):
+        near = min(skus, key=lambda p: abs(p[0] - m.start()), default=None)
+        if near is not None and abs(near[0] - m.start()) <= 800 and near[1] == sku:
+            return m.group(1)
+    return None
 
 
 def _seller_info_from_page(html: str) -> tuple[str | None, bool | None]:

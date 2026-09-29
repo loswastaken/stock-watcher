@@ -200,3 +200,108 @@ async def test_ebay_challenge(monkeypatch):
     monkeypatch.setattr(fetcher, "fetch_html", fake)
     with pytest.raises(FetchError, match="^Blocked by bot protection on ebay.com$"):
         await bigbox.ebay(EBAY, ctx("ebay"))
+
+
+# ------------------------------------------------------------------ review fixes (main-area scoping)
+
+CAROUSEL_PAGES = [
+    # disabled main CTA, enabled "Add to Cart" in a product grid inside <main>
+    "<main><h1>Samsung 65in TV</h1><button disabled>Add to cart</button>"
+    "<div class='product-grid'><div class='tile'><button>Add to Cart</button></div></div></main>",
+    # disabled main CTA, a later enabled one in an unlabelled block ("decide on the first main CTA")
+    "<main><h1>Samsung 65in TV</h1><p>Big bright picture for the living room.</p>"
+    "<button disabled>Add to cart</button><div><div><button>Add to Cart</button></div></div></main>",
+    # no main CTA, recommendations headed "You might also like" carry an enabled button
+    "<main><h1>Samsung 65in TV</h1><div class='pdp'><span>Sign in for price</span></div>"
+    "<section class='you-might-like-list'><button>Add to Cart</button></section></main>",
+    "<main><h1>Samsung 65in TV</h1><p>Big bright picture for the living room.</p>"
+    "<section><h2>Customers also viewed</h2><button>Add to Cart</button></section></main>",
+]
+
+
+@pytest.mark.parametrize("fn", ["bjs", "homedepot", "kohls", "meijer", "officedepot", "qvc"])
+@pytest.mark.parametrize("html", CAROUSEL_PAGES)
+async def test_other_products_add_to_cart_is_never_in_stock(monkeypatch, fn, html):
+    serve(monkeypatch, f"<html><body>{html}</body></html>")
+    res = await getattr(bigbox, fn)(f"https://www.{fn}.com/p/item/1", ctx(fn))
+    assert res.status != "in_stock", (res.status_text, res.detail.get("matched"))
+
+
+async def test_main_add_to_cart_still_in_stock_next_to_carousel(monkeypatch):
+    serve(monkeypatch, "<html><body><main><h1>TV</h1><button>Add to Cart</button>"
+                       "<div class='product-grid'><button disabled>Add to Cart</button><span>Sold out</span></div>"
+                       "</main></body></html>")
+    res = await bigbox.bjs("https://www.bjs.com/product/x/1", ctx("bjs"))
+    assert res.status == "in_stock"
+
+
+async def test_verizon_continue_is_not_in_stock(monkeypatch):
+    serve(monkeypatch, "<html><body><main><h1>Phone</h1><button>Continue</button><p>Currently unavailable</p>"
+                       "</main></body></html>")
+    res = await bigbox.verizon("https://www.verizon.com/smartphones/x/", ctx("verizon"))
+    assert res.status == "out_of_stock"
+    serve(monkeypatch, "<html><body><main><h1>Phone</h1><p>Pick your color and storage to get started.</p>"
+                       "<button>Continue</button></main></body></html>")
+    res = await bigbox.verizon("https://www.verizon.com/smartphones/x/", ctx("verizon"))
+    assert res.status != "in_stock"
+
+
+async def test_verizon_ships_by_needs_buy_box_and_no_oos(monkeypatch):
+    serve(monkeypatch, "<html><body><main><h1>Phone</h1><p>Out of stock</p>"
+                       "<p>Ships by Dec 5 with standard shipping</p></main></body></html>")
+    res = await bigbox.verizon("https://www.verizon.com/x/", ctx("verizon"))
+    assert res.status == "out_of_stock"
+    # "Ships by" in an accessories blurb, not in the buy box
+    serve(monkeypatch, "<html><body><main><h1>Phone</h1><p>Case bundle: ships by Dec 5.</p>"
+                       "<p>Lots more descriptive marketing copy here.</p></main></body></html>")
+    res = await bigbox.verizon("https://www.verizon.com/x/", ctx("verizon"))
+    assert res.status != "in_stock"
+    serve(monkeypatch, "<html><body><main><h1>Phone</h1><p>Lots of descriptive marketing copy here.</p>"
+                       "<div class='shipping-info'>Ships by Dec 5</div></main></body></html>")
+    res = await bigbox.verizon("https://www.verizon.com/x/", ctx("verizon"))
+    assert res.status == "in_stock" and res.status_text == "In stock (ships later)"
+
+
+async def test_costco_sign_in_to_buy_yields_to_out_of_stock(monkeypatch):
+    serve(monkeypatch, "<html><body><main><h1>Pokemon Bundle</h1><p>This item is out of stock.</p>"
+                       "<button>Sign In to Buy</button></main></body></html>")
+    res = await bigbox.costco("https://www.costco.com/x.product.4000123456.html", ctx("costco"))
+    assert res.status == "out_of_stock"
+    serve(monkeypatch, "<html><body><main><h1>Pokemon Bundle</h1><p>Members only item, limit 2.</p>"
+                       "<button>Sign In to Buy</button></main></body></html>")
+    res = await bigbox.costco("https://www.costco.com/x.product.4000123456.html", ctx("costco"))
+    assert res.status == "in_stock"
+
+
+async def test_qvc_advanced_order_text_only_in_buy_box(monkeypatch):
+    serve(monkeypatch, "<html><body><main><h1>Airwrap</h1><p>Sold out</p>"
+                       "<p>Tip: Advanced Order items ship when they arrive.</p></main></body></html>")
+    res = await bigbox.qvc("https://www.qvc.com/x.product.A1.html", ctx("qvc"))
+    assert res.status == "out_of_stock"
+    serve(monkeypatch, "<html><body><main><h1>Airwrap</h1><p>Plenty of product description text.</p>"
+                       "<p>Advanced Order items are listed in your account.</p></main></body></html>")
+    res = await bigbox.qvc("https://www.qvc.com/x.product.A1.html", ctx("qvc"))
+    assert res.status != "in_stock"
+
+
+def _nd(obj) -> str:
+    import json
+
+    return f'<html><body><script id="__NEXT_DATA__" type="application/json">{json.dumps(obj)}</script></body></html>'
+
+
+def test_stockx_related_products_asks_dont_count():
+    html = _nd({"props": {"pageProps": {"product": {"id": "a", "market": {"lowestAsk": None}},
+                                        "related": [{"id": "b", "market": {"lowestAsk": 45}}]}}})
+    assert bigbox.stockx_lowest_ask(html) == (True, None)
+    html = _nd({"props": {"pageProps": {"product": {"id": "a", "market": {"lowestAsk": 120},
+                                                    "variants": [{"market": {"lowestAsk": 110}}]},
+                                        "relatedProducts": {"edges": [{"node": {"market": {"lowestAsk": 45}}}]}}}})
+    assert bigbox.stockx_lowest_ask(html) == (True, 110.0)
+
+
+def test_stockx_picks_product_by_url_key():
+    html = _nd({"a": {"product": {"id": "x", "urlKey": "other-shoe", "market": {"lowestAsk": 50}}},
+                "b": {"product": {"id": "y", "urlKey": "my-shoe", "market": {"lowestAsk": None}}}})
+    assert bigbox.stockx_lowest_ask(html, "https://stockx.com/my-shoe") == (True, None)
+    assert bigbox.stockx_lowest_ask(html, "https://stockx.com/third-shoe") == (False, None)

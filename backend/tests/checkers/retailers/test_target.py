@@ -195,3 +195,82 @@ async def test_preorder_and_run_adapter_dispatch():
     res = await run_adapter(URL, None, None)
     assert res.status == "in_stock" and res.status_text == "Pre-order"
     assert res.detail["adapter"] == "target"
+
+
+# ------------------------------------------------------------------ review fixes
+
+
+@respx.mock
+async def test_empty_nearby_stores_answer_is_not_cached_for_hours():
+    mock_common()
+    stores = respx.get(url__startswith=REDSKY + "nearby_stores_v1").mock(
+        return_value=httpx.Response(200, json={"data": None}))
+    respx.get(url__startswith=REDSKY + "pdp_fulfillment_v1").mock(
+        return_value=httpx.Response(200, json=fj("target_fulfillment.json")))
+    res = await target.check(URL, ctx(fulfillment="pickup", zip="60302"))
+    assert res.status == "unknown"  # no answer about stores is not "no pickup"
+    stores.mock(return_value=httpx.Response(200, json=fj("target_nearby_stores.json")))
+    res = await target.check(URL, ctx(fulfillment="pickup", zip="60302"))
+    assert res.status == "in_stock" and stores.call_count == 2
+    # a genuinely empty list is cached briefly only
+    target._stores_cache.clear()
+    stores.mock(return_value=httpx.Response(200, json={"data": {"nearby_stores": {"stores": []}}}))
+    res = await target.check(URL, ctx(fulfillment="pickup", zip="60302"))
+    assert res.status == "out_of_stock"
+    exp, cached = target._stores_cache[("60302", 25)]
+    assert cached == [] and exp - target.time.monotonic() <= target.STORES_EMPTY_TTL <= 300
+
+
+@respx.mock
+async def test_nearby_stores_failure_keeps_delivery_for_any():
+    mock_common()
+    respx.get(url__startswith=REDSKY + "nearby_stores_v1").mock(return_value=httpx.Response(500))
+    respx.get(url__startswith=REDSKY + "pdp_fulfillment_v1").mock(
+        return_value=httpx.Response(200, json=fj("target_fulfillment.json")))
+    res = await target.check(URL, ctx(fulfillment="any", zip="60302"))
+    assert res.status == "in_stock" and [a.key for a in res.available] == ["stock"]
+    assert not target._stores_cache
+
+
+@respx.mock
+async def test_warm_any_check_makes_at_most_four_requests():
+    mock_common()
+    five = {"data": {"nearby_stores": {"stores": [
+        {"store_id": str(i), "location_name": f"S{i}", "distance": i, "mailing_address": {"region": "IL"}}
+        for i in range(1, 6)]}}}
+    respx.get(url__startswith=REDSKY + "nearby_stores_v1").mock(return_value=httpx.Response(200, json=five))
+
+    def ful_side(request):  # each call only reports its own store
+        sid = q(request).get("store_id")
+        return httpx.Response(200, json={"data": {"product": {"fulfillment": {
+            "shipping_options": {"availability_status": "OUT_OF_STOCK"},
+            "store_options": [{"location_id": sid, "order_pickup": {"availability_status": "OUT_OF_STOCK"}}]}}}})
+
+    ful = respx.get(url__startswith=REDSKY + "pdp_fulfillment_v1").mock(side_effect=ful_side)
+    await target.check(URL, ctx(fulfillment="any", zip="60601"))
+    before = len(respx.calls)
+    res = await target.check(URL, ctx(fulfillment="any", zip="60601"))
+    assert len(respx.calls) - before <= 4
+    assert len(res.detail["pickup_stores"]) == target.MAX_PICKUP_STORES == 3
+    assert [q(c.request)["store_id"] for c in ful.calls][-3:] == ["1", "2", "3"]
+
+
+@respx.mock
+async def test_marketplace_vendor_when_is_marketplace_missing():
+    body = fj("target_pdp_client.json")
+    item = body["data"]["product"]["item"]
+    del item["fulfillment"]["is_marketplace"]
+    item["product_vendors"] = [{"id": "77", "vendor_name": "GameStopDeals LLC", "relationship_type": "MARKETPLACE"}]
+    respx.get(PDP).mock(return_value=httpx.Response(200, text=fx("target_pdp.html")))
+    respx.get(url__startswith=REDSKY + "pdp_client_v1").mock(return_value=httpx.Response(200, json=body))
+    respx.get(url__startswith=REDSKY + "pdp_fulfillment_v1").mock(
+        return_value=httpx.Response(200, json=fj("target_fulfillment.json")))
+    res = await target.check(URL, ctx())
+    assert res.status == "out_of_stock" and res.status_text == "Third-party sellers only"
+    assert res.detail["seller"] == "GameStopDeals LLC" and res.detail["third_party"] is True
+
+
+def test_seller_of_plain_supplier_vendor_is_not_third_party():
+    # first-party items list their supplier as vendor_name; that alone is not a marketplace seller
+    assert target.seller_of({"fulfillment": {}, "product_vendors": [{"vendor_name": "POKEMON USA INC"}]}) == (None, None)
+    assert target.seller_of({"fulfillment": {"is_marketplace": False}}) == ("Target", False)

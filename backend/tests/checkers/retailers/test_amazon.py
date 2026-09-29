@@ -104,3 +104,27 @@ async def test_fetch_bot_protection_is_reworded(monkeypatch):
 
 async def test_non_product_url_falls_through():
     assert await amazon.check("https://www.amazon.com/s?k=switch", ctx()) is None
+
+
+# ------------------------------------------------------------------ review fixes
+
+_NO_SELLER = """<html><body><span id="productTitle">Widget</span><div id="availability"><span>In Stock</span></div>
+    <input id="add-to-cart-button" type="submit" value="Add to Cart">{extra}</body></html>"""
+
+
+async def test_official_only_unknown_seller_is_unknown(monkeypatch):
+    serve(monkeypatch, _NO_SELLER.format(extra=""))
+    res = await amazon.check(URL, ctx())
+    assert res.status == "unknown" and res.status_text == "Couldn't confirm the seller"
+    res = await amazon.check(URL, ctx(official_only=False))
+    assert res.status == "in_stock"
+    serve(monkeypatch, _NO_SELLER.format(extra='<input type="hidden" id="merchantID" value="ATVPDKIKX0DER">'))
+    res = await amazon.check(URL, ctx())
+    assert res.status == "in_stock" and res.detail["third_party"] is False
+
+
+async def test_temporarily_out_of_stock_with_add_to_cart_is_out(monkeypatch):
+    serve(monkeypatch, _NO_SELLER.format(extra='<div id="merchant-info">Ships from and sold by Amazon.com.</div>')
+          .replace("In Stock", "Temporarily out of stock. Order now and we'll deliver when available."))
+    res = await amazon.check(URL, ctx())
+    assert res.status == "out_of_stock" and res.status_text == "Temporarily out of stock"

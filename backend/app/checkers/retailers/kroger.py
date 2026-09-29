@@ -143,7 +143,8 @@ async def check(url: str, ctx: AdapterContext) -> CheckResult | None:
         return result("out", "Not sold at this store", detail=detail)
     item = (product.get("items") or [{}])[0] or {}
     level = str(dig(item, "inventory", "stockLevel") or "").upper() or None
-    ful = item.get("fulfillment") or {}
+    ful = item.get("fulfillment") if isinstance(item.get("fulfillment"), dict) else {}
+    flags = {str(k).lower(): v for k, v in ful.items()}  # shipToHome / shiptohome / ShipToHome
     promo, regular = dig(item, "price", "promo"), dig(item, "price", "regular")
     price = promo if isinstance(promo, (int, float)) and promo > 0 else regular
     detail.update(stock_level=level, fulfillment_options=ful or None)
@@ -158,11 +159,11 @@ async def check(url: str, ctx: AdapterContext) -> CheckResult | None:
     available: list[Availability] = []
     texts: list[str] = []
     stock_text = IN_LEVELS[level]
-    if rc.wants_pickup and ful.get("curbside", True) is not False:
+    if rc.wants_pickup and flags.get("curbside", True) is not False:
         label = f"Pickup · {store['name']}" + (" · low stock" if level == "LOW" else "")
         available.append(Availability(key=f"pickup:{store['id']}", label=label))
         texts.append(label)
-    if rc.wants_delivery and (not ful or ful.get("delivery") or ful.get("shipToHome")):
+    if rc.wants_delivery and (not flags or flags.get("delivery") or flags.get("shiptohome")):
         available.append(Availability(key=STOCK_KEY, label=f"Delivery · {stock_text}"))
         texts.append(f"{stock_text} for delivery")
     if not available:

@@ -181,6 +181,20 @@ async def test_nvidia_inventory_down_uses_search_status():
     assert res.status == "in_stock" and res.detail["sku"] == "NVGFT580" and res.detail["source"] == "search"
 
 
+@respx.mock
+async def test_nvidia_never_reports_another_gpus_founders_edition():
+    # RTX 5070 page: the search lists the 5090 / 5080 FEs but not a 5070 FE -> no product, no SKU
+    url = "https://marketplace.nvidia.com/en-us/consumer/graphics-cards/nvidia-geforce-rtx-5070/"
+    respx.get(NV_SEARCH).mock(return_value=httpx.Response(200, json=fxj("nvidia_search.json")))
+    inv = respx.get(NV_INV).mock(return_value=httpx.Response(200, json=fxj("nvidia_feinventory_active.json")))
+    assert await el.nvidia(url, ctx_for(url)) is None
+    assert not inv.called
+    # a pinned SKU missing from the search must not borrow the 5080 FE's buy_now status
+    url = "https://marketplace.nvidia.com/en-us/consumer/graphics-cards/nvidia-geforce-rtx-5080/"
+    respx.get(NV_INV).mock(return_value=httpx.Response(503))
+    assert await el.nvidia(url, ctx_for(url, store_id="NVGFT999")) is None
+
+
 async def test_nvidia_without_gpu_or_sku_falls_through():
     url = "https://www.nvidia.com/en-us/shield/"
     assert await el.nvidia(url, ctx_for(url)) is None
@@ -219,8 +233,34 @@ async def test_microcenter_without_store_uses_page_default(page):
 async def test_microcenter_default_store_in_stock_label(page):
     page(fx("microcenter_instock.html"))
     res = await el.microcenter(MC_URL, ctx_for(MC_URL))
-    assert res.status == "in_stock" and res.available[0].key == "pickup:101"
+    # no store chosen: the site's default store is reported as plain "stock", not a pickup location
+    assert res.status == "in_stock" and [a.key for a in res.available] == ["stock"]
     assert "default store" in res.status_text
+
+
+async def test_microcenter_ignores_store_ids_in_links(page):
+    html = ("<html><body><main><h1>RTX 5090</h1><span class='inventoryCnt'>5 NEW IN STOCK</span>"
+            "<a href='/product/691234/x?storeid=155'>Check Denver</a></main></body></html>")
+    page(html)
+    res = await el.microcenter(MC_URL, ctx_for(MC_URL))
+    assert res.status == "in_stock" and [a.key for a in res.available] == ["stock"]
+    assert res.detail["store_id"] is None
+
+
+@pytest.mark.parametrize("cnt", ["3 OPEN BOX IN STOCK", "2 REFURBISHED IN STOCK"])
+async def test_microcenter_open_box_is_not_new_stock(page, cnt):
+    page(f"<html><body><main><h1>RTX 5090</h1><span class='inventoryCnt'>{cnt}</span></main></body></html>")
+    res = await el.microcenter(MC_URL, ctx_for(MC_URL))
+    assert res.status == "out_of_stock"
+    res = await el.microcenter(MC_URL, ctx_for(MC_URL, condition="any"))
+    assert res.status == "in_stock"
+
+
+async def test_microcenter_new_count_next_to_open_box(page):
+    page("<html><body><main><h1>RTX 5090</h1><span class='inventoryCnt'>4 OPEN BOX IN STOCK</span>"
+         "<span class='inventoryCnt'>0 NEW IN STOCK</span></main></body></html>")
+    res = await el.microcenter(MC_URL, ctx_for(MC_URL))
+    assert res.status == "out_of_stock"
 
 
 @pytest.mark.parametrize("text,verdict", [
@@ -274,6 +314,19 @@ async def test_adorama_temporarily_not_available(page):
     assert res.detail["retailer"] == "adorama"
 
 
+async def test_adorama_special_order_only_counts_in_stock_status(page):
+    url = "https://www.adorama.com/niz8.html"
+    # "special order" in a policy blurb must not override a clear out-of-stock verdict
+    page("<html><body><main><h1>Nikon Z8</h1><div class='av-stock'><span>Out of stock</span></div>"
+         "<p>Special order items are non-returnable.</p></main></body></html>")
+    res = await el.adorama(url, ctx_for(url))
+    assert res.status == "out_of_stock"
+    page("<html><body><main><h1>Nikon Z8</h1><p>Lots of product description text here.</p>"
+         "<div class='av-stock'><span class='av-message'>Special Order</span></div></main></body></html>")
+    res = await el.adorama(url, ctx_for(url))
+    assert res.status == "in_stock" and res.status_text == "Special order"
+
+
 async def test_evga_auto_notify_is_out(page):
     url = "https://www.evga.com/products/product.aspx?pn=220-G7-1000-X1"
     page(fx("evga_autonotify.html"))
@@ -310,6 +363,24 @@ async def test_antonline_add_to_cart(page):
          "<button class='add_to_cart_button uk-button'>Add to Cart</button></main></body></html>")
     res = await el.antonline(url, ctx_for(url))
     assert res.status == "in_stock" and res.detail["seller"] == "Antonline"
+
+
+async def test_antonline_related_add_to_cart_is_not_the_product(page):
+    url = "https://www.antonline.com/Sony/Electronics/Gaming_Devices/Gaming_Consoles/1500001"
+    page("<html><body><main><h1>PlayStation 5 Pro Console</h1><p>Our flagship console, restocks vary.</p>"
+         "<span>Sold Out</span></main><div class='rel'><a class='add_to_cart_button' href='#'>Add to Cart</a>"
+         "</div></body></html>")
+    res = await el.antonline(url, ctx_for(url))
+    assert res.status == "out_of_stock"
+
+
+async def test_antonline_disabled_main_button_beats_later_enabled_one(page):
+    url = "https://www.antonline.com/Sony/Electronics/Gaming_Devices/Gaming_Consoles/1500001"
+    page("<html><body><main><h1>PlayStation 5 Pro Console</h1><p>Our flagship console, restocks vary.</p>"
+         "<button class='add_to_cart_button' disabled>Add to Cart</button>"
+         "<div><button class='add_to_cart_button'>Add to Cart</button></div></main></body></html>")
+    res = await el.antonline(url, ctx_for(url))
+    assert res.status == "out_of_stock"
 
 
 async def test_antonline_queue_it(page):

@@ -266,3 +266,76 @@ async def test_playasia_in_stock_usually_ships(page):
     page(fx("playasia_instock.html"))
     res = await games.playasia(url, ctx_for(url))
     assert res.status == "in_stock" and res.detail["retailer"] == "playasia"
+
+
+# ============================================================ review fixes: never another product's state
+
+
+def _nd_page(obj, body: str = "<main><h1>Main product</h1></main>") -> str:
+    return (f"<html><body>{body}<script id=\"__NEXT_DATA__\" type=\"application/json\">{json.dumps(obj)}"
+            "</script></body></html>")
+
+
+async def test_nintendo_unmatched_url_key_does_not_borrow_other_product(page):
+    url = "https://www.nintendo.com/us/store/products/main-thing/"
+    page(_nd_page({"props": {"x": [{"__typename": "StoreProduct", "urlKey": "other-item", "name": "Other",
+                                    "sku": "1", "salesStatus": "IN_STOCK"}]}}))
+    res = await games.nintendo(url, ctx_for(url))
+    assert res.status != "in_stock"
+
+
+async def test_pokemoncenter_unmatched_code_does_not_borrow_availability(page):
+    page(_nd_page({"props": {"a": {"code": "999", "availability": {"state": "AVAILABLE"}},
+                             "b": {"code": "701-1", "name": "x"}}}))
+    url = "https://www.pokemoncenter.com/product/701-1/foo"
+    res = await games.pokemoncenter(url, ctx_for(url))
+    assert res.status != "in_stock"
+
+
+async def test_pokemoncenter_related_list_under_product_does_not_count(page):
+    page(_nd_page({"product": {"id": "701-1", "name": "Main",
+                               "related": [{"id": "999", "availability": {"state": "AVAILABLE"}}]}}))
+    url = "https://www.pokemoncenter.com/product/701-1/foo"
+    res = await games.pokemoncenter(url, ctx_for(url))
+    assert res.status != "in_stock"
+
+
+def _tile(name, cond, av, pid=None):
+    info = {"name": name, "condition": cond, "availability": av, "sku": name}
+    if pid:
+        info["productID"] = pid
+    return f"<div data-gtmdata='{json.dumps({'productInfo': info})}'></div>"
+
+
+async def test_gamestop_carousel_tile_is_not_the_product(page):
+    page(f"<html><body><main><h1>Main</h1>{_tile('main', 'Digital', 'Not Available')}</main>"
+         f"<section>{_tile('other', 'New', 'Available')}</section></body></html>")
+    assert await games.gamestop(GS_URL, ctx_for(GS_URL)) is None  # inconclusive -> SFCC recipe / generic
+
+
+async def test_gamestop_tile_with_other_pid_is_ignored(page):
+    page(f"<html><body><main><h1>Sony PlayStation 5 Pro Console</h1>"
+         f"{_tile('ps5pro', 'New', 'Not Available', '417934')}{_tile('ps5slim', 'New', 'Available', '400001')}"
+         "</main></body></html>")
+    res = await games.gamestop(GS_URL, ctx_for(GS_URL))
+    assert res.status == "out_of_stock"
+    page(f"<html><body><main><h1>Sony PlayStation 5 Pro Console</h1>"
+         f"{_tile('ps5slim', 'New', 'Available', '400001')}</main></body></html>")
+    assert await games.gamestop(GS_URL, ctx_for(GS_URL)) is None
+
+
+async def test_playasia_discontinued_elsewhere_is_not_out(page):
+    url = "https://www.play-asia.com/persona-3-reload-english/13/70gu6x"
+    page(fx("playasia_instock.html").replace("In stock, usually ships within 24 hours.", "Ships in 3-5 days")
+         + "")
+    res = await games.playasia(url, ctx_for(url))
+    assert res.status != "out_of_stock"  # "(Discontinued)" labels another edition in the notes
+
+
+async def test_playasia_status_out_of_stock_beats_in_stock_text(page):
+    url = "https://www.play-asia.com/persona-3-reload-english/13/70gu6x"
+    page(fx("playasia_instock.html").replace("In stock, usually ships within 24 hours.", "Out of stock")
+         .replace("</div>\n</body>", "<p class='notes'>Tip: in stock, usually ships items leave in 24h.</p>"
+                                      "</div>\n</body>"))
+    res = await games.playasia(url, ctx_for(url))
+    assert res.status == "out_of_stock"

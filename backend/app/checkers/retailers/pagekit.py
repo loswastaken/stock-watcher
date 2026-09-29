@@ -9,8 +9,12 @@ Precedence used by :func:`analyze_page` (first conclusive wins):
 2. *strong* phrase rules — site vocabulary that must beat stale structured data
    ("Order period has ended", "Request an invitation", "Auto Notify").
 3. generic structured data (JSON-LD / microdata / RDFa / meta tags).
-4. *weak* phrase rules (site wording the generic heuristics don't know).
+4. *weak* phrase rules (site wording the generic heuristics don't know). A weak "in" rule never
+   overrides a generic out-of-stock verdict.
 5. generic button / text heuristics.
+
+Rules match ``where``: "button" (main-area buttons), "text" (main-area text), "any" (both), or
+"status" (only the buy box / availability elements, e.g. ``.stock_msg``, ``.av-stock``).
 """
 from __future__ import annotations
 
@@ -109,7 +113,7 @@ class Rule:
     verdict: str | None  # "in" | "out" | None (unknown)
     text: str
     strong: bool = False
-    where: str = "any"  # "button" | "text" | "any"
+    where: str = "any"  # "button" | "text" | "any" | "status"
 
 
 def rule(rx: str, verdict: str | None, text: str, *, strong: bool = False, where: str = "any") -> Rule:
@@ -121,28 +125,66 @@ class PageView:
     soup: BeautifulSoup  # full, untouched document
     text: str  # visible main-content text (noise stripped)
     buttons: list[tuple[str, bool]]  # (text, disabled)
+    scope: Tag | BeautifulSoup | None = None  # main product area of a noise-stripped copy
+    status: str = ""  # text of the buy box / availability / stock-status elements in ``scope``
 
 
 _BUTTON_SEL = ("button, input[type=submit], input[type=button], [role=button], a[class*=btn], a[class*=button], "
                "a[class*=cart], a[id*=cart], a[id*=buy], a[class*=buy]")
 
 
+_STATUS_RE = re.compile(r"stock|avail|status|inventory|buy-?box|buybox|add-?to-?cart|purchase|ship", re.I)
+
+
+def _status_text(scope: Any) -> str:
+    texts: list[str] = []
+    for el in scope.find_all(True):
+        ident = " ".join(el.get("class") or []) + " " + str(el.get("id") or "")
+        if not _STATUS_RE.search(ident) or el.find("h1") is not None:
+            continue
+        t = clean_text(el.get_text(" ", strip=True))
+        if t and len(t) <= 300 and not any(t in x for x in texts):
+            texts.append(t)
+    return " | ".join(texts)
+
+
 def page_view(html: str) -> PageView:
     full = BeautifulSoup(html or "", "lxml")
     work = BeautifulSoup(html or "", "lxml")
     generic._strip_noise(work)  # noqa: SLF001 - shared package internals
-    scope = generic._main_scope(work)  # noqa: SLF001
+    scope = product_scope(work)
     buttons: list[tuple[str, bool]] = []
     for el in scope.select(_BUTTON_SEL):
         t = generic._button_text(el)  # noqa: SLF001
         if t and len(t) <= 60:
             buttons.append((t, generic._is_disabled(el)))  # noqa: SLF001
-    return PageView(soup=full, text=clean_text(scope.get_text(" ", strip=True)), buttons=buttons)
+    return PageView(soup=full, text=clean_text(scope.get_text(" ", strip=True)), buttons=buttons,
+                    scope=scope, status=_status_text(scope))
 
 
-def match_rules(view: PageView, rules: Iterable[Rule], *, strong: bool) -> tuple[Rule, str] | None:
+def product_scope(work: BeautifulSoup) -> Any:
+    """Where the page's own product lives (``work`` already noise-stripped): generic's main scope,
+    or — when that fell back to <body> because <main> has little text — a Product itemtype / <main>
+    container that holds the page's <h1>, so related-product blocks outside it don't count."""
+    scope = generic._main_scope(work)  # noqa: SLF001
+    if scope is not (work.body or work):
+        return scope
+    for c in (work.find(attrs={"itemtype": re.compile(r"schema\.org/Product", re.I)}), work.find("main"),
+              work.find(attrs={"role": "main"})):
+        if isinstance(c, Tag) and c.find("h1") is not None:
+            return c
+    return scope
+
+
+def match_rules(view: PageView, rules: Iterable[Rule], *, strong: bool,
+                allow_in: bool = True) -> tuple[Rule, str] | None:
     for r in rules:
-        if r.strong != strong:
+        if r.strong != strong or (r.verdict == "in" and not allow_in):
+            continue
+        if r.where == "status":
+            m = r.pattern.search(view.status)
+            if m:
+                return r, f"status: '{clean_text(m.group(0))}'"
             continue
         if r.where in ("button", "any"):
             for t, disabled in view.buttons:
@@ -153,6 +195,15 @@ def match_rules(view: PageView, rules: Iterable[Rule], *, strong: bool) -> tuple
             if m:
                 return r, f"text: '{clean_text(m.group(0))}'"
     return None
+
+
+def _foreign_buy_button(g: CheckResult, view: PageView) -> bool:
+    """generic said "in" because of an enabled buy button, but the product area has none (the
+    button belonged to a related product outside it)."""
+    m = str(g.detail.get("matched") or "")
+    if g.status != "in_stock" or not m.startswith("button:"):
+        return False
+    return not any(generic.BUY_RE.search(t) and not d for t, d in view.buttons)
 
 
 def _structured_verdict(g: CheckResult) -> bool:
@@ -190,6 +241,15 @@ def analyze_page(
     rules = list(rules)
     g = generic.analyze(html, url, ctx.generic_config, base_url=final_url or url)
     view = page_view(html)
+    if _foreign_buy_button(g, view):
+        oos = next((name for name, rx in generic.OOS_PHRASES if rx.search(view.text)), None)
+        g.available = []
+        if oos:
+            g.status, g.status_text = "out_of_stock", "Sold out" if oos == "sold out" else "Out of stock"
+            g.detail["matched"] = f"text: '{oos}'"
+        else:
+            g.status, g.status_text = "unknown", "Unknown"
+            g.detail["matched"] = None
     signals = list(g.detail.get("signals") or [])
     extra = dict(extra or {})
 
@@ -212,7 +272,8 @@ def analyze_page(
         return mine(Hit(hit2[0].verdict, hit2[0].text, hit2[1]))
     if _structured_verdict(g):
         return finish(g, ctx, adapter="generic", **extra)
-    hit2 = match_rules(view, rules, strong=False)
+    # a clear generic out-of-stock verdict beats weak site wording that claims stock
+    hit2 = match_rules(view, rules, strong=False, allow_in=g.status != "out_of_stock")
     if hit2:
         return mine(Hit(hit2[0].verdict, hit2[0].text, hit2[1]))
     if g.status in ("in_stock", "out_of_stock"):

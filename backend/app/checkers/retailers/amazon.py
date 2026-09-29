@@ -24,6 +24,7 @@ _CAPTCHA_RE = re.compile(r"opfcaptcha|/errors/validateCaptcha|click the button b
                          r"|enter the characters you see below|type the characters you see in this image", re.IGNORECASE)
 _AMAZON_SELLER_RE = re.compile(r"^\s*amazon(?:\.com)?(?:\s+services(?:\s+llc)?)?\s*$|^\s*amazon\.com,?\s+inc\.?\s*$",
                                re.IGNORECASE)
+_TEMP_OOS_RE = re.compile(r"temporarily\s+out\s+of\s+stock", re.IGNORECASE)
 _SHIPS_SOLD_AMAZON_RE = re.compile(r"ships\s+from\s+and\s+sold\s+by\s+amazon", re.IGNORECASE)
 PRICE_SELECTORS = (
     "#corePrice_feature_div .a-price .a-offscreen",
@@ -137,9 +138,16 @@ async def check(url: str, ctx: AdapterContext) -> CheckResult | None:
         or soup.select_one("#preorder_availability, #pre-order-button") is not None
     if condition_used_only(soup) and ctx.retailer_config.condition == "new":
         return override(res, "out", "Only used offers", matched="used-only buy box")
+    if _TEMP_OOS_RE.search(availability):
+        # "Temporarily out of stock. Order now and we'll deliver when available." keeps an Add to Cart
+        # button, but nothing ships until Amazon restocks — that's not a restock yet.
+        return override(res, "out", "Temporarily out of stock", matched="#availability")
     if has_buy:
         if third and official:
             return override(res, "out", THIRD_PARTY_TEXT, matched=f"buy box seller: {seller}")
+        if third is None and official:
+            # a buy button whose seller we can't see could be any marketplace seller
+            return override(res, None, "Couldn't confirm the seller", matched="buy box seller unknown")
         text = "Pre-order" if preorder else _in_text(availability)
         return override(res, "in", text, matched="#add-to-cart-button")
     if soup.select_one("#outOfStock") is not None or re.search(r"currently\s+unavailable", availability, re.IGNORECASE):
@@ -158,8 +166,6 @@ def _in_text(availability: str) -> str:
     m = re.search(r"only\s+\d+\s+left\s+in\s+stock", availability, re.IGNORECASE)
     if m:
         return clean_text(m.group(0)).capitalize()
-    if re.search(r"temporarily\s+out\s+of\s+stock", availability, re.IGNORECASE):
-        return "Backorder (orderable)"
     return "In stock"
 
 

@@ -19,7 +19,7 @@ from bs4 import BeautifulSoup
 from .. import fetcher, generic
 from ..base import Availability, CheckResult
 from ..fetcher import FetchError, FetchResult
-from ..util import clean_text, parse_amount, walk
+from ..util import clean_text, parse_amount
 from .base import STOCK_KEY, AdapterContext, next_data, result, soup_of
 
 QUEUE_TEXT = "Waiting room active — drop may be live"
@@ -64,9 +64,11 @@ def price_value(price: Any) -> float | None:
     return float(amt) if amt is not None else None
 
 
-def generic_result(fetched: FetchResult, url: str, ctx: AdapterContext, **extra: Any) -> CheckResult:
-    """The generic checker's verdict for an already-fetched page, tagged with retailer detail."""
-    res = generic.analyze(fetched.text, url, ctx.generic_config, base_url=fetched.url)
+def generic_result(fetched: FetchResult, url: str, ctx: AdapterContext, *, html: str | None = None,
+                   **extra: Any) -> CheckResult:
+    """The generic checker's verdict for an already-fetched page (or ``html``, a cleaned copy of it),
+    tagged with retailer detail."""
+    res = generic.analyze(fetched.text if html is None else html, url, ctx.generic_config, base_url=fetched.url)
     res.detail.update(base_detail(ctx))
     res.detail["fetched_via"] = "browser" if fetched.via_browser else "http"
     pv = price_value(res.price)
@@ -96,49 +98,164 @@ def override(res: CheckResult, verdict: str | None, status_text: str, *, label: 
 
 @dataclass(frozen=True)
 class Rule:
-    kind: str  # "button" (visible button/link text) | "text" (visible page text)
+    kind: str  # "button" (the page's main call-to-action) | "text" (visible page text)
     pattern: re.Pattern
     verdict: str | None  # "in" | "out" | None (unknown)
     label: str
+    scope: str = "main"  # text rules: "main" (main product area) | "buybox" (buy box / status elements only)
+    weak: bool = False  # an "in" rule that yields to any clear out-of-stock signal in the main area
 
 
-def _b(p: str, verdict: str | None, label: str) -> Rule:
-    return Rule("button", re.compile(p, re.IGNORECASE), verdict, label)
+def _b(p: str, verdict: str | None, label: str, *, weak: bool = False) -> Rule:
+    return Rule("button", re.compile(p, re.IGNORECASE), verdict, label, weak=weak)
 
 
-def _t(p: str, verdict: str | None, label: str) -> Rule:
-    return Rule("text", re.compile(p, re.IGNORECASE), verdict, label)
+def _t(p: str, verdict: str | None, label: str, *, scope: str = "main", weak: bool = False) -> Rule:
+    return Rule("text", re.compile(p, re.IGNORECASE), verdict, label, scope, weak)
 
 
 _BUTTON_SEL = ("button, input[type=submit], input[type=button], [role=button], a[class*=btn], a[class*=button], "
                "a[class*=cart], a[id*=cart], a[class*=Button], [data-testid*=button], [data-automation-id*=button]")
 
+# Recommendation / listing containers the generic noise filter doesn't know (carousels of *other*
+# products carry their own enabled "Add to cart" buttons and "In stock" badges).
+_REC_CLASS_RE = re.compile(
+    r"(?:^|[\s_-])(?:you-?might\w*|might-?(?:also-?)?like|may-?also-?like|product-?(?:grid|tiles?|list|carousel|pods?"
+    r"|recs?|shelf)|tiles?|sponsored\w*|frequently-?bought\w*|bought-?together|shelf|slider|swiper\w*|slick\w*|recs?"
+    r"|more-?from|trending|best-?sellers?|similar\w*|related\w*|recommend\w*|upsells?|cross-?sells?|recently-?viewed)"
+    r"(?:$|[\s_-])", re.IGNORECASE)
+_REC_HEADING_RE = re.compile(
+    r"^\W*(?:you\s+(?:may|might)\s+also\s+(?:like|need)|customers\s+(?:also|who)\b|frequently\s+bought|similar\s+"
+    r"(?:items|products)|related\s+(?:items|products)|sponsored|more\s+(?:from|like\s+this|to\s+consider)"
+    r"|recommended|people\s+also|compare\s+similar|recently\s+viewed|shop\s+similar|top\s+picks|trending"
+    r"|complete\s+the\s+look|pairs\s+well|goes\s+well|bought\s+together)", re.IGNORECASE)
+_BUYBOX_RE = re.compile(
+    r"buy-?box|buybox|add-?to-?(?:cart|bag)|atc|purchase|checkout|fulfil+ment|shipping|delivery|avail|stock"
+    r"|inventory|status|device-?config|cta", re.IGNORECASE)
+
+
+def _ident(el: Any) -> str:
+    cls = el.get("class") or []
+    cls = " ".join(cls) if isinstance(cls, list) else str(cls)
+    return f"{cls} {el.get('id') or ''} {el.get('data-testid') or ''} {el.get('data-component') or ''}".strip()
+
+
+def _drop_recs(soup: BeautifulSoup) -> None:
+    """Remove other-product containers: by class/id, and sections headed "You may also like"..."""
+    for el in soup.find_all(True):
+        if el.decomposed or el.attrs is None or el.name in ("html", "body", "main"):
+            continue
+        ident = _ident(el)
+        if ident and _REC_CLASS_RE.search(ident) and el.find("h1") is None:
+            el.decompose()
+    for h in soup.find_all(["h2", "h3", "h4", "h5"]):
+        if h.decomposed or not _REC_HEADING_RE.search(clean_text(h.get_text(" ", strip=True))):
+            continue
+        box = h.parent
+        if box is not None and box.name not in ("html", "body", "main", "[document]") and box.find("h1") is None:
+            box.decompose()
+
+
+def clean_html(html: str) -> str:
+    """The page without recommendation carousels (scripts / JSON-LD kept) — what the generic
+    checker and the site rules analyse."""
+    soup = BeautifulSoup(html or "", "lxml")
+    _drop_recs(soup)
+    return str(soup)
+
 
 def _buttons(soup: BeautifulSoup) -> list[tuple[str, bool]]:
-    out: list[tuple[str, bool]] = []
-    for el in soup.select(_BUTTON_SEL):
+    return [(t, d) for _, t, d in _button_els(soup)]
+
+
+def _button_els(root: Any) -> list[tuple[Any, str, bool]]:
+    out: list[tuple[Any, str, bool]] = []
+    seen: set[int] = set()
+    for el in root.select(_BUTTON_SEL):
+        if id(el) in seen:
+            continue
+        seen.add(id(el))
         text = generic._button_text(el)
         if text and len(text) <= 80:
-            out.append((text, generic._is_disabled(el)))
+            out.append((el, text, generic._is_disabled(el)))
     return out
 
 
-def apply_rules(html: str, rules: Iterable[Rule]) -> tuple[str | None, str, str] | None:
-    """First matching rule wins → (verdict, label, why). An "in" button rule only matches enabled buttons."""
+@dataclass
+class _Main:
+    text: str  # visible text of the main product area
+    cta: tuple[Any, str, bool] | None  # the first call-to-action button there: (element, text, disabled)
+    buybox: str  # text of the buy box / availability elements
+    oos: str | None  # a clear out-of-stock signal in the main area
+
+
+def _main_view(html: str, rules: list[Rule]) -> _Main:
     soup = BeautifulSoup(html or "", "lxml")
     generic._strip_noise(soup)
-    buttons = _buttons(soup)
-    root = soup.body or soup
-    text = clean_text(root.get_text(" ", strip=True))
+    _drop_recs(soup)
+    scope = generic._main_scope(soup)
+    if scope is (soup.body or soup):  # short <main>: still the product area when it holds the <h1>
+        for c in (soup.find(attrs={"itemtype": re.compile(r"schema\.org/Product", re.I)}), soup.find("main"),
+                  soup.find(attrs={"role": "main"})):
+            if c is not None and c.find("h1") is not None:
+                scope = c
+                break
+    patterns = [r.pattern for r in rules if r.kind == "button"] + [generic.BUY_RE, generic.OOS_BUTTON_RE]
+    cta = next(((el, t, d) for el, t, d in _button_els(scope) if any(p.search(t) for p in patterns)), None)
+    text = clean_text(scope.get_text(" ", strip=True))
+    boxes: list[str] = []
+    for el in scope.find_all(True):
+        if _BUYBOX_RE.search(_ident(el)) and el.find("h1") is None:
+            t = clean_text(el.get_text(" ", strip=True))
+            if t and len(t) <= 400 and not any(t in b for b in boxes):
+                boxes.append(t)
+    if cta is not None:  # the CTA's own container is part of the buy box
+        box = cta[0].parent
+        for _ in range(2):
+            if box is None or box is scope or box.parent is None or box.parent is scope:
+                break
+            if len(box.parent.get_text(" ", strip=True)) > 400:
+                break
+            box = box.parent
+        if box is not None and box is not scope:
+            boxes.append(clean_text(box.get_text(" ", strip=True)))
+    oos = None
+    if cta is not None and generic.OOS_BUTTON_RE.search(cta[1]):
+        oos = cta[1]
+    else:
+        oos = next((name for name, rx in generic.OOS_PHRASES if rx.search(text)), None)
+    return _Main(text=text, cta=cta, buybox=" | ".join(boxes), oos=oos)
+
+
+def apply_rules(html: str, rules: Iterable[Rule], mv: _Main | None = None) -> tuple[str | None, str, str] | None:
+    """First matching rule wins → (verdict, label, why).
+
+    Only the main product area counts (header/footer/recommendation carousels are dropped), and button
+    rules look at the *first* call-to-action there only: a disabled main "Add to cart" must not fall
+    through to an enabled one further down the page. An "in" button rule never matches a disabled
+    button; a weak "in" rule yields to any clear out-of-stock signal; when no rule matches, a disabled
+    main buy button / out-of-stock main button still decides "out"."""
+    rules = list(rules)
+    mv = mv or _main_view(html, rules)
     for r in rules:
+        if r.verdict == "in" and r.weak and mv.oos:
+            continue
         if r.kind == "button":
-            for t, disabled in buttons:
-                if r.pattern.search(t) and not (r.verdict == "in" and disabled):
-                    return r.verdict, r.label, f"button: '{t}'"
+            if mv.cta is None:
+                continue
+            _, t, disabled = mv.cta
+            if r.pattern.search(t) and not (r.verdict == "in" and disabled):
+                return r.verdict, r.label, f"button: '{t}'" + (" (disabled)" if disabled else "")
         else:
-            m = r.pattern.search(text)
+            m = r.pattern.search(mv.buybox if r.scope == "buybox" else mv.text)
             if m:
                 return r.verdict, r.label, f"text: '{clean_text(m.group(0))[:60]}'"
+    if mv.cta is not None:
+        _, t, disabled = mv.cta
+        if generic.OOS_BUTTON_RE.search(t):
+            return "out", "Out of stock", f"button: '{t}'"
+        if disabled and generic.BUY_RE.search(t):
+            return "out", "Out of stock", f"button: '{t}' (disabled)"
     return None
 
 
@@ -149,11 +266,20 @@ async def dom_check(url: str, ctx: AdapterContext, rules: list[Rule], *, render_
         fetched = await fetch_page(url, ctx, render_js=render_js, needs=needs)
     if is_queued(fetched):
         return queued_result(ctx)
-    res = generic_result(fetched, url, ctx)
-    hit = apply_rules(fetched.text, rules)
+    html = clean_html(fetched.text)
+    res = generic_result(fetched, url, ctx, html=html)
+    mv = _main_view(html, rules)
+    hit = apply_rules(html, rules, mv)
     if hit:
         verdict, label, why = hit
         override(res, verdict, label, matched=why)
+    elif res.status == "in_stock" and str(res.detail.get("matched") or "").startswith("button:") and (
+            mv.cta is None or mv.cta[2] or not generic.BUY_RE.search(mv.cta[1])):
+        # generic's enabled buy button isn't the product's own (it sits outside the main area)
+        if mv.oos:
+            override(res, "out", "Out of stock", matched=f"text: '{mv.oos}'")
+        else:
+            override(res, None, "Unknown", matched="buy button outside the product area")
     return res
 
 
@@ -171,7 +297,8 @@ BJS_RULES = [
 COSTCO_RULES = [
     _b(r"^\W*(?:out\s+of\s+stock|sold\s+out|item\s+not\s+available|unavailable)\W*$", "out", "Out of stock"),
     _b(_ADD, "in", "In stock"),
-    _b(r"^\W*sign\s+in\s+to\s+buy\W*$", "in", "In stock (members: sign in to buy)"),
+    # members-only CTA: counts only as the main button and only with no out-of-stock signal around it
+    _b(r"^\W*sign\s+in\s+to\s+buy\W*$", "in", "In stock (members: sign in to buy)", weak=True),
     _t(r"\b(?:product\s+not\s+found|this\s+item\s+is\s+no\s+longer\s+available)\b", "out", "No longer available"),
 ]
 
@@ -209,16 +336,18 @@ QVC_RULES = [
     _b(r"^\W*advanced?\s+order\W*$", "in", "Pre-order (Advanced Order)"),
     _b(r"^\W*(?:sold\s+out|out\s+of\s+stock)\W*$", "out", "Sold out"),
     _b(r"^\W*add\s+to\s+(?:cart|bag)\W*$|^\W*buy\s+now\W*$", "in", "In stock"),
-    _t(r"\badvanced?\s+order\b", "in", "Pre-order (Advanced Order)"),
+    _t(r"\badvanced?\s+order\b", "in", "Pre-order (Advanced Order)", scope="buybox", weak=True),
     _t(r"\bjoin\s+(?:the\s+)?wait\s*-?list\b", "out", "Waitlist only"),
 ]
 
 VERIZON_RULES = [
     _b(r"^\W*(?:out\s+of\s+stock|sold\s+out|unavailable)\W*$", "out", "Out of stock"),
-    _t(r"\bbackordered\b", "in", "Backordered (orderable)"),
-    _t(r"\bships\s+by\s+\w", "in", "In stock (ships later)"),
+    _t(r"\bbackordered\b", "in", "Backordered (orderable)", weak=True),
+    # "Ships by <date>" is only a stock signal inside the buy box, and never next to "out of stock"
+    _t(r"\bships\s+by\s+\w", "in", "In stock (ships later)", scope="buybox", weak=True),
     _b(r"^\W*pre[\s-]?order(?:\s+now)?\W*$", "in", "Pre-order"),
-    _b(r"^\W*(?:add\s+to\s+cart|continue|buy\s+now)\W*$", "in", "In stock"),
+    # (a bare "Continue" is a configurator step — trade-in, plan, color — not an in-stock signal)
+    _b(r"^\W*(?:add\s+to\s+cart|buy\s+now)\W*$", "in", "In stock"),
     _t(r"\bout\s+of\s+stock\b|\bcurrently\s+unavailable\b", "out", "Out of stock"),
 ]
 
@@ -313,18 +442,65 @@ def _ask_amount(v: Any) -> float | None:
         return None
 
 
-def stockx_lowest_ask(html: str) -> tuple[bool, float | None]:
-    """(found_any_lowestAsk_field, lowest positive ask) from __NEXT_DATA__."""
+_SX_SKIP_KEY_RE = re.compile(r"related|similar|recommend|also|recent|trending|popular|carousel|browse|sponsor",
+                             re.IGNORECASE)
+
+
+def _sx_slug(url: str | None) -> str:
+    segs = [p for p in urlsplit(url or "").path.split("/") if p]
+    return segs[-1].lower() if segs else ""
+
+
+def _sx_product(nd: dict, url: str | None) -> dict | None:
+    """The page's own product node: a ``product`` object (preferring the one whose urlKey is the URL
+    slug), never one found under related / recommended lists."""
+    slug = _sx_slug(url)
+    cands: list[dict] = []
+    stack: list[tuple[Any, bool]] = [(nd, False)]
+    while stack:
+        cur, skipped = stack.pop()
+        if isinstance(cur, dict):
+            for k, v in cur.items():
+                bad = skipped or bool(_SX_SKIP_KEY_RE.search(str(k)))
+                if k == "product" and isinstance(v, dict) and not bad and (v.get("id") or v.get("urlKey")):
+                    cands.append(v)
+                if isinstance(v, (dict, list)):
+                    stack.append((v, bad))
+        elif isinstance(cur, list):
+            stack.extend((v, skipped) for v in cur)
+    if slug:
+        for c in cands:
+            if str(c.get("urlKey") or "").strip("/").lower() == slug:
+                return c
+    keyed = [c for c in cands if c.get("urlKey")]
+    if slug and keyed:
+        return None  # every product node names a different page
+    return cands[0] if cands else None
+
+
+def stockx_lowest_ask(html: str, url: str | None = None) -> tuple[bool, float | None]:
+    """(found a lowestAsk field on the page's product, its lowest positive ask) from __NEXT_DATA__.
+    Asks on related / recommended products don't count."""
     nd = next_data(html)
     if nd is None:
         return False, None
+    prod = _sx_product(nd, url)
+    if prod is None:
+        return False, None
     found, best = False, None
-    for node in walk(nd):
-        if isinstance(node, dict) and "lowestAsk" in node:
-            found = True
-            amt = _ask_amount(node.get("lowestAsk"))
-            if amt and amt > 0 and (best is None or amt < best):
-                best = amt
+    stack: list[Any] = [prod]
+    while stack:
+        cur = stack.pop()
+        if isinstance(cur, dict):
+            if "lowestAsk" in cur:
+                found = True
+                amt = _ask_amount(cur.get("lowestAsk"))
+                if amt and amt > 0 and (best is None or amt < best):
+                    best = amt
+            stack.extend(v for k, v in cur.items()
+                         if isinstance(v, (dict, list)) and not _SX_SKIP_KEY_RE.search(str(k)))
+        elif isinstance(cur, list):
+            stack.extend(v for v in cur if isinstance(v, (dict, list)))
     return found, best
 
 
@@ -334,7 +510,7 @@ async def stockx(url: str, ctx: AdapterContext) -> CheckResult | None:
     if is_queued(fetched):
         return queued_result(ctx)
     res = generic_result(fetched, url, ctx, third_party=True)
-    found, ask = stockx_lowest_ask(fetched.text)
+    found, ask = stockx_lowest_ask(fetched.text, fetched.url or url)
     if ask is not None:
         text = f"Lowest ask ${ask:,.2f}"
         override(res, "in", text, matched="__NEXT_DATA__ lowestAsk")

@@ -31,7 +31,8 @@ REDSKY = "https://redsky.target.com/redsky_aggregations/v1/web"
 DEFAULT_STORE = "3991"  # used for pricing when no store is known (common public default)
 KEY_TTL = 6 * 3600
 STORES_TTL = 12 * 3600
-MAX_PICKUP_STORES = 5
+STORES_EMPTY_TTL = 300  # "no stores" may be a hiccup: re-ask soon
+MAX_PICKUP_STORES = 3  # each extra store can cost a fulfillment request
 
 SHIP_IN = {"IN_STOCK": "In stock", "LIMITED_STOCK": "Limited stock", "PRE_ORDER_SELLABLE": "Pre-order"}
 SHIP_OUT = {"OUT_OF_STOCK": "Out of stock", "PRE_ORDER_UNSELLABLE": "Pre-order sold out",
@@ -82,15 +83,22 @@ async def _redsky(endpoint: str, params: dict[str, Any], tcin: str, page_url: st
     return None  # pragma: no cover
 
 
-async def nearby_stores(zip_code: str, radius: int, tcin: str, page_url: str) -> list[dict]:
+async def nearby_stores(zip_code: str, radius: int, tcin: str, page_url: str) -> list[dict] | None:
+    """Stores within ``radius`` (nearest first, at most MAX_PICKUP_STORES), [] when there are none,
+    or None when Target didn't answer the question (never cached)."""
     ck = (zip_code, radius)
     hit = _stores_cache.get(ck)
     if hit and hit[0] > time.monotonic():
         return hit[1]
     data = await _redsky("nearby_stores_v1", {"limit": MAX_PICKUP_STORES, "within": radius, "place": zip_code,
                                               "channel": "WEB", "page": f"/p/A-{tcin}"}, tcin, page_url)
-    stores = []
-    for s in dig(data, "data", "nearby_stores", "stores", default=[]) or []:
+    raw = dig(data, "data", "nearby_stores")
+    if not isinstance(raw, dict) or not isinstance(raw.get("stores", []), list):
+        return None
+    stores: list[dict] = []
+    for s in raw.get("stores") or []:
+        if not isinstance(s, dict):
+            continue
         sid = s.get("store_id") or s.get("location_id")
         if sid is None:
             continue
@@ -103,8 +111,41 @@ async def nearby_stores(zip_code: str, radius: int, tcin: str, page_url: str) ->
             continue
         stores.append({"id": str(sid), "name": clean_text(s.get("location_name")) or None, "distance": dist,
                        "state": dig(s, "mailing_address", "region") or dig(s, "mailing_address", "state")})
-    _stores_cache[ck] = (time.monotonic() + STORES_TTL, stores)
+    stores.sort(key=lambda s: s["distance"] if s["distance"] is not None else float("inf"))
+    stores = stores[:MAX_PICKUP_STORES]
+    _stores_cache[ck] = (time.monotonic() + (STORES_TTL if stores else STORES_EMPTY_TTL), stores)
     return stores
+
+
+_VENDOR_3P_RE = re.compile(r"market|partner|target\s*plus|third|3p|seller|drop\s*ship|dsv", re.IGNORECASE)
+_TARGET_RE = re.compile(r"^\s*target(?:\.com|\s+corp(?:oration)?|\s+brands?(?:,?\s+inc\.?)?)?\s*$", re.IGNORECASE)
+
+
+def seller_of(item: dict) -> tuple[str | None, bool | None]:
+    """(seller, third_party) for a pdp_client ``item``. ``fulfillment.is_marketplace`` decides when
+    present; otherwise ``product_vendors[]`` marketplace hints (relationship_type / vendor type /
+    marketplace flags naming a non-Target partner) mark a Target Plus listing. Plain vendor names are
+    suppliers (e.g. "POKEMON USA INC" on first-party items), not sellers."""
+    vendors = [v for v in (item.get("product_vendors") or []) if isinstance(v, dict)]
+    names = [clean_text(v.get("vendor_name")) for v in vendors if clean_text(v.get("vendor_name"))]
+    is_marketplace = dig(item, "fulfillment", "is_marketplace")
+    if is_marketplace is True:
+        return (names[0] if names else "Target Plus partner"), True
+    if is_marketplace is False:
+        return "Target", False
+    for v in vendors:
+        name = clean_text(v.get("vendor_name")) or None
+        if name and _TARGET_RE.match(name):
+            continue
+        rel = " ".join(str(v.get(k) or "") for k in ("relationship_type", "relationship_type_code", "vendor_type",
+                                                          "type", "seller_type", "fulfillment_type"))
+        flags = [v.get(k) for k in ("is_marketplace", "is_target_plus", "is_partner", "marketplace")]
+        if any(f is True for f in flags) or (rel.strip() and _VENDOR_3P_RE.search(rel)):
+            return name or "Target Plus partner", True
+    for key in ("is_marketplace", "is_target_plus"):
+        if item.get(key) is True:
+            return (names[0] if names else "Target Plus partner"), True
+    return None, None
 
 
 def _fulfillment_params(tcin: str, store_id: str | None, zip_code: str | None, state: str | None) -> dict:
@@ -136,11 +177,20 @@ async def check(url: str, ctx: AdapterContext) -> CheckResult | None:
 
     # ---- stores near the ZIP (or the pinned store)
     stores: list[dict] = []
+    stores_failed = False
     if want_pickup:
         if rc.store_id:
             stores = [{"id": rc.store_id, "name": None, "distance": None, "state": None}]
         else:
-            stores = await nearby_stores(rc.zip, rc.radius_miles, tcin, page_url)
+            try:
+                found = await nearby_stores(rc.zip, rc.radius_miles, tcin, page_url)
+            except FetchError as e:
+                if rc.fulfillment == "pickup" or e.status in (401, 403):
+                    raise
+                log.info("target nearby_stores failed for %s: %s", rc.zip, e)
+                found = None
+            stores_failed = found is None
+            stores = found or []
     primary = stores[0]["id"] if stores else None
 
     # ---- product info (title/price/seller); failures here are not fatal
@@ -160,14 +210,7 @@ async def check(url: str, ctx: AdapterContext) -> CheckResult | None:
     image = dig(item, "enrichment", "images", "primary_image_url")
     price = (dig(product, "price", "current_retail") or dig(product, "price", "current_retail_min")
              or dig(product, "price", "formatted_current_price"))
-    vendors = [v.get("vendor_name") for v in (item.get("product_vendors") or []) if isinstance(v, dict)]
-    is_marketplace = dig(item, "fulfillment", "is_marketplace")
-    if is_marketplace is True:
-        seller, third_party = (vendors[0] if vendors and vendors[0] else "Target Plus partner"), True
-    elif is_marketplace is False:
-        seller, third_party = "Target", False
-    else:
-        seller, third_party = None, None
+    seller, third_party = seller_of(item)
 
     detail = base_detail(ctx, tcin=tcin, seller=seller, third_party=third_party, fulfillment=rc.fulfillment)
     if rc.zip:
@@ -178,6 +221,8 @@ async def check(url: str, ctx: AdapterContext) -> CheckResult | None:
     common = dict(price=price, title=title, image_url=image, detail=detail)
     if third_party and rc.official_only:
         return result("out", THIRD_PARTY_TEXT, **common)
+    if rc.fulfillment == "pickup" and stores_failed:
+        return result(None, "Target didn't return nearby stores", **common)
 
     # ---- fulfillment
     state = stores[0].get("state") if stores else None
@@ -239,6 +284,8 @@ async def check(url: str, ctx: AdapterContext) -> CheckResult | None:
             texts.append(next(a.label for a in available if a.key.startswith("pickup:")))
         elif n > 1:
             texts.append(f"Pickup at {n} stores")
+        elif stores_failed:
+            texts.append("Couldn't look up nearby stores")
         elif not stores:
             texts.append(f"No Target stores {where}")
         else:
