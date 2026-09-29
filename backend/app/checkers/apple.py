@@ -710,14 +710,26 @@ def _pretty_dim(v: str) -> str:
     return s[:1].upper() + s[1:]
 
 
+# Apple display strings carry footnote markers ("256GB<sup>Footnote 1</sup>") and, for iPhone
+# sizes, a redundant screen size ("iPhone 18 Pro Max 6.9-inch display").
+_FOOTNOTE_RE = re.compile(r"\s*\bFootnotes?\s*[\d*†‡§◊¹²³⁴⁵⁶⁷⁸⁹]*", re.I)
+_INCH_DISPLAY_RE = re.compile(r"\s*\b\d+(?:\.\d+)?[- ]inch display\b", re.I)
+
+
+def _clean_label(t: Any) -> str:
+    t = _FOOTNOTE_RE.sub("", clean_text(t))
+    stripped = _INCH_DISPLAY_RE.sub("", t).strip()
+    return re.sub(r"\s+", " ", stripped or t).strip()
+
+
 def _display_value(v: Any) -> str | None:
     if isinstance(v, str):
-        return clean_text(v) or None
+        return _clean_label(v) or None
     if isinstance(v, dict):
         for k in ("value", "displayValue", "text", "label", "name", "title"):
             x = v.get(k)
-            if isinstance(x, str) and clean_text(x):
-                return clean_text(x)
+            if isinstance(x, str) and _clean_label(x):
+                return _clean_label(x)
     return None
 
 
@@ -741,7 +753,8 @@ def _price_text(v: Any, currency: Any = None) -> str | None:
     if v is None or isinstance(v, bool):
         return None
     if isinstance(v, dict):
-        for k in ("currentPrice", "fullPrice", "price", "amount", "value", "raw_amount", "rawAmount", "priceValue"):
+        for k in ("currentPrice", "fullPrice", "amountBeforeTradeIn", "price", "amount", "value", "raw_amount",
+                  "rawAmount", "priceValue"):
             if k in v:
                 p = _price_text(v[k], v.get("currency") or v.get("priceCurrency") or currency)
                 if p:
@@ -752,6 +765,10 @@ def _price_text(v: Any, currency: Any = None) -> str | None:
         if re.search(r"[$€£¥₹]", t) and parse_amount(t):
             m = re.search(r"(?:[A-Z]{1,3})?[$€£¥₹]\s?[\d.,]+", t)
             return m.group(0).strip() if m else t
+        # A bare string must be a number; Apple also uses price *keys* like
+        # "mjw64ll_a_unlocked_us" in price fields, whose digits are not a price.
+        if not re.fullmatch(r"\d[\d,]*(?:\.\d+)?", t):
+            return None
     d = parse_amount(v)
     if d is None or d == 0:
         return None
@@ -877,6 +894,68 @@ def _clean_product_name(t: str | None) -> str | None:
     return t.strip() or None
 
 
+def _url_slug(url: str) -> str:
+    return unquote(urlsplit(url or "").path).rstrip("/").rsplit("/", 1)[-1].lower()
+
+
+_CARRIER_SUFFIX_RE = re.compile(r"-(unlocked|att|at-t|t-mobile|tmobile|verizon|boost-mobile|us-cellular)$")
+
+
+def _selection_variants(blobs: list, maps: dict[str, dict[str, str]], prices: dict[str, str], url: str
+                        ) -> tuple[list[dict], str | None]:
+    """Variants from an Apple buy page's product-selection data.
+
+    Each model appears once per carrier (same partNumber, carrier-specific seoUrlToken and
+    price key); keep one entry per part, preferring the unlocked one. The URL's last path
+    segment is that model's seoUrlToken, which identifies the model the link points to.
+    """
+    slug = _url_slug(url)
+    by_part: dict[str, dict] = {}
+    selected = selected_loose = None
+    for blob in blobs:
+        for node in walk(blob):
+            if not isinstance(node, dict):
+                continue
+            pn, token = node.get("partNumber"), node.get("seoUrlToken")
+            if not (isinstance(pn, str) and isinstance(token, str) and is_part_number(pn.strip().upper())):
+                continue
+            dims = {k: v for k, v in node.items() if isinstance(k, str) and k.startswith("dimension")
+                    and k != "dimensionSteporder" and isinstance(v, str) and v.strip()}
+            if not dims:
+                continue
+            pn, token = pn.strip().upper(), token.lower()
+            if token == slug:
+                selected = pn
+            elif _CARRIER_SUFFIX_RE.sub("", token) == _CARRIER_SUFFIX_RE.sub("", slug):
+                selected_loose = selected_loose or pn
+            unlocked = "UNLOCKED" in str(node.get("carrierPolicyPart", "")).upper() or token.endswith("-unlocked")
+            cur = by_part.get(pn)
+            if cur is None or (unlocked and not cur["unlocked"]):
+                by_part[pn] = {"unlocked": unlocked, "dims": dims, "node": node}
+
+    def dim_rank(key: str) -> int:
+        k = key.lower().removeprefix("dimension")
+        return next((i for i, name in enumerate(_DIM_ORDER) if name in k), len(_DIM_ORDER))
+
+    out: list[tuple[tuple, dict]] = []
+    for pn, info in by_part.items():
+        pieces, order = [], []
+        for k in sorted(info["dims"], key=dim_rank):
+            v = info["dims"][k]
+            if "carrier" in k.lower():
+                continue
+            display = maps.get(k) or {}
+            pieces.append(display.get(v) or _pretty_dim(v))
+            keys = list(display)
+            order.append((dim_rank(k), keys.index(v) if v in keys else len(keys), v))
+        price_key = info["node"].get("fullPrice")
+        price = prices.get(price_key) if isinstance(price_key, str) else None
+        label = _clean_label(" ".join(pieces)) or pn
+        out.append((tuple(order), {"part_number": pn, "label": label, "price": price}))
+    out.sort(key=lambda x: x[0])
+    return [v for _, v in out], selected or selected_loose
+
+
 def parse_product_page(html: str, url: str) -> dict:
     """Extract {product_name, image_url, variants:[{part_number,label,price}]} from an Apple
     product/buy page (pure, no I/O)."""
@@ -896,6 +975,13 @@ def parse_product_page(html: str, url: str) -> dict:
     blobs = _script_blobs(soup, html or "")
     maps = _collect_display_maps(blobs)
     prices = _collect_price_maps(blobs)
+
+    structured, selected = _selection_variants(blobs, maps, prices, url)
+    if structured:
+        if selected:
+            structured.sort(key=lambda v: v["part_number"] != selected)  # the linked model first
+        return {"product_name": name, "image_url": image_url, "variants": structured,
+                "selected_part_number": selected}
 
     variants: dict[str, dict] = {}
 
@@ -940,7 +1026,8 @@ def parse_product_page(html: str, url: str) -> dict:
     for v in list(variants.values())[:400]:
         v["label"] = v["label"] or name or v["part_number"]
         out.append(v)
-    return {"product_name": name, "image_url": image_url, "variants": out}
+    return {"product_name": name, "image_url": image_url, "variants": out,
+            "selected_part_number": url_part}
 
 
 def part_from_url(url: str) -> str | None:
@@ -953,10 +1040,11 @@ def part_from_url(url: str) -> str | None:
 
 
 async def resolve_apple(url: str) -> dict:
-    empty = {"product_name": None, "image_url": None, "variants": []}
+    empty = {"product_name": None, "image_url": None, "variants": [], "selected_part_number": None}
     url_part = part_from_url(url or "")
     if url_part:
         empty["variants"] = [{"part_number": url_part, "label": url_part, "price": None}]
+        empty["selected_part_number"] = url_part
     if not url or not is_apple_url(url):
         return empty
     html = None

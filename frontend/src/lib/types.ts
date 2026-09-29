@@ -185,6 +185,8 @@ export interface AppleResolve {
   product_name: string | null;
   image_url: string | null;
   variants: AppleVariant[];
+  /** The model the pasted URL points to; pre-selected in the form. */
+  selected_part_number?: string | null;
   error?: string | null;
 }
 

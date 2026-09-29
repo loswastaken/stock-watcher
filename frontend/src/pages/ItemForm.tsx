@@ -178,6 +178,15 @@ function ItemFormInner({ item, defaults }: { item: Item | null; defaults: typeof
   useEffect(() => {
     if (!nameTouched && resolve.data?.product_name && !s.name)
       setS((prev) => ({ ...prev, name: resolve.data?.product_name ?? prev.name }));
+    // Pre-select the model the link points to, unless the user already picked some.
+    const sel = resolve.data?.selected_part_number;
+    const variant = sel ? resolve.data?.variants.find((v) => v.part_number === sel) : undefined;
+    if (variant)
+      setS((prev) =>
+        prev.apple.parts.length
+          ? prev
+          : { ...prev, apple: { ...prev.apple, parts: [{ part_number: variant.part_number, label: variant.label }] } },
+      );
   }, [resolve.data]);
 
   // --- Photo ---------------------------------------------------------------

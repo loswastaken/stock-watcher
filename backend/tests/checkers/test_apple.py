@@ -384,3 +384,34 @@ async def test_after_block_next_check_goes_straight_to_browser(monkeypatch):
     r = await check_apple(PRODUCT_URL, {"parts": [A], "zip": "95014"})
     assert route.call_count == 1 and len(calls) == 2
     assert r.status == "in_stock"
+
+
+# ------------------------------------------------------------------ live apple.com buy page (Sept 2026)
+
+LIVE_URL = "https://www.apple.com/shop/buy-iphone/iphone-18-pro/6.9-inch-display-256gb-burgundy-unlocked"
+
+
+def test_live_buy_page_variants_are_clean_and_linked_model_selected():
+    r = parse_product_page(load("apple_buy_iphone18pro_live.html"), LIVE_URL)
+    variants = {v["part_number"]: v for v in r["variants"]}
+    assert len(variants) == 32  # 2 sizes x 4 capacities x 4 colors; AppleCare parts excluded
+    assert all(pn.startswith("MJ") for pn in variants)
+    assert r["selected_part_number"] == "MJW64LL/A"
+    assert r["variants"][0]["part_number"] == "MJW64LL/A"  # linked model first
+    assert variants["MJW64LL/A"] == {"part_number": "MJW64LL/A", "label": "iPhone 18 Pro Max 256GB Burgundy",
+                                     "price": "$1,299.00"}
+    assert variants["MJQ34LL/A"]["label"] == "iPhone 18 Pro 256GB Black"
+    assert variants["MJQ34LL/A"]["price"] == "$1,199.00"
+    for v in r["variants"]:
+        assert "Footnote" not in v["label"] and "inch display" not in v["label"]
+
+
+def test_live_buy_page_other_carrier_link_selects_same_model():
+    url = LIVE_URL.replace("-unlocked", "-verizon")
+    assert parse_product_page(load("apple_buy_iphone18pro_live.html"), url)["selected_part_number"] == "MJW64LL/A"
+
+
+def test_price_keys_are_not_prices():
+    assert apple._price_text("mjw64ll_a_att_iphone18pro") is None
+    assert apple._price_text("1299") == "$1,299.00"
+    assert apple._price_text({"amountBeforeTradeIn": 1499.0, "fullPrice": None}) == "$1,499.00"
