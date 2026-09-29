@@ -18,6 +18,7 @@ const Dashboard = lazy(() => import('./pages/Dashboard'));
 const ItemForm = lazy(() => import('./pages/ItemForm'));
 const ItemDetail = lazy(() => import('./pages/ItemDetail'));
 const Notifications = lazy(() => import('./pages/Notifications'));
+const Purchased = lazy(() => import('./pages/Purchased'));
 const SettingsPage = lazy(() => import('./pages/Settings'));
 const UsersPage = lazy(() => import('./pages/Users'));
 const NotFound = lazy(() => import('./pages/NotFound'));
@@ -71,6 +72,7 @@ export function App() {
                       <Route path="items/:id" element={<ItemDetail />} />
                       <Route path="items/:id/edit" element={<ItemForm />} />
                       <Route path="notifications" element={<Notifications />} />
+                      <Route path="purchased" element={<Purchased />} />
                       <Route path="settings" element={<SettingsPage />} />
                       <Route element={<RequireAdmin />}>
                         <Route path="admin/users" element={<UsersPage />} />

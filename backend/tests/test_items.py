@@ -286,3 +286,49 @@ def test_check_all_queues_only_own_active_items(admin, preview_mock):
     finally:
         scheduler._queued.clear()
     assert make_client().post("/api/items/check-all").status_code == 401
+
+
+def test_purchase_moves_item_out_of_watching(admin, preview_mock):
+    from app import db, scheduler
+    from app.models import Item
+
+    a = create(admin)
+    b = create(admin, url="https://shop.example.com/p/2")
+    with db.SessionLocal() as s:
+        it = s.get(Item, a["id"])
+        it.price, it.status, it.available_keys = "$10.00", "in_stock", ["stock"]
+        s.commit()
+
+    r = admin.post(f"/api/items/{a['id']}/purchase")
+    assert r.status_code == 200
+    p = r.json()
+    assert p["purchased_at"].endswith("Z") and p["purchased_price"] == "$10.00"
+    first = p["purchased_at"]
+    assert admin.post(f"/api/items/{a['id']}/purchase").json()["purchased_at"] == first  # idempotent
+
+    # not checked any more, not counted as watched
+    assert a["id"] not in scheduler.select_due_items() and b["id"] in scheduler.select_due_items()
+    scheduler._queued.clear()
+    try:
+        assert admin.post("/api/items/check-all").json()["total"] == 1
+    finally:
+        scheduler._queued.clear()
+    st = admin.get("/api/stats").json()
+    assert st["total"] == 1 and st["purchased"] == 1 and st["in_stock"] == 0
+
+    # back to watching: alerts re-armed, re-checked soon, next in-stock alerts again
+    u = admin.post(f"/api/items/{a['id']}/unpurchase").json()
+    assert u["purchased_at"] is None and u["purchased_price"] is None
+    assert u["enabled"] is True and u["notify_enabled"] is True and u["last_checked_at"] is None
+    with db.SessionLocal() as s:
+        assert s.get(Item, a["id"]).available_keys == []
+    assert admin.get("/api/stats").json()["purchased"] == 0
+
+
+def test_purchase_is_scoped_to_owner(admin, preview_mock):
+    a = create(admin)
+    admin.post("/api/users", json={"username": "eve", "password": "evepassword1", "is_admin": False})
+    c = make_client()
+    c.post("/api/auth/login", json={"username": "eve", "password": "evepassword1"})
+    assert c.post(f"/api/items/{a['id']}/purchase").status_code == 404
+    assert c.post(f"/api/items/{a['id']}/unpurchase").status_code == 404

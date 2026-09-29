@@ -77,7 +77,7 @@ def test_notifications_isolated(admin, user2):
 def test_stats(admin, user2):
     empty = admin.get("/api/stats").json()
     assert empty == {"total": 0, "in_stock": 0, "out_of_stock": 0, "unknown": 0, "error": 0, "paused": 0,
-                     "unread_notifications": 0, "checks_24h": 0, "alerts_24h": 0}
+                     "unread_notifications": 0, "checks_24h": 0, "alerts_24h": 0, "purchased": 0}
     uid = uid_of("admin")
     with db.SessionLocal() as s:
         items = [
@@ -98,6 +98,6 @@ def test_stats(admin, user2):
         s.commit()
     s = admin.get("/api/stats").json()
     assert s == {"total": 5, "in_stock": 1, "out_of_stock": 2, "unknown": 1, "error": 1, "paused": 1,
-                 "unread_notifications": 1, "checks_24h": 2, "alerts_24h": 1}
+                 "unread_notifications": 1, "checks_24h": 2, "alerts_24h": 1, "purchased": 0}
     # other user sees nothing of it
     assert user2.get("/api/stats").json()["total"] == 0

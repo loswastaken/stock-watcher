@@ -91,6 +91,9 @@ class Item(Base):
     last_result: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     generic_config: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     apple_config: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # Purchased items leave the watch list: no checks, no alerts, shown on the Purchased page.
+    purchased_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    purchased_price: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 

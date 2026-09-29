@@ -117,5 +117,26 @@ export function useItemActions() {
     }
   };
 
-  return { check, toggle, toggleNotify, refreshImage, remove, confirmDelete };
+  const unpurchase = useMutation({
+    mutationFn: (item: Item) => api.unpurchaseItem(item.id),
+    onSuccess: (item) => {
+      after(item);
+      toast.success('Back on your watch list', { description: item.name });
+    },
+    onError: (e) => toast.error(errorMessage(e)),
+  });
+
+  const purchase = useMutation({
+    mutationFn: (item: Item) => api.purchaseItem(item.id),
+    onSuccess: (item) => {
+      after(item);
+      toast.success('Marked as purchased', {
+        description: `${item.name} moved to Purchased.`,
+        action: { label: 'Undo', onClick: () => unpurchase.mutate(item) },
+      });
+    },
+    onError: (e) => toast.error(errorMessage(e)),
+  });
+
+  return { check, toggle, toggleNotify, refreshImage, remove, confirmDelete, purchase, unpurchase };
 }

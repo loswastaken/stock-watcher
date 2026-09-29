@@ -331,3 +331,14 @@ async def test_unknown_keeps_previous_keys(world, monkeypatch, respx_mock):
     await scheduler.check_item(iid)  # back to in_stock with the same key: no second alert
     assert item(iid).status == "in_stock"
     assert len(notifs(uid)) == 1 and route.call_count == 1
+
+
+async def test_purchased_item_never_alerts(world, monkeypatch, respx_mock):
+    uid, iid = world
+    route = respx_mock.post(NTFY).respond(200)
+    with db.SessionLocal() as s:
+        s.get(Item, iid).purchased_at = utcnow()
+        s.commit()
+    set_checker(monkeypatch, fake_result("in_stock", ("stock",)))
+    await scheduler.check_item(iid)  # e.g. a check that was already queued when it was purchased
+    assert notifs(uid) == [] and route.call_count == 0

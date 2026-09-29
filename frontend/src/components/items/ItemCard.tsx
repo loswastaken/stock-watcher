@@ -1,4 +1,4 @@
-import { BellRing, Loader2 } from 'lucide-react';
+import { BellRing, Loader2, ShoppingBag } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { useIsChecking, useItemActions } from '@/hooks/useItemActions';
 import type { Item } from '@/lib/types';
@@ -19,6 +19,29 @@ export function AppleBadge({ className }: { className?: string }) {
     >
       <AppleLogo className="size-3 -translate-y-px" /> Apple
     </span>
+  );
+}
+
+/** One click when you've bought it: moves the item to the Purchased list (with Undo). */
+export function BoughtItButton({ item, className }: { item: Item; className?: string }) {
+  const a = useItemActions();
+  if (item.purchased_at || item.status !== 'in_stock' || !item.enabled) return null;
+  return (
+    <button
+      type="button"
+      onClick={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        a.purchase.mutate(item);
+      }}
+      disabled={a.purchase.isPending}
+      className={cn(
+        'pointer-events-auto relative z-10 inline-flex items-center gap-1.5 rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-medium text-emerald-800 ring-1 ring-emerald-300/60 transition-colors hover:bg-emerald-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 disabled:opacity-60 dark:bg-emerald-500/10 dark:text-emerald-300 dark:ring-emerald-500/30 dark:hover:bg-emerald-500/20',
+        className,
+      )}
+    >
+      <ShoppingBag className="size-3.5" /> Bought it
+    </button>
   );
 }
 
@@ -97,7 +120,10 @@ export function ItemCard({ item }: { item: Item }) {
           <p className="mt-1 flex items-center gap-1.5 truncate text-xs text-zinc-500 dark:text-zinc-400">
             <span className="truncate">{hostOf(item.url)}</span>
           </p>
-          <RearmAlertsButton item={item} className="mt-2" />
+          <div className="mt-2 flex flex-wrap gap-1.5 empty:hidden">
+            <BoughtItButton item={item} />
+            <RearmAlertsButton item={item} />
+          </div>
         </div>
         <div className="mt-auto flex flex-col-reverse gap-1 pt-1 min-[480px]:flex-row min-[480px]:items-end min-[480px]:justify-between min-[480px]:gap-2">
           <div className="min-w-0">
@@ -157,6 +183,7 @@ export function ItemRow({ item }: { item: Item }) {
       <div className="pointer-events-none relative hidden w-24 shrink-0 text-right text-xs text-zinc-500 lg:block">
         <RelativeTime iso={item.last_checked_at} fallback="not yet" className="pointer-events-auto" />
       </div>
+      <BoughtItButton item={item} className="hidden shrink-0 sm:inline-flex" />
       <RearmAlertsButton item={item} className="hidden shrink-0 sm:inline-flex" />
       <div className="relative z-10">
         <ItemActionsMenu item={item} />

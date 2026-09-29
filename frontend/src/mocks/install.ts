@@ -185,6 +185,15 @@ async function handle(path: string, method: string, body: unknown): Promise<Resp
       items.splice(items.indexOf(it), 1);
       return json(null, 204);
     }
+    if (sub === '/purchase') {
+      it.purchased_at = it.purchased_at ?? new Date().toISOString();
+      it.purchased_price = it.purchased_price ?? it.price;
+      return json(it);
+    }
+    if (sub === '/unpurchase') {
+      Object.assign(it, { purchased_at: null, purchased_price: null, enabled: true, notify_enabled: true });
+      return json(it);
+    }
     if (sub === '/check') {
       it.last_checked_at = new Date().toISOString();
       return json(it);

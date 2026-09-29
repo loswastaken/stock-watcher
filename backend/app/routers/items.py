@@ -227,8 +227,36 @@ def delete_item(item_id: int, user: User = Depends(current_user), db: Session = 
 async def check_all(user: User = Depends(current_user)):
     """Check every active item of this user now (in the background)."""
     with SessionLocal() as db:
-        ids = list(db.scalars(select(Item.id).where(Item.user_id == user.id, Item.enabled.is_(True))))
+        ids = list(db.scalars(select(Item.id).where(
+            Item.user_id == user.id, Item.enabled.is_(True), Item.purchased_at.is_(None))))
     return {"queued": scheduler.queue_checks(ids), "total": len(ids)}
+
+
+@router.post("/{item_id}/purchase", response_model=ItemOut)
+def mark_purchased(item_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    """Move an item to the Purchased list: no more checks or alerts."""
+    item = _owned_item(db, user, item_id)
+    if item.purchased_at is None:
+        item.purchased_at = utcnow()
+        item.purchased_price = item.price
+    db.commit()
+    db.refresh(item)
+    return ItemOut.model_validate(item)
+
+
+@router.post("/{item_id}/unpurchase", response_model=ItemOut)
+def unmark_purchased(item_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    """Back to the watch list: checking resumes right away with alerts armed."""
+    item = _owned_item(db, user, item_id)
+    item.purchased_at = None
+    item.purchased_price = None
+    item.enabled = True
+    item.notify_enabled = True
+    item.available_keys = []  # the next in-stock result alerts again
+    item.last_checked_at = None
+    db.commit()
+    db.refresh(item)
+    return ItemOut.model_validate(item)
 
 
 @router.post("/{item_id}/check", response_model=ItemOut)
