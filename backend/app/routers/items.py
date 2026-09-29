@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile
@@ -11,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from .. import images, scheduler
 from ..checkers import preview_url
+from ..checkers.retailers.registry import match_retailer, retailer_by_key
 from ..db import SessionLocal, get_db
 from ..models import DEFAULT_GENERIC_CONFIG, CheckEvent, Item, User, UserSettings, utcnow
 from ..schemas import (
@@ -21,7 +23,12 @@ from ..schemas import (
     ItemOut,
     ItemUpdate,
     PreviewOut,
+    RestockOut,
+    RetailerConfigIn,
+    StoreCreate,
+    StoreRow,
     UrlRequest,
+    item_retailer,
 )
 from ..security import current_user
 from .settings import get_or_create_settings
@@ -66,6 +73,36 @@ def _apple_config_dict(cfg: AppleConfig, defaults: UserSettings, explicit: set[s
     return data
 
 
+def _retailer_config_dict(cfg: RetailerConfigIn, defaults: UserSettings, url: str) -> dict:
+    """Validate + fill pickup defaults (ZIP / radius from the user's settings)."""
+    data = cfg.model_dump()
+    explicit = cfg.model_fields_set
+    wants_pickup = data["fulfillment"] in ("pickup", "any")
+    if wants_pickup:
+        retailer = match_retailer(url)
+        if retailer is not None and not retailer.pickup:
+            raise HTTPException(status_code=422, detail=f"{retailer.name} doesn't support in-store pickup tracking")
+        if not data.get("zip") and not data.get("store_id") and defaults.default_zip:
+            data["zip"] = defaults.default_zip
+        if "radius_miles" not in explicit and defaults.default_max_distance_miles:
+            data["radius_miles"] = max(1, min(int(defaults.default_max_distance_miles), 250))
+        if data["fulfillment"] == "pickup" and not data.get("zip") and not data.get("store_id"):
+            raise HTTPException(status_code=422, detail="Pickup needs a ZIP code (or store) — set one here or in Settings")
+    return data
+
+
+def _preview_retailer(url: str, value) -> dict | None:
+    if isinstance(value, dict) and value.get("key"):
+        r = retailer_by_key(str(value["key"]))
+        return r.to_dict() if r else value
+    if isinstance(value, str) and value:
+        r = retailer_by_key(value)
+        if r:
+            return r.to_dict()
+    r = match_retailer(url)
+    return r.to_dict() if r else None
+
+
 async def _safe_preview(url: str) -> dict:
     try:
         data = await asyncio.wait_for(preview_url(url), PREVIEW_TIMEOUT)
@@ -85,6 +122,7 @@ async def preview(body: UrlRequest, user: User = Depends(current_user)):
         return PreviewOut(
             status="unknown",
             is_apple=is_apple_host(body.url),
+            retailer=_preview_retailer(body.url, None),
             error=f"Could not fetch the page ({type(e).__name__})",
         )
     data = data if isinstance(data, dict) else {}
@@ -94,6 +132,7 @@ async def preview(body: UrlRequest, user: User = Depends(current_user)):
         price=data.get("price"),
         status=data.get("status") or "unknown",
         is_apple=bool(data.get("is_apple", is_apple_host(body.url))),
+        retailer=_preview_retailer(body.url, data.get("retailer")),
         error=data.get("error"),
     )
 
@@ -127,6 +166,8 @@ async def create_item(body: ItemCreate, user: User = Depends(current_user)):
             raise HTTPException(status_code=422, detail="apple_config with at least one part is required for Apple items")
         apple_cfg = _apple_config_dict(body.apple_config, defaults, body.apple_config.model_fields_set)
     generic_cfg = (body.generic_config or GenericConfig()).model_dump()
+    retailer_cfg = (_retailer_config_dict(body.retailer_config, defaults, body.url)
+                    if body.retailer_config is not None else None)
 
     interval = body.interval_minutes if body.interval_minutes is not None else defaults.default_interval_minutes
     interval = interval or 2
@@ -155,6 +196,9 @@ async def create_item(body: ItemCreate, user: User = Depends(current_user)):
             last_result={},
             generic_config=generic_cfg,
             apple_config=apple_cfg,
+            retailer_config=retailer_cfg,
+            max_price=body.max_price,
+            product_group=(body.product_group or "").strip() or None,
         )
         db.add(item)
         db.commit()
@@ -205,6 +249,18 @@ def update_item(
         defaults = get_or_create_settings(db, user.id)
         item.apple_config = _apple_config_dict(cfg, defaults, cfg.model_fields_set)
         recheck = True
+    if "retailer_config" in data:
+        if body.retailer_config is None:
+            item.retailer_config = None
+        else:
+            defaults = get_or_create_settings(db, user.id)
+            item.retailer_config = _retailer_config_dict(body.retailer_config, defaults, item.url)
+        recheck = True
+    if "max_price" in data and data["max_price"] != item.max_price:
+        item.max_price = data["max_price"]  # null clears the limit
+        recheck = True
+    if "product_group" in data:
+        item.product_group = (data["product_group"] or "").strip() or None
     if recheck:
         item.last_checked_at = None  # scheduler picks it up on its next pass
     item.updated_at = utcnow()
@@ -283,6 +339,99 @@ def history(
         .order_by(CheckEvent.id.desc())
         .limit(limit)
     ).all()
+
+
+@router.get("/{item_id}/restocks", response_model=list[RestockOut])
+def restocks(
+    item_id: int,
+    limit: int = Query(20, ge=1, le=200),
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    """When the item came back in stock: checks where the status turned in_stock after being
+    out of stock (errors / inconclusive checks in between don't count as a restock)."""
+    _owned_item(db, user, item_id)
+    rows = db.execute(
+        select(CheckEvent.id, CheckEvent.checked_at, CheckEvent.status, CheckEvent.status_text)
+        .where(CheckEvent.item_id == item_id, CheckEvent.status.in_(("in_stock", "out_of_stock")))
+        .order_by(CheckEvent.id)
+    ).all()
+    out: list[RestockOut] = []
+    prev: str | None = None
+    for ev_id, checked_at, status, status_text in rows:
+        if status == "in_stock" and prev == "out_of_stock":
+            out.append(RestockOut(id=ev_id, checked_at=checked_at, status_text=status_text or ""))
+        prev = status
+    return list(reversed(out))[:limit]
+
+
+# ------------------------------------------------------------ multi-store groups
+def _group_items(db: Session, user: User, item: Item) -> list[Item]:
+    if not item.product_group:
+        return [item]
+    return list(db.scalars(
+        select(Item)
+        .where(Item.user_id == user.id, Item.product_group == item.product_group)
+        .order_by(Item.created_at, Item.id)
+    ))
+
+
+def _store_row(item: Item) -> StoreRow:
+    return StoreRow(
+        id=item.id, name=item.name, url=item.url, retailer=item_retailer(item), status=item.status,
+        status_text=item.status_text or "", price=item.price, max_price=item.max_price,
+        enabled=bool(item.enabled), notify_enabled=bool(item.notify_enabled),
+        last_in_stock_at=item.last_in_stock_at, last_checked_at=item.last_checked_at,
+    )
+
+
+@router.get("/{item_id}/stores", response_model=list[StoreRow])
+def list_stores(item_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    """Every store tracking the same product (the item's product_group), including this one."""
+    item = _owned_item(db, user, item_id)
+    return [_store_row(i) for i in _group_items(db, user, item)]
+
+
+@router.post("/{item_id}/stores", response_model=ItemOut, status_code=201)
+def add_store(item_id: int, body: StoreCreate, user: User = Depends(current_user),
+              db: Session = Depends(get_db)):
+    """Track the same product at another store: a sibling item in the same product_group."""
+    item = _owned_item(db, user, item_id)
+    if is_apple_host(body.url):
+        raise HTTPException(status_code=422, detail="Add Apple Store products from the Add item page")
+    siblings = _group_items(db, user, item)
+    if any(s.url == body.url for s in siblings):
+        raise HTTPException(status_code=409, detail="This store is already tracked for this product")
+    if not item.product_group:
+        item.product_group = uuid.uuid4().hex[:12]
+    retailer_cfg = None
+    if body.retailer_config is not None:
+        retailer_cfg = _retailer_config_dict(body.retailer_config, get_or_create_settings(db, user.id), body.url)
+    sibling = Item(
+        user_id=user.id,
+        name=item.name,
+        url=body.url,
+        kind="generic",
+        enabled=True,
+        notify_enabled=True,
+        interval_minutes=item.interval_minutes,
+        status="unknown",
+        status_text="Waiting for first check",
+        consecutive_errors=0,
+        available_keys=[],
+        last_result={},
+        generic_config=dict(DEFAULT_GENERIC_CONFIG),
+        retailer_config=retailer_cfg,
+        max_price=item.max_price,
+        product_group=item.product_group,
+        image_path=images.copy_image_file(item.image_path),
+    )
+    db.add(sibling)
+    db.commit()
+    db.refresh(sibling)
+    out = ItemOut.model_validate(sibling)
+    scheduler.spawn(_post_create(sibling.id, None))
+    return out
 
 
 @router.post("/{item_id}/image", response_model=ItemOut)

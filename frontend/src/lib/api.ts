@@ -8,7 +8,11 @@ import type {
   ItemUpdate,
   NotificationList,
   Preview,
+  Restock,
+  Retailer,
+  RetailerConfig,
   Settings,
+  StoreRow,
   SettingsUpdate,
   Stats,
   TestNotificationResult,
@@ -169,6 +173,11 @@ export const api = {
     return request<Item>(`/items/${id}/image`, { method: 'POST', form });
   },
   refreshImage: (id: number) => request<Item>(`/items/${id}/image/refresh`, { method: 'POST' }),
+  stores: (id: number) => request<StoreRow[]>(`/items/${id}/stores`),
+  addStore: (id: number, url: string, retailer_config?: RetailerConfig) =>
+    request<Item>(`/items/${id}/stores`, { method: 'POST', body: { url, ...(retailer_config ? { retailer_config } : {}) } }),
+  restocks: (id: number, limit = 20) => request<Restock[]>(`/items/${id}/restocks${q({ limit })}`),
+  retailers: () => request<Retailer[]>('/retailers'),
   history: (id: number, limit = 50) => request<CheckEvent[]>(`/items/${id}/history${q({ limit })}`),
   preview: (url: string, signal?: AbortSignal) =>
     request<Preview>('/items/preview', { method: 'POST', body: { url }, signal }),

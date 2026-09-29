@@ -2,10 +2,13 @@ import { BellRing, Loader2, ShoppingBag } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { useIsChecking, useItemActions } from '@/hooks/useItemActions';
 import type { Item } from '@/lib/types';
-import { cn, hostOf } from '@/lib/utils';
+import { cn, formatMoney, hostOf, isAboveLimit } from '@/lib/utils';
 import { ItemImage } from '../ItemImage';
 import { AppleLogo } from '../Logo';
 import { RelativeTime } from '../RelativeTime';
+import { RetailerChip } from '../RetailerBadge';
+import { Tooltip } from '../ui/tooltip';
+import { AddToCartLink } from './ProductStores';
 import { StatusBadge, StatusDot, statusMeta } from '../StatusBadge';
 import { ItemActionsMenu } from './ItemActionsMenu';
 
@@ -69,6 +72,28 @@ export function RearmAlertsButton({ item, className }: { item: Item; className?:
   );
 }
 
+/** Price, tinted amber when above the item's price limit, with the limit as a hint. */
+export function PriceWithLimit({ item, className }: { item: Item; className?: string }) {
+  if (!item.price && item.max_price == null) return null;
+  const above = isAboveLimit(item);
+  return (
+    <span className={cn('flex shrink-0 flex-col items-end leading-tight', className)}>
+      {item.price && (
+        <span className={cn('text-sm font-semibold tabular-nums', above ? 'text-amber-700 dark:text-amber-400' : 'text-zinc-900 dark:text-zinc-100')}>
+          {item.price}
+        </span>
+      )}
+      {item.max_price != null && (
+        <Tooltip content={above ? 'Above your price limit: no alert until it drops' : 'Only alerts at or below this price'}>
+          <span className="pointer-events-auto text-[11px] tabular-nums text-zinc-400 dark:text-zinc-500">
+            limit {formatMoney(item.max_price)}
+          </span>
+        </Tooltip>
+      )}
+    </span>
+  );
+}
+
 function statusLine(item: Item) {
   if (item.status === 'error') return item.last_error || item.status_text || 'Check failed';
   return item.status_text || statusMeta[item.status]?.label || '';
@@ -99,7 +124,11 @@ export function ItemCard({ item }: { item: Item }) {
         <div className="absolute left-2 top-2 flex items-center gap-1.5 sm:left-3 sm:top-3">
           <StatusBadge status={item.status} paused={paused} size="sm" overlay />
         </div>
-        {item.kind === 'apple' && <AppleBadge className="absolute bottom-2 left-2 sm:bottom-3 sm:left-3" />}
+        {item.kind === 'apple' ? (
+          <AppleBadge className="absolute bottom-2 left-2 sm:bottom-3 sm:left-3" />
+        ) : (
+          item.retailer && <RetailerChip retailer={item.retailer} className="absolute bottom-2 left-2 max-w-[70%] sm:bottom-3 sm:left-3" />
+        )}
         {checking && (
           <div className="absolute inset-0 flex items-center justify-center bg-white/50 backdrop-blur-[1px] dark:bg-zinc-950/50">
             <span className="inline-flex items-center gap-2 rounded-full bg-white px-3 py-1 text-xs font-medium text-zinc-700 shadow ring-1 ring-zinc-200 dark:bg-zinc-900 dark:text-zinc-200 dark:ring-zinc-700">
@@ -121,6 +150,7 @@ export function ItemCard({ item }: { item: Item }) {
             <span className="truncate">{hostOf(item.url)}</span>
           </p>
           <div className="mt-2 flex flex-wrap gap-1.5 empty:hidden">
+            {item.status === 'in_stock' && item.enabled && <AddToCartLink item={item} />}
             <BoughtItButton item={item} />
             <RearmAlertsButton item={item} />
           </div>
@@ -133,10 +163,13 @@ export function ItemCard({ item }: { item: Item }) {
             <p className="mt-0.5 text-xs text-zinc-400 dark:text-zinc-500">
               <RelativeTime iso={item.last_checked_at} prefix="Checked" fallback="not yet" className="pointer-events-auto" />
             </p>
+            {item.status !== 'in_stock' && item.last_in_stock_at && (
+              <p className="mt-0.5 text-xs text-zinc-400 dark:text-zinc-500">
+                <RelativeTime iso={item.last_in_stock_at} prefix="Last in stock" className="pointer-events-auto" />
+              </p>
+            )}
           </div>
-          {item.price && (
-            <span className="shrink-0 text-sm font-semibold tabular-nums text-zinc-900 dark:text-zinc-100">{item.price}</span>
-          )}
+          <PriceWithLimit item={item} className="items-start min-[480px]:items-end" />
         </div>
       </div>
     </div>
@@ -169,7 +202,7 @@ export function ItemRow({ item }: { item: Item }) {
           {item.kind === 'apple' && <AppleLogo className="size-3 shrink-0 text-zinc-400" />}
         </div>
         <p className="mt-0.5 truncate text-xs text-zinc-500 dark:text-zinc-400">
-          {hostOf(item.url)}
+          {item.retailer?.name ?? hostOf(item.url)}
           <span className="mx-1.5 text-zinc-300 dark:text-zinc-700">·</span>
           <span className={cn(paused ? '' : statusMeta[item.status]?.text)}>{statusLine(item)}</span>
         </p>
@@ -177,8 +210,8 @@ export function ItemRow({ item }: { item: Item }) {
       <div className="pointer-events-none relative hidden w-28 shrink-0 justify-end md:flex">
         <StatusBadge status={item.status} paused={paused} size="sm" />
       </div>
-      <div className="pointer-events-none relative hidden w-24 shrink-0 text-right text-sm font-medium tabular-nums text-zinc-900 sm:block dark:text-zinc-100">
-        {item.price ?? <span className="text-zinc-400">—</span>}
+      <div className="pointer-events-none relative hidden w-24 shrink-0 justify-end text-right text-sm font-medium tabular-nums text-zinc-900 sm:flex dark:text-zinc-100">
+        {item.price || item.max_price != null ? <PriceWithLimit item={item} /> : <span className="text-zinc-400">—</span>}
       </div>
       <div className="pointer-events-none relative hidden w-24 shrink-0 text-right text-xs text-zinc-500 lg:block">
         <RelativeTime iso={item.last_checked_at} fallback="not yet" className="pointer-events-auto" />

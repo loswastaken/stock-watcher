@@ -1,5 +1,6 @@
 import type { CheckEvent, Item, ItemStatus, Notification, Settings, User } from '@/lib/types';
 import { IMG } from './images';
+import { retailerByKey } from './retailers';
 
 const now = Date.now();
 export const ago = (ms: number) => new Date(now - ms).toISOString().replace(/\.\d+Z$/, 'Z');
@@ -21,6 +22,9 @@ export const settings: Settings & { ntfy_token?: string } = {
   default_zip: '95014',
   default_max_distance_miles: 25,
   notify_on_out_of_stock: false,
+  muted_retailers: ['ebay'],
+  auto_rearm: false,
+  alert_sound: true,
   theme: ((): Settings['theme'] => {
     const t = localStorage.getItem('sw-theme');
     return t === 'light' || t === 'system' ? t : 'dark';
@@ -114,7 +118,12 @@ export const items: Item[] = [
     price: '$699.99',
     last_checked_at: ago(75_000),
     last_change_at: ago(3 * 24 * h),
-    last_result: { signals: ['json-ld: OutOfStock', 'button: "Sold Out" (disabled)'], matched: 'Sold Out' },
+    last_in_stock_at: ago(3 * 24 * h + 40 * m),
+    max_price: 720,
+    product_group: 'ps5pro',
+    retailer: retailerByKey('bestbuy'),
+    retailer_config: { fulfillment: 'delivery', zip: null, radius_miles: 25, official_only: true },
+    last_result: { signals: ['json-ld: OutOfStock', 'button: "Sold Out" (disabled)'], matched: 'Sold Out', retailer: 'bestbuy' },
   },
   {
     ...base,
@@ -124,11 +133,16 @@ export const items: Item[] = [
     kind: 'generic',
     image_url: IMG.switch2,
     status: 'in_stock',
-    status_text: 'In stock – ships today',
+    status_text: 'Pickup · Target Oak Park (3.2 mi)',
     price: '$499.99',
     interval_minutes: 5,
     last_checked_at: ago(2 * m),
     last_change_at: ago(47 * m),
+    last_in_stock_at: ago(2 * m),
+    retailer: retailerByKey('target'),
+    retailer_config: { fulfillment: 'any', zip: '60302', radius_miles: 10, official_only: true },
+    seller: 'Target',
+    third_party: false,
     last_result: { signals: ['json-ld: InStock', 'meta: product:availability = in stock', 'button: "Add to cart"'], matched: 'Add to cart' },
   },
   {
@@ -166,6 +180,7 @@ export const items: Item[] = [
     last_checked_at: ago(4 * m),
     last_change_at: ago(26 * h),
     last_error: 'HTTP 403 Forbidden — the site blocked the request. Try enabling "Render JavaScript".',
+    retailer: retailerByKey('lego'),
     last_result: { signals: [] },
   },
   {
@@ -181,6 +196,11 @@ export const items: Item[] = [
     price: '$448.00',
     last_checked_at: ago(2 * 24 * h),
     last_change_at: ago(6 * 24 * h),
+    last_in_stock_at: ago(2 * 24 * h),
+    retailer: retailerByKey('amazon'),
+    seller: 'Amazon.com',
+    third_party: false,
+    cart_url: 'https://www.amazon.com/gp/aws/cart/add.html?ASIN.1=B0F3PT1VBL&Quantity.1=1',
     generic_config: { mode: 'selector', selector: '#add-to-cart-button', in_stock_text: null, out_of_stock_text: null, render_js: true },
     last_result: { signals: ['selector: #add-to-cart-button found'], matched: 'Add to Cart' },
   },
@@ -218,6 +238,29 @@ export const items: Item[] = [
     last_result: { signals: ['text: found "sold out"'], matched: 'Batch 7 sold out' },
   },
 ];
+
+items.push({
+  ...base,
+  id: 9,
+  name: 'PlayStation 5 Pro Console',
+  url: 'https://www.walmart.com/ip/PlayStation-5-Pro-Console/5113183757',
+  kind: 'generic',
+  image_url: IMG.ps5,
+  status: 'in_stock',
+  status_text: 'In stock · above your $720 limit',
+  price: '$749.00',
+  last_checked_at: ago(50_000),
+  last_change_at: ago(3 * h),
+  last_in_stock_at: ago(50_000),
+  max_price: 720,
+  product_group: 'ps5pro',
+  retailer: retailerByKey('walmart'),
+  retailer_config: { fulfillment: 'delivery', zip: null, radius_miles: 25, official_only: true },
+  seller: 'Walmart.com',
+  third_party: false,
+  cart_url: 'https://affil.walmart.com/cart/addToCart?items=5113183757',
+  last_result: { signals: ['next-data: IN_STOCK'], retailer: 'walmart', price_value: 749 },
+});
 
 export function makeHistory(item: Item): CheckEvent[] {
   const out: CheckEvent[] = [];

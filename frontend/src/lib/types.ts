@@ -31,6 +31,12 @@ export interface Settings {
   default_max_distance_miles: number;
   notify_on_out_of_stock: boolean;
   theme: Theme;
+  /** Retailer keys whose restocks never alert. */
+  muted_retailers: string[];
+  /** Keep alerts armed after an alert (alert again on every new restock). */
+  auto_rearm: boolean;
+  /** Beep in the web app when a new alert arrives. */
+  alert_sound: boolean;
 }
 
 /** PUT /settings is partial. `ntfy_token: ""` clears; omitted keeps. */
@@ -41,6 +47,54 @@ export type SettingsUpdate = Partial<Omit<Settings, 'ntfy_token_set'>> & {
 export interface TestNotificationResult {
   ok: boolean;
   error: string | null;
+}
+
+/** A supported store (GET /retailers). */
+export interface Retailer {
+  key: string;
+  name: string;
+  domain: string;
+  /** Every host this store's product URLs can live on (domain first). */
+  hosts?: string[];
+  color: string;
+  /** Supports in-store pickup near a ZIP. */
+  pickup: boolean;
+  /** Can tell official (first-party) sellers from marketplace sellers. */
+  seller_filter: boolean;
+  note: string | null;
+}
+
+export type Fulfillment = 'delivery' | 'pickup' | 'any';
+
+export interface RetailerConfig {
+  fulfillment: Fulfillment;
+  zip: string | null;
+  radius_miles: number;
+  store_id?: string | null;
+  official_only: boolean;
+  condition?: 'new' | 'any';
+}
+
+/** One store tracking the same product (GET /items/{id}/stores). */
+export interface StoreRow {
+  id: number;
+  name: string;
+  url: string;
+  retailer: Retailer | null;
+  status: ItemStatus;
+  status_text: string;
+  price: string | null;
+  max_price: number | null;
+  enabled: boolean;
+  notify_enabled: boolean;
+  last_in_stock_at: string | null;
+  last_checked_at: string | null;
+}
+
+export interface Restock {
+  id: number;
+  checked_at: string;
+  status_text: string;
 }
 
 export type GenericMode = 'auto' | 'selector' | 'text';
@@ -131,6 +185,16 @@ export interface Item {
   /** Set when the item was marked purchased: it's then on the Purchased page and no longer checked. */
   purchased_at?: string | null;
   purchased_price?: string | null;
+  retailer_config?: RetailerConfig | null;
+  /** Price limit: no alert while the price is above it. */
+  max_price?: number | null;
+  last_in_stock_at?: string | null;
+  /** Items sharing this are the same product at different stores. */
+  product_group?: string | null;
+  retailer?: Retailer | null;
+  seller?: string | null;
+  third_party?: boolean | null;
+  cart_url?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -144,6 +208,9 @@ export interface ItemCreate {
   image_url?: string;
   generic_config?: GenericConfig;
   apple_config?: AppleConfig;
+  retailer_config?: RetailerConfig;
+  max_price?: number | null;
+  product_group?: string | null;
 }
 
 export type ItemUpdate = Partial<{
@@ -155,6 +222,9 @@ export type ItemUpdate = Partial<{
   interval_minutes: number;
   generic_config: GenericConfig;
   apple_config: AppleConfig;
+  retailer_config: RetailerConfig | null;
+  max_price: number | null;
+  product_group: string | null;
 }>;
 
 export interface CheckEvent {
@@ -174,6 +244,8 @@ export interface Preview {
   price: string | null;
   status: ItemStatus | null;
   is_apple: boolean;
+  /** The store this URL belongs to, when supported. */
+  retailer?: Retailer | null;
   /** Set when the page couldn't be fetched/parsed (response is still 200). */
   error?: string | null;
 }

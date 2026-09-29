@@ -83,3 +83,25 @@ export function formatDuration(ms: number | null | undefined): string {
 
 /** Loose Apple part-number check, e.g. MG8H4LL/A, MXK23AM/A, Z1FG */
 export const APPLE_PART_RE = /^[A-Z0-9]{4,6}[A-Z]{1,3}\/[A-Z]$|^Z[A-Z0-9]{3,}$/i;
+
+/** "$1,099.00" → 1099 (null when there's no number). */
+export function parsePrice(price: string | null | undefined): number | null {
+  if (!price) return null;
+  let s = price.replace(/[^\d.,]/g, '');
+  if (!/\d/.test(s)) return null;
+  if (s.includes(',') && s.includes('.')) s = s.lastIndexOf(',') > s.lastIndexOf('.') ? s.replace(/\./g, '').replace(',', '.') : s.replace(/,/g, '');
+  else if (s.includes(',')) s = /,\d{3}$/.test(s) ? s.replace(/,/g, '') : s.replace(',', '.');
+  const n = Number(s);
+  return Number.isFinite(n) ? n : null;
+}
+
+/** 50 → "$50", 49.99 → "$49.99" */
+export function formatMoney(n: number): string {
+  return `$${n.toLocaleString('en-US', { minimumFractionDigits: Number.isInteger(n) ? 0 : 2, maximumFractionDigits: 2 })}`;
+}
+
+/** Price is known and above the item's limit. */
+export function isAboveLimit(item: { price: string | null; max_price?: number | null }): boolean {
+  const p = parsePrice(item.price);
+  return item.max_price != null && p != null && p > item.max_price;
+}

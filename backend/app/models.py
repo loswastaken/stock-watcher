@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .db import Base
@@ -64,6 +64,10 @@ class UserSettings(Base):
     default_max_distance_miles: Mapped[int] = mapped_column(Integer, default=25)
     notify_on_out_of_stock: Mapped[bool] = mapped_column(Boolean, default=False)
     theme: Mapped[str] = mapped_column(String(16), default="dark")
+    muted_retailers: Mapped[list | None] = mapped_column(JSON, nullable=True)  # retailer keys: no alerts
+    # Re-arm alerts automatically once an alerted item goes out of stock (else: one alert, then muted).
+    auto_rearm: Mapped[bool] = mapped_column(Boolean, default=False)
+    alert_sound: Mapped[bool] = mapped_column(Boolean, default=True)  # beep in the web app on new alerts
 
     user: Mapped[User] = relationship(back_populates="settings")
 
@@ -91,6 +95,11 @@ class Item(Base):
     last_result: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     generic_config: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     apple_config: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    retailer_config: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # RetailerConfig fields
+    max_price: Mapped[float | None] = mapped_column(Float, nullable=True)  # price limit: no alert above it
+    last_in_stock_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Items sharing a product_group are the same product tracked at different stores.
+    product_group: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     # Purchased items leave the watch list: no checks, no alerts, shown on the Purchased page.
     purchased_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     purchased_price: Mapped[str | None] = mapped_column(String(64), nullable=True)

@@ -13,6 +13,8 @@ from sqlalchemy import delete, select
 
 from . import images
 from .checkers import CheckResult, run_check
+from .checkers.retailers.registry import match_retailer, retailer_by_key
+from .checkers.util import parse_amount
 from .config import get_settings
 from .db import SessionLocal
 from .models import CheckEvent, Item, Notification, UserSettings, utcnow
@@ -51,6 +53,7 @@ class _Snapshot:
     url: str
     generic_config: dict | None
     apple_config: dict | None
+    retailer_config: dict | None = None
 
 
 @dataclass
@@ -71,6 +74,7 @@ class _Outcome:
     target: _NtfyTarget | None = None
     send: bool = False
     fetch_image_url: str | None = None
+    actions: tuple[dict, ...] = ()
 
 
 def _load_snapshot(item_id: int) -> _Snapshot | None:
@@ -78,7 +82,7 @@ def _load_snapshot(item_id: int) -> _Snapshot | None:
         item = db.get(Item, item_id)
         if item is None:
             return None
-        return _Snapshot(item.kind, item.url, item.generic_config, item.apple_config)
+        return _Snapshot(item.kind, item.url, item.generic_config, item.apple_config, item.retailer_config)
 
 
 def _normalize(result: Any) -> CheckResult:
@@ -96,6 +100,24 @@ def _summarize(labels: list[str]) -> str:
     if len(labels) > len(shown):
         text += f"; +{len(labels) - len(shown)} more"
     return text
+
+
+def format_limit(value: float) -> str:
+    """$50 / $49.99"""
+    return f"${value:,.0f}" if float(value).is_integer() else f"${value:,.2f}"
+
+
+def _price_value(result: CheckResult, fallback: str | None) -> float | None:
+    v = (result.detail or {}).get("price_value")
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        return float(v)
+    amount = parse_amount(result.price if result.price is not None else fallback)
+    return float(amount) if amount is not None else None
+
+
+def _retailer_of(item: Item, detail: dict | None):
+    key = (detail or {}).get("retailer") or (item.last_result or {}).get("retailer")
+    return (retailer_by_key(str(key)) if key else None) or match_retailer(item.url or "")
 
 
 def _apply_result(item_id: int, result: CheckResult, duration_ms: int) -> _Outcome | None:
@@ -135,12 +157,21 @@ def _apply_result(item_id: int, result: CheckResult, duration_ms: int) -> _Outco
             item.last_result = result.detail or {}
             if result.price is not None:
                 item.price = result.price[:64]
+            if result.status == "in_stock":
+                item.last_in_stock_at = now
             keys = []
             seen = set()
             for a in result.available:
                 if a.key not in seen:
                     seen.add(a.key)
                     keys.append(a.key)
+            # Price limit: above it counts as "not available" for alerting, so dropping under
+            # the limit later is a fresh transition that alerts.
+            price_value = _price_value(result, item.price)
+            if keys and item.max_price is not None and price_value is not None and price_value > item.max_price:
+                keys = []
+                item.status_text = (f"{item.status_text or 'In stock'} · above your "
+                                    f"{format_limit(item.max_price)} limit")[:500]
             # Alert only on the transition from nothing available -> something available.
             # More stores/options opening up while already available is not a new alert.
             if keys and not prev_keys:
@@ -182,19 +213,33 @@ def _apply_result(item_id: int, result: CheckResult, duration_ms: int) -> _Outco
 
         notif: Notification | None = None
         tags = ("apple",) if item.kind == "apple" else ("shopping_cart",)
-        alerts_on = bool(item.notify_enabled) and item.purchased_at is None
+        retailer = _retailer_of(item, result.detail)
+        muted = {str(k) for k in ((settings.muted_retailers if settings else None) or [])}
+        alerts_on = (bool(item.notify_enabled) and item.purchased_at is None
+                     and not (retailer is not None and retailer.key in muted))
         if new_labels and alerts_on:
+            where = f" at {retailer.name}" if retailer is not None else ""
+            price = result.price or item.price
+            message = _summarize(new_labels)
+            if price:
+                message = f"{price} · {message}"
             notif = Notification(
                 user_id=item.user_id,
                 item_id=item.id,
-                title=f"Back in stock: {item.name}"[:300],
-                message=_summarize(new_labels),
+                title=f"Back in stock{where}: {item.name}"[:300],
+                message=message,
                 url=item.url,
                 image_url=item.image_url,
                 created_at=now,
             )
-            # One alert per restock: mute the item until the user turns alerts back on.
-            item.notify_enabled = False
+            if not (settings and settings.auto_rearm):
+                # One alert per restock: mute the item until the user turns alerts back on.
+                # (With auto re-arm the item stays armed; alerts only fire on the
+                # nothing -> something transition, so it alerts again on the next restock.)
+                item.notify_enabled = False
+            cart_url = (result.detail or {}).get("cart_url")
+            if isinstance(cart_url, str) and cart_url.startswith(("http://", "https://")):
+                outcome.actions = ({"action": "view", "label": "Add to cart", "url": cart_url, "clear": True},)
 
         if notif is not None:
             db.add(notif)
@@ -261,7 +306,8 @@ async def check_item(item_id: int, *, wait: bool = True) -> bool:
         try:
             result = _normalize(
                 await asyncio.wait_for(
-                    run_check(snap.kind, snap.url, snap.generic_config, snap.apple_config),
+                    run_check(snap.kind, snap.url, snap.generic_config, snap.apple_config,
+                              retailer_config=snap.retailer_config),
                     CHECK_TIMEOUT_SECONDS,
                 )
             )
@@ -287,6 +333,7 @@ async def check_item(item_id: int, *, wait: bool = True) -> bool:
                 outcome.click_url,
                 outcome.tags,
                 outcome.target.ntfy_priority,
+                actions=outcome.actions or None,
             )
             if not ok:
                 log.warning("ntfy delivery failed for item %s: %s", item_id, err)

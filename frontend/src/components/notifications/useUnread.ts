@@ -3,8 +3,9 @@ import { useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
 import { api } from '@/lib/api';
-import { browserNotifyEnabled, showBrowserNotification } from '@/lib/browserNotify';
+import { browserNotifyEnabled, playAlertSound, primeAlertSound, showBrowserNotification } from '@/lib/browserNotify';
 import { qk } from '@/lib/queryClient';
+import type { Settings } from '@/lib/types';
 
 /** Polls unread notifications (latest 5) every 30 s. Shared by bell + mobile tab bar. */
 export function useUnread() {
@@ -25,6 +26,8 @@ export function useUnreadWatcher() {
   const qc = useQueryClient();
   const navigate = useNavigate();
 
+  useEffect(() => primeAlertSound(), []);
+
   useEffect(() => {
     if (!data) return;
     const count = data.unread_count;
@@ -36,6 +39,7 @@ export function useUnreadWatcher() {
     if (count > prev.current) {
       const fresh = data.items.filter((n) => !seen.current.has(n.id));
       const toShow = fresh.slice(0, 3);
+      if (qc.getQueryData<Settings>(qk.settings)?.alert_sound !== false) playAlertSound();
       toShow.forEach((n) => showBrowserNotification(n, navigate));
       toShow.forEach((n) => {
         toast(n.title, {

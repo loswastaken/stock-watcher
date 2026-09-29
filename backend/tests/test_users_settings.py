@@ -57,6 +57,9 @@ def test_settings_defaults_and_token_masking(admin):
         "default_max_distance_miles": 25,
         "notify_on_out_of_stock": False,
         "theme": "dark",
+        "muted_retailers": [],
+        "auto_rearm": False,
+        "alert_sound": True,
     }
     r = admin.put("/api/settings", json={"ntfy_topic": "my-topic", "ntfy_token": "tk_secret", "ntfy_server": "https://ntfy.example.com/"})
     body = r.json()

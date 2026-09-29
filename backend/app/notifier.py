@@ -18,8 +18,12 @@ async def send_ntfy(
     click_url: str | None = None,
     tags: Sequence[str] | None = None,
     priority: int | None = None,
+    actions: Sequence[dict[str, Any]] | None = None,
 ) -> tuple[bool, str | None]:
     """Publish to ntfy. `settings` needs ntfy_server, ntfy_topic, ntfy_token (and ntfy_priority).
+
+    `actions` are ntfy action buttons, e.g. ``[{"action": "view", "label": "Add to cart", "url": ...}]``
+    (ntfy allows at most 3).
 
     Returns (ok, error). Never raises.
     """
@@ -40,6 +44,8 @@ async def send_ntfy(
         payload["tags"] = list(tags)
     if click_url:
         payload["click"] = click_url
+    if actions:
+        payload["actions"] = [dict(a) for a in actions][:3]
     headers = {"Content-Type": "application/json"}
     if token:
         headers["Authorization"] = f"Bearer {token}"

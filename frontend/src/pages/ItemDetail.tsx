@@ -2,6 +2,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   AlertTriangle,
   ArrowLeft,
+  BadgeCheck,
   Bell,
   BellOff,
   CalendarClock,
@@ -17,16 +18,20 @@ import {
   Play,
   RefreshCw,
   ShoppingBag,
+  ShoppingCart,
   Store,
   Timer,
   Truck,
   Undo2,
   XCircle,
+  Zap,
 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { AppleBadge, RearmAlertsButton } from '@/components/items/ItemCard';
 import { ItemActionsMenu } from '@/components/items/ItemActionsMenu';
+import { RestockPanel, StoresPanel } from '@/components/items/ProductStores';
+import { RetailerChip } from '@/components/RetailerBadge';
 import { ItemImage } from '@/components/ItemImage';
 import { RelativeTime } from '@/components/RelativeTime';
 import { StatusBadge, StatusDot, statusMeta } from '@/components/StatusBadge';
@@ -41,7 +46,18 @@ import { useIsChecking, useItemActions } from '@/hooks/useItemActions';
 import { api, ApiError, errorMessage } from '@/lib/api';
 import { qk } from '@/lib/queryClient';
 import type { AppleDelivery, AppleStore, CheckEvent, Item } from '@/lib/types';
-import { absoluteTime, cn, formatDuration, formatInterval, hostOf, parseDate, relativeTime } from '@/lib/utils';
+import { fulfillmentLabel } from '@/lib/retailers';
+import {
+  absoluteTime,
+  cn,
+  formatDuration,
+  formatInterval,
+  formatMoney,
+  hostOf,
+  isAboveLimit,
+  parseDate,
+  relativeTime,
+} from '@/lib/utils';
 
 function isFresh(item: Item | undefined) {
   if (!item) return false;
@@ -75,6 +91,8 @@ export default function ItemDetail() {
     if (prevChecked.current !== lastChecked) {
       prevChecked.current = lastChecked;
       qc.invalidateQueries({ queryKey: qk.history(itemId) });
+      qc.invalidateQueries({ queryKey: qk.restocks(itemId) });
+      qc.invalidateQueries({ queryKey: qk.stores(itemId) });
     }
   }, [lastChecked, itemId, qc]);
 
@@ -117,6 +135,8 @@ export default function ItemDetail() {
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1fr)_380px]">
         <div className="min-w-0 space-y-6">
           {it.kind === 'apple' ? <AppleResults item={it} /> : <WhyPanel item={it} />}
+          {!it.purchased_at && <StoresPanel item={it} />}
+          <RestockPanel item={it} />
         </div>
         <HistoryPanel events={history.data} loading={history.isLoading} error={history.error} />
       </div>
@@ -169,6 +189,18 @@ function Hero({ item, onDeleted }: { item: Item; onDeleted: () => void }) {
                 <StatusBadge status={item.status} paused={paused} />
                 {paused && <StatusBadge status={item.status} />}
                 {item.kind === 'apple' && <AppleBadge className="shadow-none ring-zinc-200 dark:ring-zinc-700" />}
+                {item.kind !== 'apple' && item.retailer && (
+                  <RetailerChip retailer={item.retailer} className="shadow-none ring-zinc-200 dark:ring-zinc-700" />
+                )}
+                {item.retailer_config && item.retailer?.pickup && (
+                  <Badge tone="sky">
+                    {item.retailer_config.fulfillment === 'delivery' ? <Truck /> : <Store />}
+                    {fulfillmentLabel[item.retailer_config.fulfillment]}
+                    {item.retailer_config.fulfillment !== 'delivery' && item.retailer_config.zip
+                      ? ` · ${item.retailer_config.zip} (${item.retailer_config.radius_miles} mi)`
+                      : ''}
+                  </Badge>
+                )}
                 <RearmAlertsButton item={item} />
               </div>
               <h1 className="text-xl font-semibold leading-tight tracking-tight text-zinc-900 sm:text-2xl dark:text-zinc-50">{item.name}</h1>
@@ -196,11 +228,41 @@ function Hero({ item, onDeleted }: { item: Item; onDeleted: () => void }) {
                   item.status_text || m.label
                 )}
               </p>
+              {item.seller && (
+                <p className="mt-1 flex items-center gap-1.5 text-xs text-zinc-500 dark:text-zinc-400">
+                  {item.third_party ? (
+                    <Badge tone="amber">Third-party seller</Badge>
+                  ) : (
+                    <BadgeCheck className="size-3.5 text-emerald-500" />
+                  )}
+                  Sold by {item.seller}
+                </p>
+              )}
             </div>
-            {item.price && <p className="text-2xl font-semibold tabular-nums tracking-tight text-zinc-900 dark:text-zinc-50">{item.price}</p>}
+            {(item.price || item.max_price != null) && (
+              <div className="text-right">
+                {item.price && (
+                  <p
+                    className={cn(
+                      'text-2xl font-semibold tabular-nums tracking-tight',
+                      isAboveLimit(item) ? 'text-amber-700 dark:text-amber-400' : 'text-zinc-900 dark:text-zinc-50',
+                    )}
+                  >
+                    {item.price}
+                  </p>
+                )}
+                {item.max_price != null && (
+                  <p className="text-xs tabular-nums text-zinc-500 dark:text-zinc-400">
+                    {isAboveLimit(item) ? 'Above your ' : 'Price limit '}
+                    {formatMoney(item.max_price)}
+                    {isAboveLimit(item) ? ' limit' : ''}
+                  </p>
+                )}
+              </div>
+            )}
           </div>
 
-          <dl className="grid grid-cols-2 gap-4 rounded-xl bg-zinc-50 p-4 sm:grid-cols-4 dark:bg-zinc-800/30">
+          <dl className="grid grid-cols-2 gap-4 rounded-xl bg-zinc-50 p-4 sm:grid-cols-3 2xl:grid-cols-5 dark:bg-zinc-800/30">
             <Meta icon={<Timer />} label="Interval">
               Every {formatInterval(item.interval_minutes)}
             </Meta>
@@ -209,6 +271,9 @@ function Hero({ item, onDeleted }: { item: Item; onDeleted: () => void }) {
             </Meta>
             <Meta icon={<History />} label="Last change">
               <RelativeTime iso={item.last_change_at} fallback="—" />
+            </Meta>
+            <Meta icon={<Zap />} label="Last in stock">
+              <RelativeTime iso={item.last_in_stock_at} fallback="—" />
             </Meta>
             <Meta icon={item.notify_enabled ? <Bell /> : <BellOff />} label="Alerts">
               <span className="flex items-center gap-2">
@@ -236,8 +301,22 @@ function Hero({ item, onDeleted }: { item: Item; onDeleted: () => void }) {
           )}
 
           <div className="mt-auto flex flex-wrap gap-2">
+            {item.cart_url && !item.purchased_at && (
+              <a
+                href={item.cart_url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className={buttonClasses({ variant: item.status === 'in_stock' ? 'primary' : 'outline' })}
+              >
+                <ShoppingCart /> Add to cart
+              </a>
+            )}
             {!item.purchased_at && (
-              <Button variant="primary" onClick={() => a.purchase.mutate(item)} loading={a.purchase.isPending}>
+              <Button
+                variant={item.cart_url && item.status === 'in_stock' ? 'outline' : 'primary'}
+                onClick={() => a.purchase.mutate(item)}
+                loading={a.purchase.isPending}
+              >
                 <ShoppingBag /> Mark purchased
               </Button>
             )}

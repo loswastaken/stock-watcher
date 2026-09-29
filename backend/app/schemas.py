@@ -8,7 +8,8 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, PlainSerializer, field_validator, model_validator
 
-from .models import DEFAULT_GENERIC_CONFIG
+from .checkers.retailers.registry import match_retailer, retailer_by_key
+from .models import DEFAULT_GENERIC_CONFIG, Item
 
 
 def _utc_iso(dt: datetime | None) -> str | None:
@@ -109,6 +110,9 @@ class SettingsOut(BaseModel):
     default_max_distance_miles: int
     notify_on_out_of_stock: bool
     theme: str
+    muted_retailers: list[str] = Field(default_factory=list)
+    auto_rearm: bool = False
+    alert_sound: bool = True
 
 
 class SettingsUpdate(BaseModel):
@@ -121,6 +125,23 @@ class SettingsUpdate(BaseModel):
     default_max_distance_miles: int | None = Field(default=None, ge=1, le=500)
     notify_on_out_of_stock: bool | None = None
     theme: Literal["dark", "light", "system"] | None = None
+    muted_retailers: list[str] | None = Field(default=None, max_length=500)
+    auto_rearm: bool | None = None
+    alert_sound: bool | None = None
+
+    @field_validator("muted_retailers")
+    @classmethod
+    def _muted(cls, v: list[str] | None) -> list[str] | None:
+        if v is None:
+            return v
+        out: list[str] = []
+        for key in v:
+            key = (key or "").strip().lower()
+            if not retailer_by_key(key):
+                raise ValueError(f"unknown retailer '{key}'")
+            if key not in out:
+                out.append(key)
+        return out
 
     @field_validator("ntfy_server")
     @classmethod
@@ -191,6 +212,21 @@ class AppleConfig(BaseModel):
     watch_delivery: bool = True
 
 
+class RetailerConfigIn(BaseModel):
+    """Per-item retailer options (see checkers/retailers/base.py RetailerConfig)."""
+    fulfillment: Literal["delivery", "pickup", "any"] = "delivery"
+    zip: str | None = Field(default=None, max_length=16)
+    radius_miles: int = Field(default=25, ge=1, le=250)
+    store_id: str | None = Field(default=None, max_length=64)
+    official_only: bool = True
+    condition: Literal["new", "any"] = "new"
+
+    @field_validator("zip", "store_id")
+    @classmethod
+    def _strip(cls, v: str | None) -> str | None:
+        return (v.strip() or None) if v is not None else None
+
+
 class ItemCreate(BaseModel):
     name: str | None = Field(default=None, max_length=200)
     url: str
@@ -200,6 +236,9 @@ class ItemCreate(BaseModel):
     image_url: str | None = Field(default=None, max_length=2048)
     generic_config: GenericConfig | None = None
     apple_config: AppleConfig | None = None
+    retailer_config: RetailerConfigIn | None = None
+    max_price: float | None = Field(default=None, gt=0, le=1_000_000)
+    product_group: str | None = Field(default=None, max_length=64)
 
     @field_validator("url")
     @classmethod
@@ -220,6 +259,9 @@ class ItemUpdate(BaseModel):
     interval_minutes: int | None = Field(default=None, ge=1, le=10080)
     generic_config: GenericConfig | None = None
     apple_config: AppleConfig | None = None
+    retailer_config: RetailerConfigIn | None = None
+    max_price: float | None = Field(default=None, gt=0, le=1_000_000)  # null clears the limit
+    product_group: str | None = Field(default=None, max_length=64)  # null / "" detaches
 
     @field_validator("url")
     @classmethod
@@ -258,8 +300,26 @@ class ItemOut(BaseModel):
     last_result: dict[str, Any]
     purchased_at: UTCDateTime | None = None
     purchased_price: str | None = None
+    retailer_config: dict[str, Any] | None = None
+    max_price: float | None = None
+    last_in_stock_at: UTCDateTime | None = None
+    product_group: str | None = None
+    # derived: registry entry for the item's store + seller/cart details from the last check
+    retailer: dict[str, Any] | None = None
+    seller: str | None = None
+    third_party: bool | None = None
+    cart_url: str | None = None
     created_at: UTCDateTime
     updated_at: UTCDateTime
+
+    @model_validator(mode="before")
+    @classmethod
+    def _from_item(cls, v):
+        if not isinstance(v, Item):
+            return v
+        data = {name: getattr(v, name) for name in cls.model_fields if hasattr(v, name)}
+        data.update(item_extras(v))
+        return data
 
     @field_validator("generic_config", mode="before")
     @classmethod
@@ -277,8 +337,37 @@ class ItemOut(BaseModel):
         return v or ""
 
 
+def item_retailer(item: Item) -> dict[str, Any] | None:
+    detail = item.last_result if isinstance(item.last_result, dict) else {}
+    r = retailer_by_key(str(detail.get("retailer") or "")) or match_retailer(item.url or "")
+    return r.to_dict() if r else None
+
+
+def item_extras(item: Item) -> dict[str, Any]:
+    detail = item.last_result if isinstance(item.last_result, dict) else {}
+    seller = detail.get("seller")
+    third_party = detail.get("third_party")
+    cart_url = detail.get("cart_url")
+    return {
+        "retailer": item_retailer(item),
+        "seller": str(seller) if seller else None,
+        "third_party": third_party if isinstance(third_party, bool) else None,
+        "cart_url": cart_url if isinstance(cart_url, str) and cart_url.startswith(("http://", "https://")) else None,
+    }
+
+
 class UrlRequest(BaseModel):
     url: str
+
+    @field_validator("url")
+    @classmethod
+    def _url(cls, v: str) -> str:
+        return validate_http_url(v)
+
+
+class StoreCreate(BaseModel):
+    url: str
+    retailer_config: RetailerConfigIn | None = None
 
     @field_validator("url")
     @classmethod
@@ -292,7 +381,41 @@ class PreviewOut(BaseModel):
     price: str | None = None
     status: str | None = "unknown"
     is_apple: bool = False
+    retailer: dict[str, Any] | None = None  # registry entry for the URL's store, when known
     error: str | None = None
+
+
+class RetailerOut(BaseModel):
+    key: str
+    name: str
+    domain: str
+    color: str
+    pickup: bool
+    seller_filter: bool
+    note: str | None = None
+
+
+class StoreRow(BaseModel):
+    """One store in a product group (GET /items/{id}/stores)."""
+    id: int
+    name: str
+    url: str
+    retailer: dict[str, Any] | None
+    status: str
+    status_text: str
+    price: str | None
+    max_price: float | None
+    enabled: bool
+    notify_enabled: bool
+    last_in_stock_at: UTCDateTime | None
+    last_checked_at: UTCDateTime | None
+
+
+class RestockOut(BaseModel):
+    """A moment the item came back in stock (GET /items/{id}/restocks)."""
+    id: int
+    checked_at: UTCDateTime
+    status_text: str
 
 
 class AppleVariant(BaseModel):

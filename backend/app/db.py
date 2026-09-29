@@ -116,6 +116,12 @@ def add_missing_columns(engine: Engine) -> None:
                     ddl += f" DEFAULT {default}"
                 log.info("migrating: %s", ddl)
                 conn.exec_driver_sql(ddl)
+            # indexes declared on the model (e.g. index=True on a newly added column)
+            existing_ix = {ix["name"] for ix in insp.get_indexes(table.name)}
+            for ix in table.indexes:
+                if ix.name and ix.name not in existing_ix:
+                    log.info("migrating: CREATE INDEX %s", ix.name)
+                    ix.create(conn, checkfirst=True)
 
 
 def init_db() -> None:

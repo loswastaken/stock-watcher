@@ -5,6 +5,7 @@ import asyncio
 import io
 import logging
 import re
+import shutil
 import time
 import uuid
 from urllib.parse import urlsplit
@@ -102,6 +103,20 @@ def delete_image_file(filename: str | None) -> None:
         path.unlink(missing_ok=True)
     except OSError:
         log.warning("could not delete image %s", filename)
+
+
+def copy_image_file(filename: str | None) -> str | None:
+    """Duplicate a stored image (each item owns its file, which is deleted with the item)."""
+    src = image_file(filename) if filename else None
+    if src is None or not src.is_file():
+        return None
+    name = f"{uuid.uuid4().hex}{src.suffix or '.webp'}"
+    try:
+        shutil.copyfile(src, src.parent / name)
+    except OSError:
+        log.warning("could not copy image %s", filename)
+        return None
+    return name
 
 
 async def download_image(url: str) -> bytes:

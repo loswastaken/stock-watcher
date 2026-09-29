@@ -1,7 +1,35 @@
 /* Dev-only fetch mock (VITE_MOCK=1). Never imported in production builds. */
-import type { AuthStatus, Item, ItemCreate, Notification, Stats, User } from '@/lib/types';
+import type { AuthStatus, Item, ItemCreate, Notification, Restock, Stats, StoreRow, User } from '@/lib/types';
 import { ago, items, makeHistory, notifications, settings, users } from './data';
 import { IMG } from './images';
+import { retailerForUrl, retailers } from './retailers';
+
+const storeRow = (i: Item): StoreRow => ({
+  id: i.id,
+  name: i.name,
+  url: i.url,
+  retailer: i.retailer ?? retailerForUrl(i.url),
+  status: i.status,
+  status_text: i.status_text ?? '',
+  price: i.price,
+  max_price: i.max_price ?? null,
+  enabled: i.enabled,
+  notify_enabled: i.notify_enabled,
+  last_in_stock_at: i.last_in_stock_at ?? null,
+  last_checked_at: i.last_checked_at,
+});
+
+function restocks(item: Item): Restock[] {
+  const events = makeHistory(item).reverse(); // oldest first
+  const out: Restock[] = [];
+  let prev: string | null = null;
+  for (const e of events) {
+    if (e.status === 'in_stock' && prev === 'out_of_stock')
+      out.push({ id: e.id, checked_at: e.checked_at, status_text: e.status_text ?? '' });
+    if (e.status === 'in_stock' || e.status === 'out_of_stock') prev = e.status;
+  }
+  return out.reverse();
+}
 
 const store = {
   get authed() {
@@ -100,6 +128,7 @@ async function handle(path: string, method: string, body: unknown): Promise<Resp
     return json(settings.ntfy_topic ? { ok: true, error: null } : { ok: false, error: 'No topic configured' });
 
   if (p === '/stats') return json(stats());
+  if (p === '/retailers') return json(retailers);
 
   if (p === '/items/preview') {
     const u = (body as { url: string }).url;
@@ -110,6 +139,7 @@ async function handle(path: string, method: string, body: unknown): Promise<Resp
       price: apple ? '$1,099.00' : '$649.00',
       status: apple ? 'unknown' : 'out_of_stock',
       is_apple: apple,
+      retailer: retailerForUrl(u),
     });
   }
   if (p === '/apple/resolve')
@@ -146,6 +176,11 @@ async function handle(path: string, method: string, body: unknown): Promise<Resp
       last_error: null,
       generic_config: b.generic_config ?? null,
       apple_config: b.apple_config ?? null,
+      retailer_config: b.retailer_config ?? null,
+      max_price: b.max_price ?? null,
+      product_group: b.product_group ?? null,
+      last_in_stock_at: null,
+      retailer: retailerForUrl(b.url),
       last_result: null,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
@@ -201,6 +236,42 @@ async function handle(path: string, method: string, body: unknown): Promise<Resp
     if (sub === '/image/refresh') return it.image_url ? json(it) : json({ detail: 'No image found on the page' }, 422);
     if (sub === '/image') return json(it);
     if (sub.startsWith('/history')) return json(makeHistory(it));
+    if (sub.startsWith('/restocks')) return json(restocks(it));
+    if (sub === '/stores' && method === 'GET')
+      return json((it.product_group ? items.filter((x) => x.product_group === it.product_group) : [it]).map(storeRow));
+    if (sub === '/stores' && method === 'POST') {
+      const u = (body as { url: string }).url;
+      if (items.some((x) => x.url === u && (x.id === it.id || (it.product_group && x.product_group === it.product_group))))
+        return json({ detail: 'This store is already tracked for this product' }, 409);
+      it.product_group ??= `g${it.id}`;
+      const sib: Item = {
+        ...it,
+        id: nextId++,
+        url: u,
+        kind: 'generic',
+        apple_config: null,
+        status: 'unknown',
+        status_text: 'Waiting for first check',
+        price: null,
+        last_checked_at: null,
+        last_change_at: null,
+        last_in_stock_at: null,
+        last_error: null,
+        last_result: null,
+        retailer: retailerForUrl(u),
+        retailer_config: null,
+        seller: null,
+        third_party: null,
+        cart_url: null,
+        notify_enabled: true,
+        purchased_at: null,
+        purchased_price: null,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
+      items.push(sib);
+      return json(sib, 201);
+    }
   }
 
   if (p === '/notifications' && method === 'GET') {

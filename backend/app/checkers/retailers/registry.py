@@ -30,6 +30,7 @@ class Retailer:
             "key": self.key,
             "name": self.name,
             "domain": self.domain,
+            "hosts": list(self.hosts),
             "color": self.color,
             "pickup": self.pickup,
             "seller_filter": self.seller_filter,
