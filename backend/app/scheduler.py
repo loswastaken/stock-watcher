@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import re
 import time
 from dataclasses import dataclass
 from datetime import timedelta
@@ -25,6 +26,9 @@ log = logging.getLogger("stockwatcher.scheduler")
 TICK_SECONDS = 10
 CHECK_TIMEOUT_SECONDS = 120
 KEEP_EVENTS_PER_ITEM = 500
+# Status-change events (changed=True) are kept longer than routine checks, so the restock
+# history (GET /items/{id}/restocks) spans more than the last ~500 checks.
+KEEP_CHANGED_EVENTS_PER_ITEM = 200
 KEEP_NOTIFICATIONS_PER_USER = 1000
 VALID_STATUSES = {"in_stock", "out_of_stock", "unknown", "error"}
 MAX_LABELS_IN_MESSAGE = 8
@@ -107,12 +111,23 @@ def format_limit(value: float) -> str:
     return f"${value:,.0f}" if float(value).is_integer() else f"${value:,.2f}"
 
 
-def _price_value(result: CheckResult, fallback: str | None) -> float | None:
+_AMOUNT_RE = re.compile(r"\d(?:[\d.,]*\d)?")
+
+
+def lowest_amount(text: str | None) -> float | None:
+    """Parse a display price; for ranges ("$19.99 - $29.99", "$19 to $29") the lowest amount."""
+    if text is None:
+        return None
+    amounts = [a for a in (parse_amount(tok) for tok in _AMOUNT_RE.findall(str(text))) if a is not None]
+    return float(min(amounts)) if amounts else None
+
+
+def _price_value(result: CheckResult) -> float | None:
+    """The price seen by THIS check (never a stored price from an earlier check)."""
     v = (result.detail or {}).get("price_value")
-    if isinstance(v, (int, float)) and not isinstance(v, bool):
+    if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) and v >= 0:
         return float(v)
-    amount = parse_amount(result.price if result.price is not None else fallback)
-    return float(amount) if amount is not None else None
+    return lowest_amount(result.price)
 
 
 def _retailer_of(item: Item, detail: dict | None):
@@ -133,6 +148,8 @@ def _apply_result(item_id: int, result: CheckResult, duration_ms: int) -> _Outco
 
         item.last_checked_at = now
         new_labels: list[str] = []
+        price_unverified = False
+        settings = db.execute(select(UserSettings).where(UserSettings.user_id == item.user_id)).scalar_one_or_none()
 
         if result.status == "unknown":
             # Inconclusive page (e.g. a bot challenge): record it, but keep the previous
@@ -166,8 +183,10 @@ def _apply_result(item_id: int, result: CheckResult, duration_ms: int) -> _Outco
                     seen.add(a.key)
                     keys.append(a.key)
             # Price limit: above it counts as "not available" for alerting, so dropping under
-            # the limit later is a fresh transition that alerts.
-            price_value = _price_value(result, item.price)
+            # the limit later is a fresh transition that alerts. Only this check's price counts;
+            # an unknown price still alerts (flagged as unverified in the message).
+            price_value = _price_value(result)
+            price_unverified = item.max_price is not None and price_value is None
             if keys and item.max_price is not None and price_value is not None and price_value > item.max_price:
                 keys = []
                 item.status_text = (f"{item.status_text or 'In stock'} · above your "
@@ -179,6 +198,11 @@ def _apply_result(item_id: int, result: CheckResult, duration_ms: int) -> _Outco
                 new_labels = [a.label for a in result.available
                               if not (a.label in seen_labels or seen_labels.add(a.label))]
             item.available_keys = keys
+            # Auto re-arm: an item muted by an earlier alert is armed again once nothing is
+            # available (sold out / above the price limit), so the next restock alerts.
+            if (not keys and item.muted_by_alert and settings is not None and settings.auto_rearm):
+                item.notify_enabled = True
+                item.muted_by_alert = False
             if not item.image_path and result.image_url and images.should_auto_fetch(item.id):
                 outcome.fetch_image_url = result.image_url
 
@@ -198,7 +222,8 @@ def _apply_result(item_id: int, result: CheckResult, duration_ms: int) -> _Outco
             )
         )
         db.flush()
-        # prune history to the newest KEEP_EVENTS_PER_ITEM events
+        # prune history to the newest KEEP_EVENTS_PER_ITEM events, but keep the newest
+        # KEEP_CHANGED_EVENTS_PER_ITEM status changes beyond that (restock history)
         cutoff = db.execute(
             select(CheckEvent.id)
             .where(CheckEvent.item_id == item.id)
@@ -207,9 +232,17 @@ def _apply_result(item_id: int, result: CheckResult, duration_ms: int) -> _Outco
             .limit(1)
         ).scalar()
         if cutoff is not None:
-            db.execute(delete(CheckEvent).where(CheckEvent.item_id == item.id, CheckEvent.id <= cutoff))
-
-        settings = db.execute(select(UserSettings).where(UserSettings.user_id == item.user_id)).scalar_one_or_none()
+            changed_cutoff = db.execute(
+                select(CheckEvent.id)
+                .where(CheckEvent.item_id == item.id, CheckEvent.changed.is_(True))
+                .order_by(CheckEvent.id.desc())
+                .offset(KEEP_CHANGED_EVENTS_PER_ITEM)
+                .limit(1)
+            ).scalar()
+            drop = CheckEvent.changed.is_not(True)
+            if changed_cutoff is not None:
+                drop = drop | (CheckEvent.id <= changed_cutoff)
+            db.execute(delete(CheckEvent).where(CheckEvent.item_id == item.id, CheckEvent.id <= cutoff, drop))
 
         notif: Notification | None = None
         tags = ("apple",) if item.kind == "apple" else ("shopping_cart",)
@@ -219,10 +252,13 @@ def _apply_result(item_id: int, result: CheckResult, duration_ms: int) -> _Outco
                      and not (retailer is not None and retailer.key in muted))
         if new_labels and alerts_on:
             where = f" at {retailer.name}" if retailer is not None else ""
-            price = result.price or item.price
+            # With a price limit and no price from this check, don't show a stale stored price.
+            price = result.price if price_unverified else (result.price or item.price)
             message = _summarize(new_labels)
             if price:
                 message = f"{price} · {message}"
+            if price_unverified:
+                message += " (price unverified)"
             notif = Notification(
                 user_id=item.user_id,
                 item_id=item.id,
@@ -237,6 +273,7 @@ def _apply_result(item_id: int, result: CheckResult, duration_ms: int) -> _Outco
                 # (With auto re-arm the item stays armed; alerts only fire on the
                 # nothing -> something transition, so it alerts again on the next restock.)
                 item.notify_enabled = False
+                item.muted_by_alert = True
             cart_url = (result.detail or {}).get("cart_url")
             if isinstance(cart_url, str) and cart_url.startswith(("http://", "https://")):
                 outcome.actions = ({"action": "view", "label": "Add to cart", "url": cart_url, "clear": True},)

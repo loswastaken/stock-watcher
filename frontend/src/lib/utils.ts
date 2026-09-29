@@ -84,15 +84,28 @@ export function formatDuration(ms: number | null | undefined): string {
 /** Loose Apple part-number check, e.g. MG8H4LL/A, MXK23AM/A, Z1FG */
 export const APPLE_PART_RE = /^[A-Z0-9]{4,6}[A-Z]{1,3}\/[A-Z]$|^Z[A-Z0-9]{3,}$/i;
 
-/** "$1,099.00" → 1099 (null when there's no number). */
-export function parsePrice(price: string | null | undefined): number | null {
-  if (!price) return null;
-  let s = price.replace(/[^\d.,]/g, '');
-  if (!/\d/.test(s)) return null;
+function parseAmount(token: string): number | null {
+  let s = token;
   if (s.includes(',') && s.includes('.')) s = s.lastIndexOf(',') > s.lastIndexOf('.') ? s.replace(/\./g, '').replace(',', '.') : s.replace(/,/g, '');
   else if (s.includes(',')) s = /,\d{3}$/.test(s) ? s.replace(/,/g, '') : s.replace(',', '.');
   const n = Number(s);
   return Number.isFinite(n) ? n : null;
+}
+
+/** "$1,099.00" → 1099; ranges ("$19.99 - $29.99") → the lowest amount (null when there's no number). */
+export function parsePrice(price: string | null | undefined): number | null {
+  if (!price) return null;
+  const amounts = (price.match(/\d(?:[\d.,]*\d)?/g) ?? []).map(parseAmount).filter((n): n is number => n != null);
+  return amounts.length ? Math.min(...amounts) : null;
+}
+
+const LIMIT_NOTE_RE = /\s*·\s*above your (\S+) limit$/i;
+
+/** Split the checker's " · above your $75 limit" suffix off a status text. */
+export function splitLimitNote(text: string | null | undefined): { text: string; limit: string | null } {
+  const t = text ?? '';
+  const m = LIMIT_NOTE_RE.exec(t);
+  return m ? { text: t.slice(0, m.index), limit: m[1] } : { text: t, limit: null };
 }
 
 /** 50 → "$50", 49.99 → "$49.99" */

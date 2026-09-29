@@ -54,13 +54,23 @@ export function showBrowserNotification(n: Alert, open: (path: string) => void) 
 /* ------------------------------------------------------------ alert sound */
 
 let audioCtx: AudioContext | null = null;
+let userGesture = false;
 
+function hasUserGesture(): boolean {
+  if (userGesture) return true;
+  const ua = (navigator as Navigator & { userActivation?: { hasBeenActive: boolean } }).userActivation;
+  return !!ua?.hasBeenActive;
+}
+
+/** The shared AudioContext, created on first use — and only after a user gesture, so the
+ * browser never warns about an AudioContext that isn't allowed to start. */
 function getAudioContext(): AudioContext | null {
-  if (typeof window === 'undefined') return null;
+  if (typeof window === 'undefined' || !hasUserGesture()) return null;
+  if (audioCtx) return audioCtx;
   const Ctx = window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
   if (!Ctx) return null;
   try {
-    audioCtx ??= new Ctx();
+    audioCtx = new Ctx();
   } catch {
     return null;
   }
@@ -68,22 +78,28 @@ function getAudioContext(): AudioContext | null {
 }
 
 /**
- * Browsers only let a page make sound after a user gesture. Call once at startup: the first
- * click/keypress anywhere unlocks audio so later alert beeps can play.
+ * Browsers only let a page make sound after a user gesture. Call once at startup: it records
+ * the first pointerdown/keydown so later alert beeps may create/resume audio. Returns a cleanup.
  */
-export function primeAlertSound() {
-  if (typeof window === 'undefined') return;
+export function primeAlertSound(): () => void {
+  if (typeof window === 'undefined') return () => undefined;
   const unlock = () => {
-    const ctx = getAudioContext();
-    if (ctx && ctx.state === 'suspended') void ctx.resume().catch(() => undefined);
-    window.removeEventListener('pointerdown', unlock);
-    window.removeEventListener('keydown', unlock);
+    userGesture = true;
+    // Resume an existing context from inside the gesture; don't create one just for this.
+    if (audioCtx?.state === 'suspended') void audioCtx.resume().catch(() => undefined);
+    cleanup();
   };
-  window.addEventListener('pointerdown', unlock, { once: true });
-  window.addEventListener('keydown', unlock, { once: true });
+  const cleanup = () => {
+    window.removeEventListener('pointerdown', unlock, true);
+    window.removeEventListener('keydown', unlock, true);
+  };
+  window.addEventListener('pointerdown', unlock, true);
+  window.addEventListener('keydown', unlock, true);
+  return cleanup;
 }
 
-/** A short two-tone chime, synthesized with WebAudio (no audio asset). Never throws. */
+/** A short two-tone chime, synthesized with WebAudio (no audio asset). Silent until the user
+ * has interacted with the page. Never throws. */
 export function playAlertSound() {
   const ctx = getAudioContext();
   if (!ctx) return;

@@ -404,7 +404,9 @@ function AlertBehaviorCard({ settings }: { settings: Settings }) {
   const qc = useQueryClient();
   const save = useMutation({
     mutationFn: (body: SettingsUpdate) => api.updateSettings(body),
-    onMutate: (body) => {
+    onMutate: async (body) => {
+      // Stop an in-flight settings fetch from overwriting the optimistic value (or the snapshot).
+      await qc.cancelQueries({ queryKey: qk.settings });
       const prev = qc.getQueryData<Settings>(qk.settings);
       qc.setQueryData<Settings>(qk.settings, (s) => (s ? { ...s, ...(body as Partial<Settings>) } : s));
       return { prev };
@@ -424,7 +426,7 @@ function AlertBehaviorCard({ settings }: { settings: Settings }) {
         <SwitchRow
           id="auto-rearm"
           title="Alert on every restock"
-          description="Keep alerts armed: you're alerted again each time an item comes back after selling out. Off = one alert, then that item's alerts pause until you re-arm them."
+          description="After an alert, an item's alerts pause; with this on they turn back on by themselves once it sells out again, so you're alerted on every restock. Off = alerts stay paused until you turn them back on. Items you muted yourself stay muted."
           checked={!!settings.auto_rearm}
           onCheckedChange={(v) => save.mutate({ auto_rearm: v })}
         />

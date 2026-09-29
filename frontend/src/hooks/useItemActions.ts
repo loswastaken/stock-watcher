@@ -129,10 +129,32 @@ export function useItemActions() {
   const purchase = useMutation({
     mutationFn: (item: Item) => api.purchaseItem(item.id),
     onSuccess: (item) => {
+      // Siblings still on the watch list before this: the server marks them purchased too.
+      const siblings = item.product_group
+        ? (qc.getQueryData<Item[]>(qk.items) ?? []).filter(
+            (x) => x.id !== item.id && x.product_group === item.product_group && !x.purchased_at,
+          )
+        : [];
       after(item);
+      if (item.product_group) {
+        // the same product at its other stores was marked purchased too
+        qc.invalidateQueries({ queryKey: qk.items });
+        qc.invalidateQueries({ queryKey: ['stores'] });
+      }
       toast.success('Marked as purchased', {
-        description: `${item.name} moved to Purchased.`,
-        action: { label: 'Undo', onClick: () => unpurchase.mutate(item) },
+        description: item.product_group
+          ? `${item.name} (all stores) moved to Purchased.`
+          : `${item.name} moved to Purchased.`,
+        action: {
+          label: 'Undo',
+          onClick: () => {
+            unpurchase.mutate(item);
+            if (siblings.length)
+              void Promise.allSettled(siblings.map((x) => api.unpurchaseItem(x.id))).then(() =>
+                qc.invalidateQueries({ queryKey: qk.items }),
+              );
+          },
+        },
       });
     },
     onError: (e) => toast.error(errorMessage(e)),

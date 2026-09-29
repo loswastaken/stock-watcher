@@ -55,6 +55,7 @@ import {
   formatMoney,
   hostOf,
   isAboveLimit,
+  splitLimitNote,
   parseDate,
   relativeTime,
 } from '@/lib/utils';
@@ -225,7 +226,8 @@ function Hero({ item, onDeleted }: { item: Item; onDeleted: () => void }) {
                     <RefreshCw className="size-4 animate-spin" /> Running first check…
                   </span>
                 ) : (
-                  item.status_text || m.label
+                  // the price-limit note is shown under the price
+                  splitLimitNote(item.status_text).text || m.label
                 )}
               </p>
               {item.seller && (

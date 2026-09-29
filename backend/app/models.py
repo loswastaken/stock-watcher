@@ -82,6 +82,9 @@ class Item(Base):
     kind: Mapped[str] = mapped_column(String(16), default="generic")
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     notify_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Alerts were turned off by an alert (one alert per restock), not by the user; with the
+    # auto re-arm setting such items are re-armed once they sell out again.
+    muted_by_alert: Mapped[bool] = mapped_column(Boolean, default=False)
     interval_minutes: Mapped[int] = mapped_column(Integer, default=2)
     image_path: Mapped[str | None] = mapped_column(String(200), nullable=True)
     status: Mapped[str] = mapped_column(String(16), default="unknown")

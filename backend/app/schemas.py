@@ -287,6 +287,7 @@ class ItemOut(BaseModel):
     kind: str
     enabled: bool
     notify_enabled: bool
+    muted_by_alert: bool = False  # alerts were turned off by an alert (auto re-arm may restore them)
     interval_minutes: int
     image_url: str | None
     status: str
@@ -335,6 +336,11 @@ class ItemOut(BaseModel):
     @classmethod
     def _st(cls, v):
         return v or ""
+
+    @field_validator("muted_by_alert", mode="before")
+    @classmethod
+    def _mba(cls, v):
+        return bool(v)
 
 
 def item_retailer(item: Item) -> dict[str, Any] | None:

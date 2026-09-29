@@ -49,7 +49,12 @@ export default function StoresPage() {
     },
   });
 
+  // Mute switches write the whole muted list, so they need the real settings first —
+  // toggling against a missing list would wipe the other mutes.
+  const settingsReady = !!settings.data;
+
   const toggle = (r: Retailer, alertsOn: boolean) => {
+    if (!settings.data) return;
     const next = new Set(muted);
     if (alertsOn) next.delete(r.key);
     else next.add(r.key);
@@ -67,6 +72,7 @@ export default function StoresPage() {
       />
     );
 
+  const settingsError = settings.isError && !settings.data;
   const q = query.trim().toLowerCase();
   const list = (retailers.data ?? []).filter((r) => !q || r.name.toLowerCase().includes(q) || r.domain.includes(q));
   const mutedCount = muted.size;
@@ -101,6 +107,21 @@ export default function StoresPage() {
           </div>
         }
       />
+
+      {settingsError && (
+        <div
+          role="alert"
+          className="mb-4 flex flex-wrap items-center gap-3 rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-200"
+        >
+          <AlertTriangle className="size-4 shrink-0" />
+          <span className="min-w-0 flex-1">
+            Couldn't load your alert settings, so store muting is unavailable. {errorMessage(settings.error)}
+          </span>
+          <Button size="sm" variant="outline" onClick={() => settings.refetch()} disabled={settings.isFetching}>
+            Try again
+          </Button>
+        </div>
+      )}
 
       {list.length === 0 ? (
         <EmptyState icon={<Store />} title="No matching stores" description="Try another name or domain." />
@@ -150,15 +171,17 @@ export default function StoresPage() {
                     )}
                   </div>
                 </div>
-                <Tooltip content={alertsOn ? `Mute alerts from ${r.name}` : `Unmute ${r.name}`}>
-                  <span>
-                    <Switch
-                      checked={alertsOn}
-                      onCheckedChange={(v) => toggle(r, v)}
-                      aria-label={`Alerts from ${r.name}`}
-                    />
-                  </span>
-                </Tooltip>
+                {settingsReady && (
+                  <Tooltip content={alertsOn ? `Mute alerts from ${r.name}` : `Unmute ${r.name}`}>
+                    <span>
+                      <Switch
+                        checked={alertsOn}
+                        onCheckedChange={(v) => toggle(r, v)}
+                        aria-label={`Alerts from ${r.name}`}
+                      />
+                    </span>
+                  </Tooltip>
+                )}
               </li>
             );
           })}

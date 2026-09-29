@@ -2,7 +2,7 @@ import { BellRing, Loader2, ShoppingBag } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { useIsChecking, useItemActions } from '@/hooks/useItemActions';
 import type { Item } from '@/lib/types';
-import { cn, formatMoney, hostOf, isAboveLimit } from '@/lib/utils';
+import { cn, formatMoney, hostOf, isAboveLimit, splitLimitNote } from '@/lib/utils';
 import { ItemImage } from '../ItemImage';
 import { AppleLogo } from '../Logo';
 import { RelativeTime } from '../RelativeTime';
@@ -94,9 +94,29 @@ export function PriceWithLimit({ item, className }: { item: Item; className?: st
   );
 }
 
+/** Status text without the price-limit note (shown separately so it never gets truncated away). */
 function statusLine(item: Item) {
   if (item.status === 'error') return item.last_error || item.status_text || 'Check failed';
-  return item.status_text || statusMeta[item.status]?.label || '';
+  return splitLimitNote(item.status_text).text || statusMeta[item.status]?.label || '';
+}
+
+function limitNote(item: Item): string | null {
+  return item.status === 'error' ? null : splitLimitNote(item.status_text).limit;
+}
+
+/** "Above $75 limit": the check found it available, but too expensive to alert. */
+function AboveLimitTag({ limit, className }: { limit: string; className?: string }) {
+  return (
+    <span
+      title={`Above your ${limit} price limit — no alert until it drops`}
+      className={cn(
+        'inline-flex shrink-0 items-center rounded-full bg-amber-50 px-1.5 py-px text-[11px] font-medium text-amber-800 ring-1 ring-amber-300/60 dark:bg-amber-500/10 dark:text-amber-300 dark:ring-amber-500/30',
+        className,
+      )}
+    >
+      Above {limit} limit
+    </span>
+  );
 }
 
 export function ItemCard({ item }: { item: Item }) {
@@ -160,6 +180,7 @@ export function ItemCard({ item }: { item: Item }) {
             <p className={cn('truncate text-xs font-medium', paused ? 'text-zinc-500' : statusMeta[item.status]?.text)}>
               {statusLine(item)}
             </p>
+            {limitNote(item) && <AboveLimitTag limit={limitNote(item)!} className="mt-1" />}
             <p className="mt-0.5 text-xs text-zinc-400 dark:text-zinc-500">
               <RelativeTime iso={item.last_checked_at} prefix="Checked" fallback="not yet" className="pointer-events-auto" />
             </p>
@@ -201,11 +222,14 @@ export function ItemRow({ item }: { item: Item }) {
           <h3 className="truncate text-sm font-semibold text-zinc-900 dark:text-zinc-50">{item.name}</h3>
           {item.kind === 'apple' && <AppleLogo className="size-3 shrink-0 text-zinc-400" />}
         </div>
-        <p className="mt-0.5 truncate text-xs text-zinc-500 dark:text-zinc-400">
-          {item.retailer?.name ?? hostOf(item.url)}
-          <span className="mx-1.5 text-zinc-300 dark:text-zinc-700">·</span>
-          <span className={cn(paused ? '' : statusMeta[item.status]?.text)}>{statusLine(item)}</span>
-        </p>
+        <div className="mt-0.5 flex min-w-0 items-center gap-1.5">
+          <p className="min-w-0 truncate text-xs text-zinc-500 dark:text-zinc-400">
+            {item.retailer?.name ?? hostOf(item.url)}
+            <span className="mx-1.5 text-zinc-300 dark:text-zinc-700">·</span>
+            <span className={cn(paused ? '' : statusMeta[item.status]?.text)}>{statusLine(item)}</span>
+          </p>
+          {limitNote(item) && <AboveLimitTag limit={limitNote(item)!} />}
+        </div>
       </div>
       <div className="pointer-events-none relative hidden w-28 shrink-0 justify-end md:flex">
         <StatusBadge status={item.status} paused={paused} size="sm" />

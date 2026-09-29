@@ -5,7 +5,6 @@ import { toast } from 'sonner';
 import { api } from '@/lib/api';
 import { browserNotifyEnabled, playAlertSound, primeAlertSound, showBrowserNotification } from '@/lib/browserNotify';
 import { qk } from '@/lib/queryClient';
-import type { Settings } from '@/lib/types';
 
 /** Polls unread notifications (latest 5) every 30 s. Shared by bell + mobile tab bar. */
 export function useUnread() {
@@ -25,6 +24,11 @@ export function useUnreadWatcher() {
   const seen = useRef<Set<number>>(new Set());
   const qc = useQueryClient();
   const navigate = useNavigate();
+  const settings = useQuery({ queryKey: qk.settings, queryFn: api.settings, staleTime: 60_000 });
+  // Only beep once settings are known and the user left the sound on.
+  const soundOn = settings.data?.alert_sound === true;
+  const soundRef = useRef(soundOn);
+  soundRef.current = soundOn;
 
   useEffect(() => primeAlertSound(), []);
 
@@ -39,7 +43,7 @@ export function useUnreadWatcher() {
     if (count > prev.current) {
       const fresh = data.items.filter((n) => !seen.current.has(n.id));
       const toShow = fresh.slice(0, 3);
-      if (qc.getQueryData<Settings>(qk.settings)?.alert_sound !== false) playAlertSound();
+      if (soundRef.current) playAlertSound();
       toShow.forEach((n) => showBrowserNotification(n, navigate));
       toShow.forEach((n) => {
         toast(n.title, {

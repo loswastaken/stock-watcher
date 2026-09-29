@@ -171,6 +171,8 @@ export interface Item {
   kind: ItemKind;
   enabled: boolean;
   notify_enabled: boolean;
+  /** Alerts were paused by an alert (auto re-arm turns them back on once it sells out). */
+  muted_by_alert?: boolean;
   interval_minutes: number;
   image_url: string | null;
   status: ItemStatus;

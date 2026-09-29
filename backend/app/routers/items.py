@@ -91,6 +91,35 @@ def _retailer_config_dict(cfg: RetailerConfigIn, defaults: UserSettings, url: st
     return data
 
 
+def _revalidate_retailer_config(cfg: dict | None, old_url: str, new_url: str,
+                                defaults: UserSettings) -> dict | None:
+    """Fit a stored retailer_config to an item's new URL (PATCH changed the URL only).
+
+    Unknown store -> no config. Another store -> its store_id is meaningless there, and
+    pickup falls back to delivery when the new store has no pickup (or no location is left).
+    """
+    if not cfg:
+        return None
+    new_r = match_retailer(new_url)
+    if new_r is None:
+        return None
+    data = dict(cfg)
+    old_r = match_retailer(old_url)
+    if old_r is None or old_r.key != new_r.key:
+        data.pop("store_id", None)
+    if data.get("fulfillment") in ("pickup", "any") and not new_r.pickup:
+        data["fulfillment"] = "delivery"
+    try:
+        parsed = RetailerConfigIn.model_validate(data)
+    except ValueError:
+        return None
+    try:
+        return _retailer_config_dict(parsed, defaults, new_url)
+    except HTTPException:
+        # pickup without a ZIP / store for the new store: track delivery instead
+        return _retailer_config_dict(parsed.model_copy(update={"fulfillment": "delivery"}), defaults, new_url)
+
+
 def _preview_retailer(url: str, value) -> dict | None:
     if isinstance(value, dict) and value.get("key"):
         r = retailer_by_key(str(value["key"]))
@@ -230,13 +259,19 @@ def update_item(
         item.interval_minutes = data["interval_minutes"]
     if data.get("name") is not None:
         item.name = data["name"]
-    if data.get("url") is not None and data["url"] != item.url:
+    old_url = item.url
+    url_changed = data.get("url") is not None and data["url"] != item.url
+    if url_changed:
         item.url = data["url"]
         recheck = True
+        if "retailer_config" not in data and item.retailer_config:
+            item.retailer_config = _revalidate_retailer_config(
+                item.retailer_config, old_url, item.url, get_or_create_settings(db, user.id))
     if data.get("enabled") is not None:
         item.enabled = data["enabled"]
     if data.get("notify_enabled") is not None:
         item.notify_enabled = data["notify_enabled"]
+        item.muted_by_alert = False  # the user decided; auto re-arm leaves it alone
     if "generic_config" in data and data["generic_config"] is not None:
         item.generic_config = body.generic_config.model_dump()  # type: ignore[union-attr]
         recheck = True
@@ -290,11 +325,21 @@ async def check_all(user: User = Depends(current_user)):
 
 @router.post("/{item_id}/purchase", response_model=ItemOut)
 def mark_purchased(item_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
-    """Move an item to the Purchased list: no more checks or alerts."""
+    """Move an item to the Purchased list: no more checks or alerts.
+
+    The other stores tracking the same product (its product_group) are marked purchased
+    too, with the same purchase time. Only the clicked item records a purchase price; the
+    siblings keep showing their own current price.
+    """
     item = _owned_item(db, user, item_id)
     if item.purchased_at is None:
-        item.purchased_at = utcnow()
+        now = utcnow()
+        item.purchased_at = now
         item.purchased_price = item.price
+        for sib in _group_items(db, user, item):
+            if sib.id != item.id and sib.purchased_at is None:
+                sib.purchased_at = now
+                sib.purchased_price = None
     db.commit()
     db.refresh(item)
     return ItemOut.model_validate(item)
@@ -302,12 +347,16 @@ def mark_purchased(item_id: int, user: User = Depends(current_user), db: Session
 
 @router.post("/{item_id}/unpurchase", response_model=ItemOut)
 def unmark_purchased(item_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
-    """Back to the watch list: checking resumes right away with alerts armed."""
+    """Back to the watch list: checking resumes right away with alerts armed.
+
+    Only this item is restored; purchased siblings in its product group stay purchased.
+    """
     item = _owned_item(db, user, item_id)
     item.purchased_at = None
     item.purchased_price = None
     item.enabled = True
     item.notify_enabled = True
+    item.muted_by_alert = False
     item.available_keys = []  # the next in-stock result alerts again
     item.last_checked_at = None
     db.commit()
@@ -397,6 +446,9 @@ def add_store(item_id: int, body: StoreCreate, user: User = Depends(current_user
               db: Session = Depends(get_db)):
     """Track the same product at another store: a sibling item in the same product_group."""
     item = _owned_item(db, user, item_id)
+    if item.purchased_at is not None:
+        raise HTTPException(status_code=409,
+                            detail="This item is marked purchased — use Watch again before adding another store")
     if is_apple_host(body.url):
         raise HTTPException(status_code=422, detail="Add Apple Store products from the Add item page")
     siblings = _group_items(db, user, item)

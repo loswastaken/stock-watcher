@@ -91,7 +91,8 @@ export function StoresPanel({ item }: { item: Item }) {
             : 'Track this product at other stores to see them side by side.'
         }
         actions={
-          !adding && (
+          // a purchased product can't gain stores (the server answers 409): "Watch again" first
+          !adding && !item.purchased_at && (
             <Button size="sm" onClick={() => setAdding(true)}>
               <Plus /> <span className="hidden sm:inline">Track at another store</span>
               <span className="sm:hidden">Add store</span>
@@ -99,7 +100,7 @@ export function StoresPanel({ item }: { item: Item }) {
           )
         }
       />
-      {adding && (
+      {adding && !item.purchased_at && (
         <form onSubmit={onSubmit} className="flex flex-col gap-2 border-b border-zinc-100 px-5 py-4 sm:flex-row dark:border-zinc-800/80" noValidate>
           <div className="flex-1">
             <Input

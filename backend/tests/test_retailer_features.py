@@ -384,3 +384,177 @@ async def test_error_result_type_unchanged(world, monkeypatch):
     set_checker(monkeypatch, CheckResult(status="error", status_text="x", error="x"))
     await scheduler.check_item(iid)
     assert item(iid).last_in_stock_at is None
+
+
+# ------------------------------------------------------------- review fixes
+async def test_auto_rearm_restores_item_muted_by_earlier_alert(world, monkeypatch, respx_mock):
+    uid, iid = world
+    respx_mock.post(NTFY).respond(200)
+    set_checker(monkeypatch, fake_result("in_stock", ("stock",)), fake_result("in_stock", ("stock",)),
+                fake_result("out_of_stock", ()), fake_result("in_stock", ("stock",)))
+    await scheduler.check_item(iid)  # alert while auto re-arm is off -> muted by the alert
+    it = item(iid)
+    assert it.notify_enabled is False and it.muted_by_alert is True
+    update_settings(uid, auto_rearm=True)
+    await scheduler.check_item(iid)  # still in stock: stays muted
+    assert item(iid).notify_enabled is False
+    await scheduler.check_item(iid)  # sold out -> re-armed
+    it = item(iid)
+    assert it.notify_enabled is True and it.muted_by_alert is False
+    await scheduler.check_item(iid)  # restock -> alerts again
+    assert len(notifs(uid)) == 2
+
+
+async def test_auto_rearm_leaves_manually_muted_items_alone(world, monkeypatch):
+    uid, iid = world
+    update_settings(uid, auto_rearm=True)
+    update_item(iid, notify_enabled=False, available_keys=["stock"])  # user muted it
+    set_checker(monkeypatch, fake_result("out_of_stock", ()))
+    await scheduler.check_item(iid)
+    assert item(iid).notify_enabled is False
+
+
+def test_manual_notify_toggle_clears_muted_by_alert(admin):
+    it = create(admin)
+    update_item(it["id"], notify_enabled=False, muted_by_alert=True)
+    assert admin.get(f"/api/items/{it['id']}").json()["muted_by_alert"] is True
+    got = admin.patch(f"/api/items/{it['id']}", json={"notify_enabled": False}).json()
+    assert got["notify_enabled"] is False and got["muted_by_alert"] is False
+    assert item(it["id"]).muted_by_alert is False
+
+
+async def test_price_limit_ignores_stale_stored_price(world, monkeypatch, respx_mock):
+    uid, iid = world
+    respx_mock.post(NTFY).respond(200)
+    update_item(iid, max_price=50.0, price="$99.99")  # from an earlier check
+    set_checker(monkeypatch, fake_result("in_stock", ("stock",)))  # this check: no price
+    await scheduler.check_item(iid)
+    it = item(iid)
+    assert it.available_keys == ["stock"] and "above" not in it.status_text
+    ns = notifs(uid)
+    assert len(ns) == 1 and ns[0].message == "label-stock (price unverified)"
+
+
+async def test_no_unverified_note_without_price_limit(world, monkeypatch, respx_mock):
+    uid, iid = world
+    respx_mock.post(NTFY).respond(200)
+    set_checker(monkeypatch, fake_result("in_stock", ("stock",)))
+    await scheduler.check_item(iid)
+    assert notifs(uid)[0].message == "label-stock"
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("$19.99 - $29.99", 19.99), ("$29.99 – $19.99", 19.99), ("$19 to $29", 19.0), ("$1,099.00", 1099.0),
+    ("1.099,00 €", 1099.0), ("USD 12.5", 12.5), ("", None), (None, None), ("Free", None),
+])
+def test_lowest_amount_handles_ranges(text, expected):
+    assert scheduler.lowest_amount(text) == expected
+
+
+async def test_price_limit_uses_lowest_of_price_range(world, monkeypatch, respx_mock):
+    uid, iid = world
+    respx_mock.post(NTFY).respond(200)
+    update_item(iid, max_price=25.0)
+    set_checker(monkeypatch, fake_result("in_stock", ("stock",), price="$19.99 - $29.99"))
+    await scheduler.check_item(iid)
+    assert item(iid).available_keys == ["stock"]
+    assert notifs(uid)[0].message == "$19.99 - $29.99 · label-stock"
+
+
+def test_purchase_marks_group_siblings(admin):
+    it = create(admin)
+    sib = admin.post(f"/api/items/{it['id']}/stores",
+                     json={"url": "https://www.bestbuy.com/site/w/6500000.p?skuId=6500000"}).json()
+    other = create(admin, url="https://www.walmart.com/ip/999")
+    update_item(it["id"], price="$10.00")
+    update_item(sib["id"], price="$12.00")
+    got = admin.post(f"/api/items/{it['id']}/purchase").json()
+    assert got["purchased_at"] and got["purchased_price"] == "$10.00"
+    s = admin.get(f"/api/items/{sib['id']}").json()
+    assert s["purchased_at"] == got["purchased_at"]
+    assert s["purchased_price"] is None and s["price"] == "$12.00"
+    assert admin.get(f"/api/items/{other['id']}").json()["purchased_at"] is None
+    # adding a store to a purchased product is refused
+    r = admin.post(f"/api/items/{it['id']}/stores", json={"url": "https://www.walmart.com/ip/123"})
+    assert r.status_code == 409 and "purchased" in r.json()["detail"]
+    # watch again restores only that item
+    back = admin.post(f"/api/items/{sib['id']}/unpurchase").json()
+    assert back["purchased_at"] is None
+    assert admin.get(f"/api/items/{it['id']}").json()["purchased_at"] is not None
+
+
+def test_patch_url_revalidates_retailer_config(admin):
+    it = create(admin, retailer_config={"fulfillment": "pickup", "zip": "60302", "store_id": "1234",
+                                        "radius_miles": 10, "official_only": False})
+    # Best Buy has pickup: keeps ZIP/options, drops Target's store id
+    got = admin.patch(f"/api/items/{it['id']}",
+                      json={"url": "https://www.bestbuy.com/site/w/6500000.p?skuId=6500000"}).json()
+    cfg = got["retailer_config"]
+    assert cfg["fulfillment"] == "pickup" and cfg["zip"] == "60302" and cfg["store_id"] is None
+    assert cfg["radius_miles"] == 10 and cfg["official_only"] is False
+    # Amazon has no pickup: delivery
+    got = admin.patch(f"/api/items/{it['id']}", json={"url": "https://www.amazon.com/dp/B000000000"}).json()
+    assert got["retailer_config"]["fulfillment"] == "delivery"
+    # unknown store: config dropped
+    got = admin.patch(f"/api/items/{it['id']}", json={"url": "https://unknown-shop.example/p/1"}).json()
+    assert got["retailer_config"] is None
+
+
+def test_patch_url_pickup_by_store_only_falls_back_to_delivery(admin):
+    it = create(admin, retailer_config={"fulfillment": "pickup", "store_id": "1234"})
+    got = admin.patch(f"/api/items/{it['id']}",
+                      json={"url": "https://www.bestbuy.com/site/w/6500000.p?skuId=6500000"}).json()
+    assert got["retailer_config"]["fulfillment"] == "delivery" and got["retailer_config"]["store_id"] is None
+    # an explicit config in the same PATCH is validated against the new URL
+    r = admin.patch(f"/api/items/{it['id']}", json={"url": "https://www.amazon.com/dp/B000000000",
+                                                     "retailer_config": {"fulfillment": "pickup", "zip": "1"}})
+    assert r.status_code == 422
+
+
+async def test_pruning_keeps_status_changes_for_restock_history(world, monkeypatch):
+    uid, iid = world
+    t0 = utcnow() - timedelta(days=3)
+    with db.SessionLocal() as s:
+        # an old restock (out -> in), then lots of routine checks
+        s.add(CheckEvent(item_id=iid, checked_at=t0, status="out_of_stock", changed=True))
+        s.add(CheckEvent(item_id=iid, checked_at=t0 + timedelta(minutes=2), status="in_stock", changed=True,
+                         status_text="old restock"))
+        s.add(CheckEvent(item_id=iid, checked_at=t0 + timedelta(hours=1), status="out_of_stock", changed=True))
+        s.add_all([CheckEvent(item_id=iid, checked_at=t0 + timedelta(hours=2), status="out_of_stock")
+                   for _ in range(600)])
+        s.commit()
+    update_item(iid, status="out_of_stock")
+    set_checker(monkeypatch, fake_result("out_of_stock", ()))
+    await scheduler.check_item(iid)
+    with db.SessionLocal() as s:
+        assert s.query(CheckEvent).filter_by(item_id=iid, changed=False).count() <= 500
+        assert s.query(CheckEvent).filter_by(item_id=iid, changed=True).count() == 3
+        from app.routers.items import restocks
+        u = s.get(User, uid)
+        assert [r.status_text for r in restocks(iid, 20, u, s)] == ["old restock"]
+
+
+async def test_pruning_caps_status_changes(world, monkeypatch):
+    uid, iid = world
+    with db.SessionLocal() as s:
+        s.add_all([CheckEvent(item_id=iid, status="in_stock" if i % 2 else "out_of_stock", changed=True)
+                   for i in range(scheduler.KEEP_CHANGED_EVENTS_PER_ITEM + 400)])
+        s.commit()
+    set_checker(monkeypatch, fake_result("out_of_stock", ()))
+    await scheduler.check_item(iid)
+    with db.SessionLocal() as s:
+        assert s.query(CheckEvent).filter_by(item_id=iid).count() == scheduler.KEEP_EVENTS_PER_ITEM
+
+
+def test_migration_adds_muted_by_alert(db_ready):
+    with db.SessionLocal() as s:
+        u = User(username="m", username_key="m", password_hash="x")
+        s.add(u)
+        s.flush()
+        s.add(Item(user_id=u.id, name="n", url="https://x.test", notify_enabled=False))
+        s.commit()
+    with db.get_engine().begin() as conn:
+        conn.exec_driver_sql("ALTER TABLE items DROP COLUMN muted_by_alert")
+    db.init_db()
+    with db.SessionLocal() as s:
+        assert s.query(Item).one().muted_by_alert is False

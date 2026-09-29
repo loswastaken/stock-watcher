@@ -214,6 +214,7 @@ async function handle(path: string, method: string, body: unknown): Promise<Resp
     if (sub === '' && method === 'GET') return json(it);
     if (sub === '' && method === 'PATCH') {
       Object.assign(it, body, { updated_at: new Date().toISOString() });
+      if (body && typeof body === 'object' && 'notify_enabled' in body) it.muted_by_alert = false;
       return json(it);
     }
     if (sub === '' && method === 'DELETE') {
@@ -221,12 +222,25 @@ async function handle(path: string, method: string, body: unknown): Promise<Resp
       return json(null, 204);
     }
     if (sub === '/purchase') {
-      it.purchased_at = it.purchased_at ?? new Date().toISOString();
-      it.purchased_price = it.purchased_price ?? it.price;
+      if (!it.purchased_at) {
+        const now = new Date().toISOString();
+        it.purchased_at = now;
+        it.purchased_price = it.price;
+        // the same product at other stores is bought too (no purchase price of their own)
+        for (const x of items)
+          if (x !== it && it.product_group && x.product_group === it.product_group && !x.purchased_at)
+            Object.assign(x, { purchased_at: now, purchased_price: null });
+      }
       return json(it);
     }
     if (sub === '/unpurchase') {
-      Object.assign(it, { purchased_at: null, purchased_price: null, enabled: true, notify_enabled: true });
+      Object.assign(it, {
+        purchased_at: null,
+        purchased_price: null,
+        enabled: true,
+        notify_enabled: true,
+        muted_by_alert: false,
+      });
       return json(it);
     }
     if (sub === '/check') {
@@ -240,6 +254,8 @@ async function handle(path: string, method: string, body: unknown): Promise<Resp
     if (sub === '/stores' && method === 'GET')
       return json((it.product_group ? items.filter((x) => x.product_group === it.product_group) : [it]).map(storeRow));
     if (sub === '/stores' && method === 'POST') {
+      if (it.purchased_at)
+        return json({ detail: 'This item is marked purchased — use Watch again before adding another store' }, 409);
       const u = (body as { url: string }).url;
       if (items.some((x) => x.url === u && (x.id === it.id || (it.product_group && x.product_group === it.product_group))))
         return json({ detail: 'This store is already tracked for this product' }, 409);
