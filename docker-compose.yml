@@ -6,7 +6,7 @@ services:
     ports:
       - "8095:8000"  # host:container — change the left side if 8095 is taken
     volumes:
-      - /volume2/stock-watcher/data:/data
+      - /volume2/docker/stock-watcher/data:/data
     environment:
       TZ: America/New_York  # Change to your timezone
       COOKIE_SECURE: "true"  # Set to false only for plain HTTP on LAN
