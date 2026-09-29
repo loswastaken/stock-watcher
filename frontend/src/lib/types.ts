@@ -64,12 +64,16 @@ export interface AppleConfig {
   max_distance_miles: number;
   watch_pickup: boolean;
   watch_delivery: boolean;
+  /** Only alert for same-day pickup (default true). Off = also alert for later pickup dates. */
+  pickup_today_only: boolean;
 }
 
 export interface AppleStorePart {
   part_number: string;
   label: string;
   available: boolean;
+  /** Available for pickup today (vs. a later date). */
+  today?: boolean;
   quote: string | null;
 }
 
@@ -91,6 +95,12 @@ export interface AppleDelivery {
 export interface AppleResult {
   stores?: AppleStore[];
   delivery?: AppleDelivery[];
+  display?: string;
+  /** Stores found beyond max_distance_miles that were hidden. */
+  stores_out_of_range?: number;
+  /** Explanation shown when no stores are returned. */
+  pickup_message?: string | null;
+  zip?: string;
 }
 
 export interface GenericResult {

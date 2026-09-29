@@ -2,6 +2,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   AlertTriangle,
   ArrowLeft,
+  CalendarClock,
   Bell,
   BellOff,
   CheckCircle2,
@@ -254,23 +255,23 @@ function Hero({ item, onDeleted }: { item: Item; onDeleted: () => void }) {
 
 /* ---------------------------------------------------------------- Apple */
 
-function AvailabilityPill({ available, className }: { available: boolean; className?: string }) {
-  return available ? (
-    <span
-      className={cn(
-        'inline-flex items-center gap-1 whitespace-nowrap rounded-full bg-emerald-100 px-2 py-0.5 text-[11px] font-semibold text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-400',
-        className,
-      )}
-    >
-      <CheckCircle2 className="size-3" /> Available
-    </span>
-  ) : (
-    <span
-      className={cn(
-        'inline-flex items-center gap-1 whitespace-nowrap rounded-full bg-zinc-100 px-2 py-0.5 text-[11px] font-medium text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400',
-        className,
-      )}
-    >
+function AvailabilityPill({ available, today, className }: { available: boolean; today?: boolean; className?: string }) {
+  const base = 'inline-flex items-center gap-1 whitespace-nowrap rounded-full px-2 py-0.5 text-[11px]';
+  // `today` missing (older results) => treat available as today.
+  if (available && today !== false)
+    return (
+      <span className={cn(base, 'bg-emerald-100 font-semibold text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-400', className)}>
+        <CheckCircle2 className="size-3" /> Today
+      </span>
+    );
+  if (available)
+    return (
+      <span className={cn(base, 'bg-amber-100 font-semibold text-amber-800 dark:bg-amber-500/15 dark:text-amber-400', className)}>
+        <CalendarClock className="size-3" /> Later
+      </span>
+    );
+  return (
+    <span className={cn(base, 'bg-zinc-100 font-medium text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400', className)}>
       <XCircle className="size-3" /> Unavailable
     </span>
   );
@@ -287,12 +288,15 @@ function AppleResults({ item }: { item: Item }) {
   const availCount = stores.filter((s) => s.parts.some((p) => p.available)).length;
   const shown = onlyAvail ? stores.filter((s) => s.parts.some((p) => p.available)) : stores;
   const multiPart = (cfg?.parts.length ?? 0) > 1 || stores.some((s) => s.parts.length > 1);
+  const outOfRange = Number(item.last_result?.stores_out_of_range ?? 0);
+  const pickupMessage = item.last_result?.pickup_message as string | null | undefined;
+  const zip = (item.last_result?.zip as string | undefined) || cfg?.zip;
 
   return (
     <>
       {cfg?.watch_delivery !== false && (
         <Card>
-          <CardHeader icon={<Truck />} title="2-hour delivery" description={cfg?.zip ? `Courier delivery to ${cfg.zip}` : undefined} />
+          <CardHeader icon={<Truck />} title="2-hour delivery" description={zip ? `Courier delivery to ${zip}` : undefined} />
           <CardBody className="p-0">
             {delivery.length ? (
               <ul className="divide-y divide-zinc-100 dark:divide-zinc-800/80">
@@ -339,9 +343,9 @@ function AppleResults({ item }: { item: Item }) {
             title="In-store pickup"
             description={
               stores.length
-                ? `Available at ${availCount} of ${stores.length} store${stores.length === 1 ? '' : 's'}${cfg ? ` within ${cfg.max_distance_miles} mi of ${cfg.zip}` : ''}`
+                ? `Available at ${availCount} of ${stores.length} store${stores.length === 1 ? '' : 's'}${cfg ? ` within ${cfg.max_distance_miles} mi of ${zip}` : ''}`
                 : cfg
-                  ? `Stores within ${cfg.max_distance_miles} mi of ${cfg.zip}`
+                  ? `Stores within ${cfg.max_distance_miles} mi of ${zip}`
                   : undefined
             }
             actions={
@@ -366,14 +370,21 @@ function AppleResults({ item }: { item: Item }) {
                 <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800/80">
                   {shown.map((s) => {
                     const any = s.parts.some((p) => p.available);
+                    const anyToday = s.parts.some((p) => p.available && p.today !== false);
                     return (
-                      <tr key={s.store_number} className={cn('align-top', any && 'bg-emerald-50/60 dark:bg-emerald-500/[0.06]')}>
+                      <tr
+                        key={s.store_number}
+                        className={cn(
+                          'align-top',
+                          anyToday ? 'bg-emerald-50/60 dark:bg-emerald-500/[0.06]' : any && 'bg-amber-50/50 dark:bg-amber-500/[0.04]',
+                        )}
+                      >
                         <td className="px-5 py-3">
                           <div className="flex items-start gap-2">
                             <span
                               className={cn(
                                 'mt-1.5 size-2 shrink-0 rounded-full',
-                                any ? 'bg-emerald-500' : 'bg-zinc-300 dark:bg-zinc-700',
+                                anyToday ? 'bg-emerald-500' : any ? 'bg-amber-500' : 'bg-zinc-300 dark:bg-zinc-700',
                               )}
                             />
                             <div className="min-w-0">
@@ -392,11 +403,15 @@ function AppleResults({ item }: { item: Item }) {
                           <ul className="space-y-1.5">
                             {s.parts.map((p) => (
                               <li key={p.part_number} className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
-                                <AvailabilityPill available={p.available} />
+                                <AvailabilityPill available={p.available} today={p.today} />
                                 {multiPart && (
                                   <span className="text-xs font-medium text-zinc-700 dark:text-zinc-300">{p.label || p.part_number}</span>
                                 )}
-                                {p.quote && <span className="text-xs text-zinc-500 dark:text-zinc-400">{p.quote}</span>}
+                                {p.quote && (
+                                  <span className={cn('text-xs', p.available && p.today === false ? 'font-medium text-amber-700 dark:text-amber-400' : 'text-zinc-500 dark:text-zinc-400')}>
+                                    {p.quote}
+                                  </span>
+                                )}
                               </li>
                             ))}
                           </ul>
@@ -413,13 +428,24 @@ function AppleResults({ item }: { item: Item }) {
                   )}
                 </tbody>
               </table>
+              {outOfRange > 0 && (
+                <p className="border-t border-zinc-100 px-5 py-2.5 text-xs text-zinc-500 dark:border-zinc-800/80 dark:text-zinc-400">
+                  {outOfRange} store{outOfRange === 1 ? '' : 's'} beyond {cfg?.max_distance_miles ?? '?'} mi hidden
+                </p>
+              )}
             </div>
           ) : (
             <CardBody>
               <p className="flex items-center gap-2 text-sm text-zinc-500 dark:text-zinc-400">
                 <MapPin className="size-4" />
-                {item.last_checked_at ? 'No stores returned by the last check.' : 'Waiting for the first check…'}
+                {pickupMessage ||
+                  (item.last_checked_at ? 'No stores returned by the last check.' : 'Waiting for the first check…')}
               </p>
+              {outOfRange > 0 && (
+                <p className="mt-2 text-xs text-zinc-500 dark:text-zinc-400">
+                  {outOfRange} store{outOfRange === 1 ? '' : 's'} beyond {cfg?.max_distance_miles ?? '?'} mi hidden
+                </p>
+              )}
             </CardBody>
           )}
         </Card>

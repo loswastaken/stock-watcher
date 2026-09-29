@@ -120,6 +120,7 @@ function initialState(item: Item | null, d: typeof FALLBACK_SETTINGS): FormState
       max_distance_miles: item?.apple_config?.max_distance_miles ?? d.default_max_distance_miles ?? 25,
       watch_pickup: item?.apple_config?.watch_pickup ?? true,
       watch_delivery: item?.apple_config?.watch_delivery ?? true,
+      pickup_today_only: item?.apple_config?.pickup_today_only ?? true,
     },
   };
 }
@@ -483,6 +484,17 @@ function ItemFormInner({ item, defaults }: { item: Item | null; defaults: typeof
                     checked={s.apple.watch_pickup}
                     onCheckedChange={(v) => setApple({ watch_pickup: v })}
                   />
+                  {s.apple.watch_pickup && (
+                    <div className="ml-7 border-l border-zinc-200 pl-4 dark:border-zinc-800">
+                      <SwitchRow
+                        id="pickup-today"
+                        title="Only alert for same-day pickup"
+                        description="Off = also alert when pickup is available on a later date."
+                        checked={s.apple.pickup_today_only}
+                        onCheckedChange={(v) => setApple({ pickup_today_only: v })}
+                      />
+                    </div>
+                  )}
                   <div className="h-px bg-zinc-100 dark:bg-zinc-800" />
                   <SwitchRow
                     id="watch-delivery"

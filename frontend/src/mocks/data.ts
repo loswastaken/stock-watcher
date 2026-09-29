@@ -61,21 +61,22 @@ export const items: Item[] = [
       max_distance_miles: 25,
       watch_pickup: true,
       watch_delivery: true,
+      pickup_today_only: false,
     },
     last_result: {
       stores: [
         {
           store_number: 'R014', name: 'Valley Fair', city: 'Santa Clara', distance_miles: 3.2,
           parts: [
-            { part_number: 'MG8H4LL/A', label: '256GB Cosmic Orange', available: true, quote: 'Available Today' },
+            { part_number: 'MG8H4LL/A', label: '256GB Cosmic Orange', available: true, today: true, quote: 'Available Today' },
             { part_number: 'MG8J4LL/A', label: '512GB Cosmic Orange', available: false, quote: 'Unavailable for pickup' },
           ],
         },
         {
           store_number: 'R085', name: 'Stanford', city: 'Palo Alto', distance_miles: 9.8,
           parts: [
-            { part_number: 'MG8H4LL/A', label: '256GB Cosmic Orange', available: true, quote: 'Available Today' },
-            { part_number: 'MG8J4LL/A', label: '512GB Cosmic Orange', available: true, quote: 'Available Tomorrow' },
+            { part_number: 'MG8H4LL/A', label: '256GB Cosmic Orange', available: true, today: true, quote: 'Available Today' },
+            { part_number: 'MG8J4LL/A', label: '512GB Cosmic Orange', available: true, today: false, quote: 'Available Oct 3' },
           ],
         },
         {
@@ -93,6 +94,8 @@ export const items: Item[] = [
           ],
         },
       ],
+      stores_out_of_range: 3,
+      zip: '95014',
       delivery: [
         { part_number: 'MG8H4LL/A', label: '256GB Cosmic Orange', two_hour: true, quote: 'Delivers in 2 hours · $9' },
         { part_number: 'MG8J4LL/A', label: '512GB Cosmic Orange', two_hour: false, quote: 'Delivers Oct 3 – Oct 6' },
@@ -141,7 +144,7 @@ export const items: Item[] = [
     last_checked_at: ago(30_000),
     last_change_at: ago(5 * h),
     generic_config: null,
-    apple_config: { parts: [{ part_number: 'MFHP4LL/A', label: 'AirPods Pro 3' }], zip: '95014', max_distance_miles: 15, watch_pickup: true, watch_delivery: false },
+    apple_config: { parts: [{ part_number: 'MFHP4LL/A', label: 'AirPods Pro 3' }], zip: '95014', max_distance_miles: 15, watch_pickup: true, watch_delivery: false, pickup_today_only: true },
     last_result: {
       stores: [
         { store_number: 'R014', name: 'Valley Fair', city: 'Santa Clara', distance_miles: 3.2, parts: [{ part_number: 'MFHP4LL/A', label: 'AirPods Pro 3', available: false, quote: 'Unavailable for pickup' }] },
@@ -195,7 +198,7 @@ export const items: Item[] = [
     last_checked_at: null,
     last_change_at: null,
     generic_config: null,
-    apple_config: { parts: [{ part_number: 'MCX44LL/A', label: 'M4 Pro 24GB 512GB' }], zip: '95014', max_distance_miles: 25, watch_pickup: true, watch_delivery: true },
+    apple_config: { parts: [{ part_number: 'MCX44LL/A', label: 'M4 Pro 24GB 512GB' }], zip: '95014', max_distance_miles: 25, watch_pickup: true, watch_delivery: true, pickup_today_only: true },
     last_result: null,
   },
   {

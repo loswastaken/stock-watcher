@@ -140,25 +140,27 @@ If using a reverse proxy (e.g., Synology DSM reverse proxy):
 
 ### Add an Apple Item
 
-1. **From an Apple product page**:
-   - Copy the URL (e.g., `https://www.apple.com/shop/buy-iphone/iphone-15-pro`)
-   - In Stock Watcher: **Add Item** → paste the URL
-   - Click **Preview** to auto-detect part numbers, image, price, and availability
-   - Set your ZIP code and search radius (default 25 miles)
-   - Save
-
-2. **Or manually by part number**:
-   - Find the part number (e.g., `MG8H4LL/A` for iPhone 15 Pro 256GB)
-   - Create item with `kind: apple`, provide part numbers and ZIP code
-   - Stock Watcher will track pickup and 2-hour delivery availability
+1. **Add item** → paste an Apple buy-page URL (e.g. `https://www.apple.com/shop/buy-iphone/iphone-17-pro`).
+   The form switches to Apple mode and lists the models it finds on the page — tick the ones you want.
+2. If no models are listed, add part numbers manually (e.g. `MG8H4LL/A`).
+3. Set your ZIP code and max distance (defaults come from **Settings → Defaults**).
+4. Choose what to watch: **In-store pickup**, **2-hour delivery**, or both.
+   "Only alert for same-day pickup" is on by default; turn it off to also be alerted for later pickup dates.
 
 ### How It Works
 
-- Stock Watcher queries the **Apple in-store pickup API** every check interval
-- Shows available stores near your ZIP with distance and estimated pickup time
-- Also tracks **2-hour delivery** availability
-- Sends alerts when availability changes (e.g., "Pickup available at 2 stores")
-- **Note**: Apple may rate-limit. Keep check interval ≥ 2 minutes to avoid being blocked.
+- Each check queries Apple's pickup/delivery availability for your parts around your ZIP.
+- The item page shows every nearby store with a per-model pill (Today / Later / Unavailable) and a 2-hour delivery panel.
+- You get one alert per check listing every **newly** available store/delivery option — no repeats while it stays available.
+- If Apple blocks the plain request, Stock Watcher retries through the built-in headless Chromium.
+- Keep the interval at 2 minutes or more to avoid rate limiting.
+
+### Verify after first deploy
+
+Apple's endpoint couldn't be tested live during development. After deploying, add an item and check the logs
+(`docker logs stock-watcher`) for `apple fulfillment blocked`, and confirm the store table matches apple.com.
+The 2-hour courier wording is detected heuristically — if it never triggers where Apple offers it, open an issue
+with a saved response.
 
 ## Local Development
 
