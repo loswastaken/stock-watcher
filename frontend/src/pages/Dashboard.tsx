@@ -50,7 +50,8 @@ function matches(item: Item, f: Filter) {
     case 'paused':
       return !item.enabled;
     default:
-      return item.enabled && item.status === f;
+      // Matches /stats semantics: status counts include paused items.
+      return item.status === f;
   }
 }
 

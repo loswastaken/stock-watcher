@@ -1,0 +1,13 @@
+{
+  "body": {"content": {
+    "pickupMessage": {"stores": []},
+    "deliveryMessage": {
+      "MYW33LL/A": {"regular": {"deliveryOptions": [
+          {"displayName": "Standard Delivery", "date": "Tomorrow", "shippingCost": "FREE"},
+          {"displayName": "Delivers Today", "date": "Order now", "shippingCost": "$9.00", "deliveryType": "COURIER"}
+      ]}},
+      "MX2D3AM/A": {"regular": {"isCourier": true, "deliveryOptions": [{"displayName": "Fast delivery", "date": "Today"}]}},
+      "MU8F2ZM/A": {"regular": {"courierEligible": false, "deliveryOptions": [{"displayName": "Standard Delivery", "date": "Order within 2 hours for delivery tomorrow"}]}}
+    }
+  }}
+}

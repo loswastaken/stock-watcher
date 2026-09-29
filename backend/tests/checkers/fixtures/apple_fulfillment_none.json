@@ -1,0 +1,28 @@
+{
+  "head": {"status": "200", "data": {}},
+  "body": {
+    "content": {
+      "pickupMessage": {
+        "stores": [
+          {"storeName": "Valley Fair", "city": "Santa Clara", "storeNumber": "R014", "storedistance": 3.21, "storeDistanceWithUnit": "3.21 mi",
+           "partsAvailability": {"MG8H4LL/A": {"pickupSearchQuote": "Currently unavailable", "pickupDisplay": "unavailable", "storePickEligible": true,
+              "messageTypes": {"regular": {"storePickupProductTitle": "iPhone 17 Pro 256GB Cosmic Orange"}}}}},
+          {"storeName": "Stanford", "city": "Palo Alto", "storeNumber": "R033", "storedistance": 12.78,
+           "partsAvailability": {"MG8H4LL/A": {"pickupSearchQuote": "Not available for pickup", "pickupDisplay": "ineligible", "storePickEligible": false}}}
+        ],
+        "notAvailableNearby": "Not available today at nearby stores"
+      },
+      "deliveryMessage": {
+        "MG8H4LL/A": {
+          "regular": {
+            "deliveryOptions": [{"displayName": "Standard Delivery", "date": "Mon 10/13 - Wed 10/15", "shippingCost": "FREE"}],
+            "courierDeliveryMessage": "Courier delivery is not available for this address",
+            "isBuyable": true
+          },
+          "compact": {"quote": "Delivers to 95014<br/>Mon 10/13 - Wed 10/15 — Free"}
+        },
+        "deliveryLocationLink": "95014"
+      }
+    }
+  }
+}

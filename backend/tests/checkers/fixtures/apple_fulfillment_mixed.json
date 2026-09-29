@@ -1,0 +1,187 @@
+{
+  "head": {"status": "200", "data": {}},
+  "body": {
+    "content": {
+      "pickupMessage": {
+        "stores": [
+          {
+            "storeEmail": "valleyfair@apple.com",
+            "storeName": "Valley Fair",
+            "reservationUrl": "http://www.apple.com/retail/valleyfair",
+            "makeReservationUrl": "http://www.apple.com/retail/valleyfair",
+            "state": "CA",
+            "storeImageUrl": "https://rtlimages.apple.com/cmc/dieter/store/4_3/R014.png",
+            "country": "US",
+            "city": "Santa Clara",
+            "storeNumber": "R014",
+            "partsAvailability": {
+              "MG8H4LL/A": {
+                "storePickEligible": true,
+                "pickupSearchQuote": "Available<br/>Today",
+                "partNumber": "MG8H4LL/A",
+                "purchaseOption": "",
+                "ctoOptions": "",
+                "pickupDisplay": "available",
+                "pickupType": "In-Store Pickup",
+                "messageTypes": {
+                  "regular": {
+                    "storeSearchEnabled": true,
+                    "storePickupLabel": "Pickup:",
+                    "storeSelectionEnabled": true,
+                    "storePickupQuote": "Today at Valley Fair",
+                    "storePickupQuote2_0": "Available Today",
+                    "storePickupLinkText": "Check another store",
+                    "storePickupProductTitle": "iPhone 17 Pro 256GB Cosmic Orange"
+                  },
+                  "compact": {
+                    "storeSearchEnabled": true,
+                    "storePickupLabel": "Pickup:",
+                    "storeSelectionEnabled": true,
+                    "storePickupQuote": "Today at Valley Fair",
+                    "storePickupLinkText": "Check another store",
+                    "storePickupProductTitle": "iPhone 17 Pro 256GB Cosmic Orange"
+                  }
+                },
+                "buyability": {"isBuyable": true, "reason": "", "commitCodeId": 0, "inventory": 0}
+              },
+              "MG8J4LL/A": {
+                "storePickEligible": true,
+                "pickupSearchQuote": "Currently unavailable",
+                "partNumber": "MG8J4LL/A",
+                "pickupDisplay": "unavailable",
+                "pickupType": "In-Store Pickup",
+                "messageTypes": {
+                  "regular": {
+                    "storePickupQuote": "Currently unavailable at Valley Fair",
+                    "storePickupProductTitle": "iPhone 17 Pro 256GB Deep Blue"
+                  }
+                },
+                "buyability": {"isBuyable": true, "reason": "", "commitCodeId": 0, "inventory": 0}
+              }
+            },
+            "phoneNumber": "408-551-2230",
+            "address": {"address": "Apple Valley Fair", "address3": null, "address2": "2855 Stevens Creek Blvd", "postalCode": "95050"},
+            "storelatitude": 37.32,
+            "storelongitude": -121.94,
+            "storedistance": 3.21,
+            "storeDistanceVoText": "3.21 miles away",
+            "storelistnumber": 1,
+            "storeListNumber": 1,
+            "storeDistanceWithUnit": "3.21 mi",
+            "retailStore": true
+          },
+          {
+            "storeName": "Stanford",
+            "city": "Palo Alto",
+            "storeNumber": "R033",
+            "partsAvailability": {
+              "MG8H4LL/A": {
+                "storePickEligible": true,
+                "pickupSearchQuote": "Currently unavailable",
+                "partNumber": "MG8H4LL/A",
+                "pickupDisplay": "unavailable",
+                "messageTypes": {"regular": {"storePickupQuote": "Currently unavailable at Stanford", "storePickupProductTitle": "iPhone 17 Pro 256GB Cosmic Orange"}},
+                "buyability": {"isBuyable": true}
+              },
+              "MG8J4LL/A": {
+                "storePickEligible": true,
+                "pickupSearchQuote": "Available<br/>Tomorrow",
+                "partNumber": "MG8J4LL/A",
+                "pickupDisplay": "available",
+                "messageTypes": {"regular": {"storePickupQuote": "Tomorrow at Stanford", "storePickupProductTitle": "iPhone 17 Pro 256GB Deep Blue"}},
+                "buyability": {"isBuyable": true}
+              }
+            },
+            "storedistance": 12.78,
+            "storeDistanceWithUnit": "12.78 mi",
+            "retailStore": true
+          },
+          {
+            "storeName": "Stonestown",
+            "city": "San Francisco",
+            "storeNumber": "R032",
+            "partsAvailability": {
+              "MG8H4LL/A": {
+                "pickupSearchQuote": "Available<br/>Today",
+                "partNumber": "MG8H4LL/A",
+                "pickupDisplay": "available",
+                "messageTypes": {"regular": {"storePickupQuote": "Today at Stonestown", "storePickupProductTitle": "iPhone 17 Pro 256GB Cosmic Orange"}}
+              },
+              "MG8J4LL/A": {
+                "pickupSearchQuote": "Not available for pickup",
+                "partNumber": "MG8J4LL/A",
+                "pickupDisplay": "ineligible",
+                "storePickEligible": false
+              }
+            },
+            "storedistance": 41.2,
+            "storeDistanceWithUnit": "41.2 mi",
+            "retailStore": true
+          }
+        ],
+        "overlayInitiatedFromWarmStart": true,
+        "viewMoreHoursLinkText": "See more hours",
+        "storesCount": "12 stores",
+        "little": false,
+        "pickupLocationLabel": "Your Apple Store:",
+        "pickupLocation": "Apple Valley Fair",
+        "notAvailableNearby": "Not available today at nearby stores",
+        "notAvailableNearOneStore": "Not available today at",
+        "warmDudeWithAPU": false,
+        "availability": {"isComingSoon": false},
+        "location": "95014"
+      },
+      "deliveryMessage": {
+        "MG8H4LL/A": {
+          "regular": {
+            "subHeader": "Delivery options for 95014",
+            "deliveryOptionMessages": [{"displayName": "Delivers to 95014", "inHomeSetup": "false"}],
+            "deliveryOptions": [
+              {"displayName": "Standard Delivery", "date": "Wed 10/1 - Thu 10/2", "shippingCost": "FREE", "additionalContent": null},
+              {"displayName": "Courier", "date": "Today, 2 hours", "shippingCost": "$9.00", "additionalContent": null}
+            ],
+            "deliveryOptionsLink": {"text": "Delivery options", "dataVar": {}, "newTab": false},
+            "promoMessage": "",
+            "isBuyable": true,
+            "buyability": {"isBuyable": true, "reason": "", "commitCodeId": 0}
+          },
+          "compact": {
+            "quote": "Delivers to 95014<br/>Today — $9.00",
+            "label": "Delivery:",
+            "showDeliveryOptionsLink": true,
+            "messageType": "Delivery",
+            "basePartNumber": "MG8H4",
+            "commitCodeId": "0",
+            "idl": false
+          }
+        },
+        "MG8J4LL/A": {
+          "regular": {
+            "deliveryOptionMessages": [{"displayName": "Delivers to 95014", "inHomeSetup": "false"}],
+            "deliveryOptions": [
+              {"displayName": "Standard Delivery", "date": "Tue 10/7 - Thu 10/9", "shippingCost": "FREE", "additionalContent": null}
+            ],
+            "isBuyable": true,
+            "buyability": {"isBuyable": true, "reason": "", "commitCodeId": 0}
+          },
+          "compact": {
+            "quote": "Delivers to 95014<br/>Tue 10/7 - Thu 10/9 — Free",
+            "label": "Delivery:",
+            "messageType": "Delivery",
+            "basePartNumber": "MG8J4"
+          }
+        },
+        "geoLocated": false,
+        "availableOptionsText": "Available Options",
+        "deliveryLocationLabel": "Your delivery location:",
+        "deliveryLocationLink": "95014",
+        "deliveryLocationA11yText": "Select a delivery location",
+        "dudeCookieSet": false,
+        "processing": "",
+        "dudeLocated": false,
+        "locationCookieValueFoundForThisCountry": false,
+        "accessibilityDeliveryOptions": "Delivery options"
+      }
+    }
+  }
+}

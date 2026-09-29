@@ -30,6 +30,7 @@ export class ApiError extends Error {
 /** Render FastAPI `detail` (string or validation array) as human text. */
 export function formatDetail(detail: unknown, status?: number): string {
   if (typeof detail === 'string' && detail.trim()) return detail;
+  if (status === 413) return 'File too large (max 8 MB).';
   if (Array.isArray(detail)) {
     const parts = (detail as ValidationIssue[]).map((d) => {
       const loc = (d.loc ?? []).filter((p) => p !== 'body' && p !== 'query' && p !== 'path');

@@ -1,0 +1,21 @@
+{
+  "head": {"status": "200"},
+  "body": {
+    "content": {
+      "pickupMessage": {
+        "stores": [
+          null,
+          "garbage",
+          {"storeName": "Downtown", "storeNumber": "R999", "storeDistanceWithUnit": "8 km",
+           "partsAvailability": null},
+          {"storeName": "Mall", "storeNumber": "R998", "storedistance": "4.5",
+           "partsAvailability": {"MG8H4LL/A": {"storePickEligible": true, "pickupSearchQuote": "Available Today"}}},
+          {"storeName": "Outlet", "partsAvailability": {"MG8H4LL/A": {"pickupDisplay": "available", "pickupSearchQuote": "Today"}}}
+        ]
+      },
+      "deliveryMessage": {
+        "MG8H4LL/A": {"compact": {"quote": "Delivers within 2 hours — $9"}, "regular": {"deliveryOptions": "oops"}}
+      }
+    }
+  }
+}

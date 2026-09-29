@@ -686,10 +686,16 @@ def extract_page_meta(soup: BeautifulSoup, url: str, structured: list[Structured
     site = _meta(soup, "og:site_name", "application-name")
     sd_name = next((s.name for s in structured if s.name), None)
     title_tag = soup.title.string if soup.title and soup.title.string else None
-    raw_title = sd_name or _meta(soup, "og:title", "twitter:title") or title_tag
+    raw_title = sd_name or _meta(soup, "og:title", "twitter:title")
+    h1 = soup.find("h1")
+    h1_text = clean_text(h1.get_text(" ", strip=True)) if h1 else ""
+    if not raw_title and title_tag:
+        raw_title = title_tag
+        # "Camping Stove - OutdoorCo" + <h1>Camping Stove</h1> -> use the h1
+        if h1_text and len(h1_text) >= 3 and any(clean_text(seg) == h1_text for seg in _TITLE_SEPS.split(clean_text(title_tag))):
+            raw_title = h1_text
     if not raw_title:
-        h1 = soup.find("h1")
-        raw_title = h1.get_text(" ", strip=True) if h1 else None
+        raw_title = h1_text or None
     title = clean_title(raw_title, url, site)
 
     img = _meta(soup, "og:image:secure_url", "og:image", "og:image:url")

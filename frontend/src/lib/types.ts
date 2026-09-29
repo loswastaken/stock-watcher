@@ -161,6 +161,8 @@ export interface Preview {
   price: string | null;
   status: ItemStatus | null;
   is_apple: boolean;
+  /** Set when the page couldn't be fetched/parsed (response is still 200). */
+  error?: string | null;
 }
 
 export interface AppleVariant {
@@ -173,6 +175,7 @@ export interface AppleResolve {
   product_name: string | null;
   image_url: string | null;
   variants: AppleVariant[];
+  error?: string | null;
 }
 
 export interface Notification {
