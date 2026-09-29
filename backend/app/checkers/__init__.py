@@ -7,6 +7,7 @@ import logging
 from . import apple as _apple
 from . import fetcher as _fetcher
 from . import generic as _generic
+from . import retailers as _retailers
 from .base import Availability, CheckResult
 
 log = logging.getLogger("stockwatcher.checkers")
@@ -21,13 +22,24 @@ def _error(e: BaseException | str) -> CheckResult:
     return CheckResult(status="error", status_text="Check failed", available=[], error=msg[:500])
 
 
-async def run_check(kind: str, url: str, generic_config: dict | None, apple_config: dict | None) -> CheckResult:
+async def _check_site(url: str, generic_config: dict | None, retailer_config: dict | None) -> CheckResult:
+    result = await _retailers.run_adapter(url, generic_config, retailer_config)
+    if result is None:
+        result = await _generic.check_generic(url, generic_config)
+    retailer = _retailers.match_retailer(url)
+    if retailer is not None:
+        result.detail.setdefault("retailer", retailer.key)
+    return result
+
+
+async def run_check(kind: str, url: str, generic_config: dict | None, apple_config: dict | None,
+                    retailer_config: dict | None = None) -> CheckResult:
     """Run one availability check. Never raises (except cancellation)."""
     try:
         if (kind or "").lower() == "apple":
             coro = _apple.check_apple(url, apple_config)
         else:
-            coro = _generic.check_generic(url, generic_config)
+            coro = _check_site(url, generic_config, retailer_config)
         result = await asyncio.wait_for(coro, CHECK_TIMEOUT)
         if result.status == "error" and not result.error:
             result.error = result.status_text or "Check failed"
