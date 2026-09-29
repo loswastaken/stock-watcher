@@ -50,6 +50,11 @@ instance stops the existing one. `docker-compose.yml` labels the container
 your Watchtower's `WATCHTOWER_SCOPE`, or delete that line if it has none. Updates arrive within Watchtower's
 `WATCHTOWER_POLL_INTERVAL`.
 
+**From the app:** admins see **Settings → Updates** with the running and latest versions. For the
+**Update now** button, give the app your Watchtower's HTTP API (Watchtower needs `WATCHTOWER_HTTP_API_UPDATE=true`):
+`WATCHTOWER_URL=http://<nas-ip>:8080` and `WATCHTOWER_TOKEN=<its WATCHTOWER_HTTP_API_TOKEN>`. The app only asks
+Watchtower to update this one image; it never gets access to Docker itself.
+
 **Manual:**
 
 ```bash
@@ -115,6 +120,8 @@ If using a reverse proxy (e.g., Synology DSM reverse proxy):
 - After an alert, that item's alerts **pause** (it keeps being checked). Click **Alerts paused · Re-arm** on the
   item's card or page to get the next one.
 - **Check all** on the dashboard re-checks every active item immediately.
+- **Browser notifications** (Settings → Notifications) pop up on your computer while Stock Watcher is open in a
+  tab. They need the https address. Use ntfy for alerts when the app isn't open.
 
 ## Tracking Apple Availability
 

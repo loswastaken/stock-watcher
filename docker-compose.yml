@@ -10,6 +10,9 @@ services:
     environment:
       TZ: America/New_York  # Change to your timezone
       COOKIE_SECURE: "auto"  # auto = secure cookie over HTTPS, still works on plain-http LAN
+      # Settings -> Updates -> "Update now" asks your Watchtower (HTTP API mode) to update this app.
+      # WATCHTOWER_URL: "http://<nas-ip>:8080"
+      # WATCHTOWER_TOKEN: "<the Watchtower container's WATCHTOWER_HTTP_API_TOKEN>"
       # SECRET_KEY: ""  # Optional; otherwise generated and stored in /data/secret.key
     labels:
       # Auto-updates via an existing Watchtower. Its scope must match this label

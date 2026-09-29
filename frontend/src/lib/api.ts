@@ -1,5 +1,6 @@
 import type {
   AppleResolve,
+  UpdateStatus,
   AuthStatus,
   CheckEvent,
   Item,
@@ -155,6 +156,10 @@ export const api = {
   updateItem: (id: number, body: ItemUpdate) => request<Item>(`/items/${id}`, { method: 'PATCH', body }),
   deleteItem: (id: number) => request<void>(`/items/${id}`, { method: 'DELETE' }),
   checkItem: (id: number) => request<Item>(`/items/${id}/check`, { method: 'POST' }),
+  health: () => request<{ status: string; version: string }>('/health'),
+  updateStatus: () => request<UpdateStatus>('/system/update'),
+  updateCheck: () => request<UpdateStatus>('/system/update/check', { method: 'POST' }),
+  updateApply: () => request<{ started: boolean }>('/system/update/apply', { method: 'POST' }),
   checkAll: () => request<{ queued: number; total: number }>('/items/check-all', { method: 'POST' }),
   uploadImage: (id: number, file: File) => {
     const form = new FormData();

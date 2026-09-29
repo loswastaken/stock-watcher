@@ -147,6 +147,8 @@ Notifications
 `Notification` = `{id, item_id, item_name, title, message, url, image_url, created_at, read, delivered, delivery_error}`
 
 Stats
+- `GET /system/update` / `POST /system/update/check` (admin) → `{current_version, latest_version, latest_created, update_available, can_update, error}`; latest = `org.opencontainers.image.revision` label of the public image
+- `POST /system/update/apply` (admin) → 202; calls Watchtower's HTTP API (`WATCHTOWER_URL`/`WATCHTOWER_TOKEN`) with `?image=` for this image only
 - `GET /stats` → `{total, in_stock, out_of_stock, unknown, error, paused, unread_notifications, checks_24h, alerts_24h}`
 
 Images

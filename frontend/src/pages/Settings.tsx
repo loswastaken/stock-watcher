@@ -4,12 +4,14 @@ import {
   Bell,
   CheckCircle2,
   Dices,
+  Download,
   KeyRound,
   Lock,
   MapPin,
   Monitor,
   Moon,
   Palette,
+  RefreshCw,
   Send,
   Server,
   SlidersHorizontal,
@@ -19,7 +21,7 @@ import {
   UserRound,
   X,
 } from 'lucide-react';
-import { useState, type FormEvent, type ReactNode } from 'react';
+import { useEffect, useState, type FormEvent, type ReactNode } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { toast } from 'sonner';
 import { FormError } from '@/components/AuthLayout';
@@ -30,7 +32,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardBody, CardFooter, CardHeader } from '@/components/ui/card';
 import { EmptyState } from '@/components/ui/empty-state';
-import { Field, Input, Select } from '@/components/ui/input';
+import { Field, Input } from '@/components/ui/input';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useSaveTheme } from '@/hooks/useSaveTheme';
 import { api, errorMessage } from '@/lib/api';
@@ -39,14 +41,17 @@ import { qk } from '@/lib/queryClient';
 import { useTheme } from '@/lib/theme';
 import type { Settings, SettingsUpdate, TestNotificationResult, Theme } from '@/lib/types';
 import { cn, isValidUrl } from '@/lib/utils';
+import { SwitchRow } from '@/components/ui/switch';
+import { browserNotifyEnabled, browserNotifySupported, enableBrowserNotify, setBrowserNotify } from '@/lib/browserNotify';
 
-type Tab = 'notifications' | 'defaults' | 'appearance' | 'account';
-const TABS: Tab[] = ['notifications', 'defaults', 'appearance', 'account'];
+type Tab = 'notifications' | 'defaults' | 'appearance' | 'account' | 'updates';
+const TABS: Tab[] = ['notifications', 'defaults', 'appearance', 'account', 'updates'];
 
 export default function SettingsPage() {
   const [params, setParams] = useSearchParams();
   const tab = (TABS.includes(params.get('tab') as Tab) ? params.get('tab') : 'notifications') as Tab;
   const settings = useQuery({ queryKey: qk.settings, queryFn: api.settings });
+  const user = useUser();
 
   return (
     <div className="mx-auto max-w-3xl">
@@ -65,6 +70,11 @@ export default function SettingsPage() {
           <TabsTrigger value="account" className="flex-1 sm:flex-none">
             <UserRound /> <span className="hidden min-[400px]:inline">Account</span>
           </TabsTrigger>
+          {user?.is_admin && (
+            <TabsTrigger value="updates" className="flex-1 sm:flex-none">
+              <Download /> <span className="hidden min-[400px]:inline">Updates</span>
+            </TabsTrigger>
+          )}
         </TabsList>
 
         {settings.isLoading ? (
@@ -85,7 +95,6 @@ export default function SettingsPage() {
                 key={[
                   settings.data.ntfy_server,
                   settings.data.ntfy_topic,
-                  settings.data.ntfy_priority,
                   settings.data.ntfy_token_set,
                 ].join('|')}
               />
@@ -102,6 +111,11 @@ export default function SettingsPage() {
             <TabsContent value="account">
               <AccountTab />
             </TabsContent>
+            {user?.is_admin && (
+              <TabsContent value="updates">
+                <UpdatesTab />
+              </TabsContent>
+            )}
           </>
         )}
       </Tabs>
@@ -124,13 +138,6 @@ function useSaveSettings(successMsg = 'Settings saved') {
 /* --------------------------------------------------------- Notifications */
 
 const TOPIC_RE = /^[A-Za-z0-9_-]{1,64}$/;
-const PRIORITIES = [
-  { v: 1, label: 'Min — no sound or vibration' },
-  { v: 2, label: 'Low — no sound' },
-  { v: 3, label: 'Default' },
-  { v: 4, label: 'High — long vibration' },
-  { v: 5, label: 'Urgent — breaks through Do Not Disturb' },
-];
 
 function randomTopic() {
   const bytes = new Uint8Array(6);
@@ -143,7 +150,6 @@ type TokenMode = 'keep' | 'replace' | 'clear';
 function NotificationsTab({ settings }: { settings: Settings }) {
   const [server, setServer] = useState(settings.ntfy_server || 'https://ntfy.sh');
   const [topic, setTopic] = useState(settings.ntfy_topic ?? '');
-  const [priority, setPriority] = useState(settings.ntfy_priority ?? 4);
   const [tokenMode, setTokenMode] = useState<TokenMode>(settings.ntfy_token_set ? 'keep' : 'replace');
   const [token, setToken] = useState('');
   const [testResult, setTestResult] = useState<TestNotificationResult | null>(null);
@@ -156,7 +162,6 @@ function NotificationsTab({ settings }: { settings: Settings }) {
     const b: SettingsUpdate = {
       ntfy_server: server.trim().replace(/\/+$/, '') || 'https://ntfy.sh',
       ntfy_topic: topic.trim() || null,
-      ntfy_priority: priority,
     };
     if (tokenMode === 'clear') b.ntfy_token = '';
     else if (tokenMode === 'replace' && token.trim()) b.ntfy_token = token.trim();
@@ -166,7 +171,6 @@ function NotificationsTab({ settings }: { settings: Settings }) {
   const dirty =
     server.trim().replace(/\/+$/, '') !== (settings.ntfy_server ?? '').replace(/\/+$/, '') ||
     (topic.trim() || null) !== (settings.ntfy_topic || null) ||
-    priority !== settings.ntfy_priority ||
     tokenMode === 'clear' ||
     (tokenMode === 'replace' && !!token.trim());
 
@@ -307,16 +311,6 @@ function NotificationsTab({ settings }: { settings: Settings }) {
               )}
             </Field>
 
-            <Field label="Priority" htmlFor="ntfy-priority">
-              <Select id="ntfy-priority" value={priority} onChange={(e) => setPriority(Number(e.target.value))}>
-                {PRIORITIES.map((p) => (
-                  <option key={p.v} value={p.v}>
-                    {p.v} · {p.label}
-                  </option>
-                ))}
-              </Select>
-            </Field>
-
             {testResult && (
               <div
                 role="status"
@@ -352,6 +346,8 @@ function NotificationsTab({ settings }: { settings: Settings }) {
           </CardFooter>
         </Card>
       </form>
+
+      <BrowserNotificationsCard />
 
       <Card>
         <CardHeader icon={<Smartphone />} title="Get alerts on your phone" description="One-time setup, takes a minute." />
@@ -390,6 +386,153 @@ function NotificationsTab({ settings }: { settings: Settings }) {
         </CardBody>
       </Card>
     </div>
+  );
+}
+
+function BrowserNotificationsCard() {
+  const supported = browserNotifySupported();
+  const [on, setOn] = useState(browserNotifyEnabled());
+  const [denied, setDenied] = useState(supported && Notification.permission === 'denied');
+  useEffect(() => {
+    const sync = () => setOn(browserNotifyEnabled());
+    window.addEventListener('sw-browser-notify', sync);
+    return () => window.removeEventListener('sw-browser-notify', sync);
+  }, []);
+
+  const toggle = async (next: boolean) => {
+    if (!next) return setBrowserNotify(false);
+    const perm = await enableBrowserNotify();
+    setDenied(perm === 'denied');
+    if (perm === 'granted') {
+      new Notification('Browser notifications on', { body: "You'll see restock alerts here while Stock Watcher is open.", icon: '/favicon.svg' });
+    } else toast.error('Notifications are blocked', { description: 'Allow them for this site in your browser settings.' });
+  };
+
+  return (
+    <Card>
+      <CardHeader icon={<Monitor />} title="Browser notifications" description="Pop-up alerts on this computer while Stock Watcher is open in a tab (it can be in the background)." />
+      <CardBody className="space-y-3">
+        {!supported ? (
+          <p className="text-sm text-zinc-500 dark:text-zinc-400">
+            Not available here. Browsers only allow notifications on secure (https) pages; open Stock Watcher through your https address.
+          </p>
+        ) : (
+          <>
+            <SwitchRow
+              id="browser-notify"
+              title="Show browser notifications"
+              description="This setting is per browser/device. Use ntfy for alerts when the app isn't open."
+              checked={on}
+              onCheckedChange={toggle}
+            />
+            {denied && (
+              <p className="text-sm text-amber-700 dark:text-amber-400">
+                Blocked by your browser. Click the lock icon in the address bar and allow notifications for this site.
+              </p>
+            )}
+          </>
+        )}
+      </CardBody>
+    </Card>
+  );
+}
+
+/* ---------------------------------------------------------------- Updates */
+
+function shortSha(v: string | null | undefined) {
+  if (!v) return '—';
+  return /^[0-9a-f]{12,}$/i.test(v) ? v.slice(0, 7) : v;
+}
+
+function UpdatesTab() {
+  const status = useQuery({ queryKey: ['system-update'], queryFn: api.updateStatus });
+  const check = useMutation({
+    mutationFn: api.updateCheck,
+    onSuccess: (s) => {
+      status.refetch();
+      toast(s.update_available ? 'Update available' : 'You’re up to date', { description: s.error ?? undefined });
+    },
+    onError: (e) => toast.error(errorMessage(e)),
+  });
+  const [updating, setUpdating] = useState(false);
+  const apply = useMutation({
+    mutationFn: api.updateApply,
+    onSuccess: () => {
+      setUpdating(true);
+      const from = status.data?.current_version;
+      const started = Date.now();
+      const poll = async () => {
+        try {
+          const h = await api.health();
+          if (h.version !== from) {
+            toast.success(`Updated to ${shortSha(h.version)}`);
+            setTimeout(() => window.location.reload(), 800);
+            return;
+          }
+        } catch {
+          /* restarting */
+        }
+        if (Date.now() - started > 180_000) {
+          setUpdating(false);
+          toast.error('Update is taking longer than expected', { description: 'Check the Watchtower logs on the NAS.' });
+          return;
+        }
+        setTimeout(poll, 3000);
+      };
+      setTimeout(poll, 3000);
+    },
+    onError: (e) => toast.error("Couldn't start the update", { description: errorMessage(e) }),
+  });
+  const s = status.data;
+
+  return (
+    <Card>
+      <CardHeader icon={<Download />} title="App updates" description="New versions are built automatically when changes land on GitHub." />
+      <CardBody className="space-y-4">
+        {status.isLoading ? (
+          <PageLoader />
+        ) : !s ? (
+          <p className="text-sm text-rose-600">{errorMessage(status.error)}</p>
+        ) : (
+          <>
+            <dl className="grid grid-cols-2 gap-4 rounded-xl bg-zinc-50 p-4 dark:bg-zinc-800/30">
+              <div>
+                <dt className="text-xs text-zinc-500">Running</dt>
+                <dd className="mt-1 font-mono text-sm text-zinc-900 dark:text-zinc-100">{shortSha(s.current_version)}</dd>
+              </div>
+              <div>
+                <dt className="text-xs text-zinc-500">Latest</dt>
+                <dd className="mt-1 flex items-center gap-2 font-mono text-sm text-zinc-900 dark:text-zinc-100">
+                  {shortSha(s.latest_version)}
+                  {s.update_available ? <Badge>Update available</Badge> : s.latest_version ? <Badge>Up to date</Badge> : null}
+                </dd>
+              </div>
+            </dl>
+            {s.error && <p className="text-sm text-amber-700 dark:text-amber-400">{s.error}</p>}
+            {!s.can_update && (
+              <p className="text-sm text-zinc-500 dark:text-zinc-400">
+                To update from here, set <code className="font-mono text-xs">WATCHTOWER_URL</code> and{' '}
+                <code className="font-mono text-xs">WATCHTOWER_TOKEN</code> in docker-compose.yml. Watchtower also installs updates on its own
+                schedule.
+              </p>
+            )}
+          </>
+        )}
+      </CardBody>
+      <CardFooter className="justify-between">
+        <Button variant="outline" loading={check.isPending} onClick={() => check.mutate()}>
+          {!check.isPending && <RefreshCw />} Check for updates
+        </Button>
+        <Button
+          variant="primary"
+          loading={apply.isPending || updating}
+          disabled={!s?.can_update || !s?.update_available || updating}
+          onClick={() => apply.mutate()}
+        >
+          {!(apply.isPending || updating) && <Download />} {updating ? 'Updating…' : 'Update now'}
+        </Button>
+      </CardFooter>
+    </Card>
   );
 }
 

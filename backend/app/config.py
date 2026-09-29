@@ -28,6 +28,11 @@ class Settings(BaseSettings):
     tz: str = "UTC"
     enable_browser: bool = True
     app_version: str = "dev"
+    # In-app updates: "latest" is read from the public image; "Update now" asks an existing
+    # Watchtower (HTTP API mode) to update this container. No Docker socket in the app.
+    update_image: str = "ghcr.io/loswastaken/stock-watcher:latest"
+    watchtower_url: str | None = None  # e.g. http://10.24.4.26:8080
+    watchtower_token: str | None = None
     # Extras (not in PLAN.md): handy for tests / debugging.
     scheduler_enabled: bool = True
     login_max_failures: int = 10

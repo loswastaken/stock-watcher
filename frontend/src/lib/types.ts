@@ -221,3 +221,12 @@ export interface Stats {
   checks_24h: number;
   alerts_24h: number;
 }
+
+export interface UpdateStatus {
+  current_version: string;
+  latest_version: string | null;
+  latest_created: string | null;
+  update_available: boolean;
+  can_update: boolean;
+  error: string | null;
+}

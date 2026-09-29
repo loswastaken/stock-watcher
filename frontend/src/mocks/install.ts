@@ -160,6 +160,10 @@ async function handle(path: string, method: string, body: unknown): Promise<Resp
     }, 4000);
     return json(it, 201);
   }
+  if (p === '/system/update' || p === '/system/update/check') {
+    return json({ current_version: '375d85dc6dca79484d665ec6eeeb553c000a2cbb', latest_version: '8f7e6796052647ca31e75d31de0ec22bdcd6a2ff', latest_created: new Date().toISOString(), update_available: true, can_update: true, error: null });
+  }
+  if (p === '/system/update/apply') return json({ started: true }, 202);
   if (p === '/items/check-all' && method === 'POST') {
     const active = items.filter((x) => x.enabled);
     setTimeout(() => {
