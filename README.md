@@ -70,7 +70,7 @@ The container uses:
    - Click **Deploy**
 
 5. **Initial setup**:
-   - Open `http://<synology-ip>:8080` in your browser
+   - Open `http://<synology-ip>:8095` in your browser
    - You'll see a setup screen to create the admin account
    - Enter username and password, then click **Create Admin**
    - Log in—you're ready to add items
@@ -94,7 +94,7 @@ If using a reverse proxy (e.g., Synology DSM reverse proxy):
 1. **Synology DSM** → Control Panel → Login Portal → Advanced
 2. Create a reverse proxy rule:
    - Forward HTTPS host (e.g., `stockwatcher.example.com`)
-   - To `http://localhost:8080` (or your container's host IP)
+   - To `http://localhost:8095` (or your container's host IP)
 3. **Keep `COOKIE_SECURE=true`** when behind HTTPS—the app automatically trusts `X-Forwarded-*` headers
 
 ## Configuration
