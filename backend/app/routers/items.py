@@ -223,6 +223,14 @@ def delete_item(item_id: int, user: User = Depends(current_user), db: Session = 
     return Response(status_code=204)
 
 
+@router.post("/check-all", status_code=202)
+async def check_all(user: User = Depends(current_user)):
+    """Check every active item of this user now (in the background)."""
+    with SessionLocal() as db:
+        ids = list(db.scalars(select(Item.id).where(Item.user_id == user.id, Item.enabled.is_(True))))
+    return {"queued": scheduler.queue_checks(ids), "total": len(ids)}
+
+
 @router.post("/{item_id}/check", response_model=ItemOut)
 async def check_now(item_id: int, user: User = Depends(current_user)):
     with SessionLocal() as db:

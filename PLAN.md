@@ -103,6 +103,7 @@ Items (scoped to current user)
 - `PATCH /items/{id}` `ItemUpdate` (partial) → `Item`
 - `DELETE /items/{id}` → 204
 - `POST /items/{id}/check` → `Item` (runs a check now, awaits it, returns updated item)
+- `POST /items/check-all` → 202 `{queued, total}` (checks all the user's active items now, in the background)
 - `POST /items/{id}/image` multipart `file` → `Item` (jpg/png/webp/gif ≤ 8 MB)
 - `POST /items/{id}/image/refresh` → `Item` (re-fetch image from page)
 - `GET /items/{id}/history?limit=50` → `CheckEvent[]` newest first
@@ -185,12 +186,12 @@ Checkers never raise for site problems — they return `status="error"` with `er
 
 - Loop every 10 s: pick enabled items where `last_checked_at + interval <= now` (+ small jitter), run with `CHECK_CONCURRENCY` semaphore. Never run the same item twice concurrently.
 - After a check: record `CheckEvent`; update item. On `status=error`, **keep previous `available_keys`** (no flapping alerts) and increment `consecutive_errors`.
-- **Alert** = keys in new `available` that were not in previous `available_keys`. One notification per check summarizing all newly available keys (e.g. "iPhone 17 Pro: pickup available at Valley Fair, Stanford; 2-hour delivery available"). Created in the notification center and sent to ntfy (if topic configured and `notify_enabled`).
-- Optional "back out of stock" notification when `notify_on_out_of_stock` and item went from in_stock → out_of_stock.
+- **Alert** only on the transition from nothing available (`available_keys` empty) to something available. More stores/options opening while already available never alerts. One notification per restock summarizing what's available, created in the notification center and pushed to ntfy (if a topic is set).
+- After an alert the item's `notify_enabled` is set to false (alerts paused, item still checked). The user re-arms it with one click. Paused items create no alerts at all.
+- Never alert when something goes out of stock (`notify_on_out_of_stock` is ignored/legacy).
 - ntfy: JSON publish — POST `{server}/` with `{topic,title,message,priority,tags,click}` (avoids header-encoding issues); `Authorization: Bearer {token}` if set. Record `delivered`/`delivery_error`.
 - `unknown` results (inconclusive page) keep previous `available_keys`, like errors.
 - Apple pickup alerts only for same-day pickup unless `apple_config.pickup_today_only=false`; later-dated pickup is still shown in `last_result`.
-- `notify_enabled=false` only suppresses the ntfy push; in-app notifications are always recorded.
 
 ## Security
 

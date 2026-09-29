@@ -74,6 +74,8 @@ async def test_new_keys_alert_once_and_delivery_recorded(world, monkeypatch, res
     assert "Widget" in payload["title"]
     assert req.headers["authorization"] == "Bearer tk"
 
+    assert item(iid).notify_enabled is False  # one alert per restock, then muted
+
     # same keys again -> no new notification
     await scheduler.check_item(iid)
     assert len(notifs(uid)) == 1 and route.call_count == 1
@@ -83,28 +85,41 @@ async def test_new_keys_alert_once_and_delivery_recorded(world, monkeypatch, res
         assert last.changed is False
 
 
-async def test_only_newly_added_keys_are_summarised(world, monkeypatch, respx_mock):
+async def test_more_availability_while_in_stock_does_not_realert(world, monkeypatch, respx_mock):
     uid, iid = world
     respx_mock.post(NTFY).respond(200)
     set_checker(
         monkeypatch,
-        fake_result("in_stock", ("pickup:R1:P",)),
+        fake_result("in_stock", ("pickup:R1:P", "pickup:R2:P")),
         fake_result("in_stock", ("pickup:R1:P", "pickup:R2:P", "delivery2h:P")),
     )
     await scheduler.check_item(iid)
+    with db.SessionLocal() as s:  # even with alerts re-armed, more stores opening is not a new alert
+        s.get(Item, iid).notify_enabled = True
+        s.commit()
     await scheduler.check_item(iid)
     ns = notifs(uid)
-    assert len(ns) == 2
-    assert ns[1].message == "label-pickup:R2:P; label-delivery2h:P"  # single summarized notification
+    assert len(ns) == 1
+    assert ns[0].message == "label-pickup:R1:P; label-pickup:R2:P"  # one summarized alert
 
 
-async def test_key_disappears_then_returns_alerts_again(world, monkeypatch, respx_mock):
+async def test_alert_mutes_item_until_rearmed(world, monkeypatch, respx_mock):
     uid, iid = world
-    respx_mock.post(NTFY).respond(200)
-    set_checker(monkeypatch, fake_result("in_stock", ("stock",)), fake_result("out_of_stock", ()), fake_result("in_stock", ("stock",)))
-    for _ in range(3):
-        await scheduler.check_item(iid)
-    assert len(notifs(uid)) == 2  # no oos notice (setting off), second restock alerts
+    route = respx_mock.post(NTFY).respond(200)
+    set_checker(monkeypatch, fake_result("in_stock", ("stock",)), fake_result("out_of_stock", ()),
+                fake_result("in_stock", ("stock",)), fake_result("out_of_stock", ()), fake_result("in_stock", ("stock",)))
+    await scheduler.check_item(iid)
+    assert len(notifs(uid)) == 1 and item(iid).notify_enabled is False  # muted after alerting
+    await scheduler.check_item(iid)  # out of stock: never alerts
+    await scheduler.check_item(iid)  # back in stock, but alerts are muted
+    assert len(notifs(uid)) == 1 and route.call_count == 1
+    assert item(iid).status == "in_stock"  # still checked while muted
+    with db.SessionLocal() as s:
+        s.get(Item, iid).notify_enabled = True
+        s.commit()
+    await scheduler.check_item(iid)  # out
+    await scheduler.check_item(iid)  # in again -> alerts once more
+    assert len(notifs(uid)) == 2 and route.call_count == 2 and item(iid).notify_enabled is False
 
 
 async def test_error_keeps_previous_keys_and_counts(world, monkeypatch, respx_mock):
@@ -147,39 +162,40 @@ async def test_ntfy_failure_recorded(world, monkeypatch, respx_mock):
     assert n.delivered is False and "500" in n.delivery_error
 
 
-async def test_no_topic_or_notify_disabled_skips_ntfy(world, monkeypatch, respx_mock):
+async def test_muted_item_or_no_topic(world, monkeypatch, respx_mock):
     uid, iid = world
     route = respx_mock.post(NTFY).respond(200)
     with db.SessionLocal() as s:
         s.get(Item, iid).notify_enabled = False
         s.commit()
-    set_checker(monkeypatch, fake_result("in_stock", ("stock",)), fake_result("in_stock", ("stock", "other")))
+    set_checker(monkeypatch, fake_result("in_stock", ("stock",)), fake_result("out_of_stock", ()),
+                fake_result("in_stock", ("stock",)))
     await scheduler.check_item(iid)
-    assert route.call_count == 0
-    n = notifs(uid)
-    assert len(n) == 1 and n[0].delivered is False and n[0].delivery_error is None  # in-app only
+    assert route.call_count == 0 and notifs(uid) == []  # muted: no push, no in-app alert
 
     with db.SessionLocal() as s:
         s.get(Item, iid).notify_enabled = True
         s.query(UserSettings).update({"ntfy_topic": None})
         s.commit()
     await scheduler.check_item(iid)
-    assert route.call_count == 0 and len(notifs(uid)) == 2
+    await scheduler.check_item(iid)
+    n = notifs(uid)
+    assert route.call_count == 0 and len(n) == 1 and n[0].delivered is False  # in-app only, no topic
 
 
-async def test_out_of_stock_notice_optional(world, monkeypatch, respx_mock):
+async def test_never_alerts_on_out_of_stock(world, monkeypatch, respx_mock):
     uid, iid = world
     route = respx_mock.post(NTFY).respond(200)
     with db.SessionLocal() as s:
-        s.query(UserSettings).update({"notify_on_out_of_stock": True})
+        s.query(UserSettings).update({"notify_on_out_of_stock": True})  # legacy setting is ignored
+        s.get(Item, iid).available_keys = ["stock"]
+        s.get(Item, iid).status = "in_stock"
         s.commit()
-    set_checker(monkeypatch, fake_result("in_stock", ("stock",)), fake_result("out_of_stock", (), status_text="Sold out"), fake_result("out_of_stock", ()))
-    for _ in range(3):
-        await scheduler.check_item(iid)
-    ns = notifs(uid)
-    assert len(ns) == 2 and ns[1].title.startswith("Out of stock") and ns[1].message == "Sold out"
-    assert route.call_count == 2  # repeated out_of_stock does not renotify
-    assert item(iid).available_keys == []
+    set_checker(monkeypatch, fake_result("out_of_stock", (), status_text="Sold out"))
+    await scheduler.check_item(iid)
+    await scheduler.check_item(iid)
+    assert notifs(uid) == [] and route.call_count == 0
+    assert item(iid).available_keys == [] and item(iid).status == "out_of_stock"
 
 
 async def test_history_pruned_to_500(world, monkeypatch):

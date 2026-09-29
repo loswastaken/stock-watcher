@@ -73,7 +73,9 @@ export function useItemActions() {
     mutationFn: (item: Item) => api.updateItem(item.id, { notify_enabled: !item.notify_enabled }),
     onSuccess: (item) => {
       after(item);
-      toast.success(item.notify_enabled ? 'Notifications on' : 'Notifications muted', { description: item.name });
+      toast.success(item.notify_enabled ? 'Alerts re-armed' : 'Alerts paused', {
+        description: item.notify_enabled ? `You'll get one alert the next time ${item.name} is in stock.` : item.name,
+      });
     },
     onError: (e) => toast.error(errorMessage(e)),
   });

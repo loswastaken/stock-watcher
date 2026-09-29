@@ -31,7 +31,6 @@ import { Button } from '@/components/ui/button';
 import { Card, CardBody, CardFooter, CardHeader } from '@/components/ui/card';
 import { EmptyState } from '@/components/ui/empty-state';
 import { Field, Input, Select } from '@/components/ui/input';
-import { SwitchRow } from '@/components/ui/switch';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useSaveTheme } from '@/hooks/useSaveTheme';
 import { api, errorMessage } from '@/lib/api';
@@ -88,7 +87,6 @@ export default function SettingsPage() {
                   settings.data.ntfy_topic,
                   settings.data.ntfy_priority,
                   settings.data.ntfy_token_set,
-                  settings.data.notify_on_out_of_stock,
                 ].join('|')}
               />
             </TabsContent>
@@ -146,7 +144,6 @@ function NotificationsTab({ settings }: { settings: Settings }) {
   const [server, setServer] = useState(settings.ntfy_server || 'https://ntfy.sh');
   const [topic, setTopic] = useState(settings.ntfy_topic ?? '');
   const [priority, setPriority] = useState(settings.ntfy_priority ?? 4);
-  const [outOfStock, setOutOfStock] = useState(settings.notify_on_out_of_stock);
   const [tokenMode, setTokenMode] = useState<TokenMode>(settings.ntfy_token_set ? 'keep' : 'replace');
   const [token, setToken] = useState('');
   const [testResult, setTestResult] = useState<TestNotificationResult | null>(null);
@@ -160,7 +157,6 @@ function NotificationsTab({ settings }: { settings: Settings }) {
       ntfy_server: server.trim().replace(/\/+$/, '') || 'https://ntfy.sh',
       ntfy_topic: topic.trim() || null,
       ntfy_priority: priority,
-      notify_on_out_of_stock: outOfStock,
     };
     if (tokenMode === 'clear') b.ntfy_token = '';
     else if (tokenMode === 'replace' && token.trim()) b.ntfy_token = token.trim();
@@ -171,7 +167,6 @@ function NotificationsTab({ settings }: { settings: Settings }) {
     server.trim().replace(/\/+$/, '') !== (settings.ntfy_server ?? '').replace(/\/+$/, '') ||
     (topic.trim() || null) !== (settings.ntfy_topic || null) ||
     priority !== settings.ntfy_priority ||
-    outOfStock !== settings.notify_on_out_of_stock ||
     tokenMode === 'clear' ||
     (tokenMode === 'replace' && !!token.trim());
 
@@ -321,16 +316,6 @@ function NotificationsTab({ settings }: { settings: Settings }) {
                 ))}
               </Select>
             </Field>
-
-            <div className="rounded-xl border border-zinc-200 p-4 dark:border-zinc-800">
-              <SwitchRow
-                id="oos"
-                title="Notify when items go out of stock"
-                description="Also send an alert when something you're watching sells out again."
-                checked={outOfStock}
-                onCheckedChange={setOutOfStock}
-              />
-            </div>
 
             {testResult && (
               <div

@@ -57,19 +57,17 @@ export function ItemActionsMenu({
             </>
           )}
         </DropdownMenuItem>
-        {extended && (
-          <DropdownMenuItem onSelect={() => a.toggleNotify.mutate(item)}>
-            {item.notify_enabled ? (
-              <>
-                <BellOff /> Mute notifications
-              </>
-            ) : (
-              <>
-                <Bell /> Enable notifications
-              </>
-            )}
-          </DropdownMenuItem>
-        )}
+        <DropdownMenuItem onSelect={() => a.toggleNotify.mutate(item)}>
+          {item.notify_enabled ? (
+            <>
+              <BellOff /> Pause alerts
+            </>
+          ) : (
+            <>
+              <Bell /> Re-arm alerts
+            </>
+          )}
+        </DropdownMenuItem>
         <DropdownMenuItem onSelect={() => navigate(`/items/${item.id}/edit`)}>
           <Pencil /> Edit
         </DropdownMenuItem>

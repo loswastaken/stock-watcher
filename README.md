@@ -106,6 +106,15 @@ If using a reverse proxy (e.g., Synology DSM reverse proxy):
    - Point Stock Watcher to your server URL
    - Use access tokens for privacy
 
+## Alerts
+
+- You get **one alert per restock**: when an item goes from unavailable to available (in the app and via ntfy).
+- More stores or delivery options opening up while it's already available don't alert again, and nothing
+  alerts when an item sells out.
+- After an alert, that item's alerts **pause** (it keeps being checked). Click **Alerts paused · Re-arm** on the
+  item's card or page to get the next one.
+- **Check all** on the dashboard re-checks every active item immediately.
+
 ## Tracking Apple Availability
 
 ### Add an Apple Item

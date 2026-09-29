@@ -1,13 +1,12 @@
-import { BellOff, Loader2 } from 'lucide-react';
+import { BellRing, Loader2 } from 'lucide-react';
 import { Link } from 'react-router-dom';
-import { useIsChecking } from '@/hooks/useItemActions';
+import { useIsChecking, useItemActions } from '@/hooks/useItemActions';
 import type { Item } from '@/lib/types';
 import { cn, hostOf } from '@/lib/utils';
 import { ItemImage } from '../ItemImage';
 import { AppleLogo } from '../Logo';
 import { RelativeTime } from '../RelativeTime';
 import { StatusBadge, StatusDot, statusMeta } from '../StatusBadge';
-import { Tooltip } from '../ui/tooltip';
 import { ItemActionsMenu } from './ItemActionsMenu';
 
 export function AppleBadge({ className }: { className?: string }) {
@@ -20,6 +19,30 @@ export function AppleBadge({ className }: { className?: string }) {
     >
       <AppleLogo className="size-3 -translate-y-px" /> Apple
     </span>
+  );
+}
+
+/** Alerts pause after each in-stock alert; one click turns them back on. */
+export function RearmAlertsButton({ item, className }: { item: Item; className?: string }) {
+  const a = useItemActions();
+  if (item.notify_enabled) return null;
+  return (
+    <button
+      type="button"
+      onClick={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        a.toggleNotify.mutate(item);
+      }}
+      disabled={a.toggleNotify.isPending}
+      title="Alerts pause after an in-stock alert. Click to get the next one."
+      className={cn(
+        'pointer-events-auto relative z-10 inline-flex items-center gap-1.5 rounded-full bg-amber-50 px-2.5 py-1 text-xs font-medium text-amber-800 ring-1 ring-amber-300/60 transition-colors hover:bg-amber-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 disabled:opacity-60 dark:bg-amber-500/10 dark:text-amber-300 dark:ring-amber-500/30 dark:hover:bg-amber-500/20',
+        className,
+      )}
+    >
+      <BellRing className="size-3.5" /> Alerts paused · Re-arm
+    </button>
   );
 }
 
@@ -73,12 +96,8 @@ export function ItemCard({ item }: { item: Item }) {
           <h3 className="line-clamp-2 text-sm font-semibold leading-snug text-zinc-900 dark:text-zinc-50">{item.name}</h3>
           <p className="mt-1 flex items-center gap-1.5 truncate text-xs text-zinc-500 dark:text-zinc-400">
             <span className="truncate">{hostOf(item.url)}</span>
-            {!item.notify_enabled && (
-              <Tooltip content="Notifications muted">
-                <BellOff className="pointer-events-auto size-3 shrink-0" />
-              </Tooltip>
-            )}
           </p>
+          <RearmAlertsButton item={item} className="mt-2" />
         </div>
         <div className="mt-auto flex flex-col-reverse gap-1 pt-1 min-[480px]:flex-row min-[480px]:items-end min-[480px]:justify-between min-[480px]:gap-2">
           <div className="min-w-0">
@@ -138,6 +157,7 @@ export function ItemRow({ item }: { item: Item }) {
       <div className="pointer-events-none relative hidden w-24 shrink-0 text-right text-xs text-zinc-500 lg:block">
         <RelativeTime iso={item.last_checked_at} fallback="not yet" className="pointer-events-auto" />
       </div>
+      <RearmAlertsButton item={item} className="hidden shrink-0 sm:inline-flex" />
       <div className="relative z-10">
         <ItemActionsMenu item={item} />
       </div>

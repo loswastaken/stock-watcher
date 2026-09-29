@@ -649,8 +649,8 @@ function ItemFormInner({ item, defaults }: { item: Item | null; defaults: typeof
               <SwitchRow
                 id="notify"
                 icon={<Bell />}
-                title="Send notifications"
-                description="Push an ntfy alert when this item comes back in stock. Alerts always appear in the in-app notification center."
+                title="Alerts"
+                description="Get one alert (ntfy + notification center) when this comes back in stock. Alerts then pause until you re-arm them, so you're never spammed."
                 checked={s.notify}
                 onCheckedChange={(v) => set('notify', v)}
               />
