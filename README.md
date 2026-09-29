@@ -32,60 +32,59 @@ The container uses:
 
 ### Synology Container Manager (Quick Start)
 
-1. **Create directories**:
+Paths below assume `volume2`; adjust them in `docker-compose.yml` if yours differ.
+
+1. **Create folders** (File Station or SSH):
    ```bash
-   # On Synology via SSH
-   mkdir -p /volume1/docker/stock-watcher/data
-   mkdir -p /volume1/docker/watchtower
+   mkdir -p /volume2/stock-watcher/data
+   mkdir -p /volume2/watchtower   # only if Watchtower's config.json will live here
    ```
 
-2. **Create GitHub Classic PAT**:
-   - Go to GitHub → Settings → Developer settings → Personal access tokens (classic)
-   - Create a token with `read:packages` scope
-   - Copy the token
+2. **Create a GitHub classic PAT** with only the `read:packages` scope
+   (GitHub → Settings → Developer settings → Personal access tokens (classic)).
 
-3. **Create Watchtower config**:
-   ```bash
-   # On Synology via SSH
-   GITHUB_USERNAME="your-username"
-   PAT="ghp_your_token_here"
-   AUTH=$(echo -n "$GITHUB_USERNAME:$PAT" | base64)
-   cat > /volume1/docker/watchtower/config.json <<EOF
-   {
-     "auths": {
-       "ghcr.io": {
-         "auth": "$AUTH"
-       }
-     }
-   }
-   EOF
-   chmod 600 /volume1/docker/watchtower/config.json
-   ```
+3. **Let Container Manager pull the private image**: Container Manager → Registry → Settings → Add,
+   URL `https://ghcr.io`, your GitHub username, and the PAT as password.
 
-4. **Deploy via Container Manager**:
-   - Open **Container Manager** → **Project**
-   - Click **Create**
-   - Paste the `docker-compose.yml` content
-   - Adjust `TZ` timezone if needed
-   - Click **Deploy**
+4. **Deploy**: Container Manager → Project → Create, path `/volume2/stock-watcher`,
+   paste `docker-compose.yml`, adjust `TZ`, then Done.
 
-5. **Initial setup**:
-   - Open `http://<synology-ip>:8095` in your browser
-   - You'll see a setup screen to create the admin account
-   - Enter username and password, then click **Create Admin**
-   - Log in—you're ready to add items
+5. **First run**: open `http://<synology-ip>:8095` (or your reverse-proxy URL) and create the admin account.
 
-### Auto-Updates
+### Auto-Updates (Watchtower)
 
-Once deployed, automatic updates work like this:
+Push to `main` → GitHub Actions builds `linux/amd64` + `linux/arm64` images → pushes to GHCR →
+Watchtower pulls the new image and restarts the container. Data persists in `/volume2/stock-watcher/data`.
 
-1. Push a commit to `main` branch
-2. GitHub Actions builds a multi-arch image (`linux/amd64`, `linux/arm64`) and pushes to GHCR
-3. Watchtower polls the registry every 5 minutes
-4. When a new image is detected, Watchtower pulls it and restarts the container
-5. Your data persists in `/volume1/docker/stock-watcher/data`
+**Run only one Watchtower per Docker host** — when a second instance starts, it stops and removes the first.
 
-**Note**: After the first successful workflow run, the GHCR package inherits the private visibility from the repository. Ensure your GitHub PAT has `read:packages` scope.
+#### If you already run Watchtower (e.g. for another project)
+
+Reuse it; don't deploy a second one. Check its settings in Container Manager:
+
+- **It must see this container.** If it has `WATCHTOWER_LABEL_ENABLE=true`, the
+  `com.centurylinklabs.watchtower.enable=true` label in `docker-compose.yml` already opts stock-watcher in.
+  If it has no label filter, it watches every container, this one included.
+- **It needs GHCR credentials.** Add a `ghcr.io` entry to the `config.json` it mounts at `/config.json`
+  (keep any existing entries), then restart Watchtower:
+  ```json
+  {
+    "auths": {
+      "ghcr.io": { "auth": "<output of: echo -n 'GITHUB_USERNAME:PAT' | base64>" }
+    }
+  }
+  ```
+  If it doesn't mount a `config.json` yet, create `/volume2/watchtower/config.json` with the content above and add
+  the volume `/volume2/watchtower/config.json:/config.json:ro` to that Watchtower container.
+- **Poll interval.** `WATCHTOWER_POLL_INTERVAL` (seconds) applies to every container it manages; `300` gives
+  5-minute updates. The default is 24 hours.
+
+#### If you don't have Watchtower yet
+
+Create `/volume2/watchtower/config.json` as above, then deploy `deploy/watchtower-compose.yml` as its own
+Container Manager project. It polls every 5 minutes and only updates labeled containers.
+
+**Note**: The GHCR package inherits private visibility from the repository, so the PAT is always required.
 
 ### Reverse Proxy Setup
 
@@ -203,7 +202,7 @@ Frontend dev server runs on `http://localhost:5173` and proxies `/api` requests 
 
 ### Watchtower says "unauthorized"
 
-- Check that `/volume1/docker/watchtower/config.json` exists and is readable
+- Check that the `config.json` mounted into Watchtower at `/config.json` has a `ghcr.io` entry
 - Verify the base64 auth string: `echo -n "username:token" | base64`
 - Ensure the GitHub PAT has `read:packages` scope
 
@@ -215,7 +214,7 @@ Frontend dev server runs on `http://localhost:5173` and proxies `/api` requests 
 
 ### "Cannot log in" / Sessions not persisting
 
-- Ensure `/volume1/docker/stock-watcher/data` is writable
+- Ensure `/volume2/stock-watcher/data` is writable
 - Check Synology Container Manager logs for permission errors
 
 ### Reset admin password

@@ -1,0 +1,17 @@
+# Standalone Watchtower — only if you do NOT already run one on this Docker host.
+# (A second Watchtower instance stops and removes the first one it finds.)
+services:
+  watchtower:
+    image: containrrr/watchtower:latest
+    container_name: watchtower
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /volume2/watchtower/config.json:/config.json:ro
+    environment:
+      WATCHTOWER_POLL_INTERVAL: "300"
+      WATCHTOWER_LABEL_ENABLE: "true"
+      WATCHTOWER_CLEANUP: "true"
+      WATCHTOWER_INCLUDE_RESTARTING: "true"
+      TZ: America/Chicago  # Change to your timezone
+      # WATCHTOWER_NOTIFICATION_URL: "ntfy://ntfy.sh/your-topic"  # ntfy ping on updates
