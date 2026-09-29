@@ -3,6 +3,7 @@ import { useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
 import { api } from '@/lib/api';
+import { browserNotifyEnabled, showBrowserNotification } from '@/lib/browserNotify';
 import { qk } from '@/lib/queryClient';
 
 /** Polls unread notifications (latest 5) every 30 s. Shared by bell + mobile tab bar. */
@@ -11,7 +12,8 @@ export function useUnread() {
     queryKey: qk.unread,
     queryFn: () => api.notifications({ unread_only: true, limit: 5 }),
     refetchInterval: 30_000,
-    refetchIntervalInBackground: false,
+    // Keep polling in a background tab when browser notifications are on.
+    refetchIntervalInBackground: browserNotifyEnabled(),
   });
 }
 
@@ -34,6 +36,7 @@ export function useUnreadWatcher() {
     if (count > prev.current) {
       const fresh = data.items.filter((n) => !seen.current.has(n.id));
       const toShow = fresh.slice(0, 3);
+      toShow.forEach((n) => showBrowserNotification(n, navigate));
       toShow.forEach((n) => {
         toast(n.title, {
           description: n.message,
