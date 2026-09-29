@@ -30,6 +30,14 @@ straight to `probe.py`.
 In the page, paste product URLs or tick stores to use their sample URLs, then click **Run checks**. Results
 show up as each check finishes. Click **Download bundle** when it's done.
 
+**Recommended for a full sweep:** the sample URLs in `sites.json` go stale (404s, redirects to the homepage),
+which shows up as FAIL for stores that actually work. Refresh them first, then sweep:
+
+```bash
+./run.sh discover --write       # finds real, current product URLs for every store and updates sites.json
+./run.sh sweep
+```
+
 ### Command line
 
 ```bash
@@ -39,6 +47,9 @@ show up as each check finishes. Click **Download bundle** when it's done.
 ./run.sh sweep --headless                       # no browser window
 ./run.sh sweep                                  # every store in sites.json (concurrency 3)
 ./run.sh sweep --only target,bestbuy,walmart
+./run.sh discover --only target,lego            # find current product URLs -> probe-output/discovered.json
+./run.sh discover --write --per-store 3         # ...and update sites.json in place
+./run.sh sweep --discover                       # discover (no write), then sweep what it found
 ./run.sh bundle                                 # -> probe-results-YYYY-MM-DD.zip
 ```
 
@@ -74,8 +85,32 @@ was fetched (http, curl or browser), duration, detection signals and a verdict:
 | **BLOCKED** | Bot protection (captcha, Akamai, PerimeterX, Cloudflare, …) stopped it. |
 | **QUEUE** | A waiting room / queue page was shown. |
 
+### discover
+
+`discover` finds up to `--per-store N` (default 2) real product URLs for each store and verifies each with the
+real checker, keeping one in-stock and one sold-out item when it can. It uses the same browser and profile as
+the checks, so bot walls you have passed stay passed. Per store:
+
+1. `robots.txt` `Sitemap:` lines, plus `/sitemap.xml` and `/sitemap_index.xml`. Indexes are followed (product /
+   pdp sitemaps first, `.xml.gz` supported) within a cap on requests and bytes.
+2. Shopify stores also try `/products.json`.
+3. Failing that, the store's homepage (and up to two category pages linked from it) in the browser.
+4. Links are filtered with that store's product-URL pattern (`PRODUCT_PATTERNS` in `probe.py`), then up to
+   6 candidates (`--max-tries`) are checked; only definite in-stock / sold-out answers are kept. If a store
+   only ever answers BLOCKED / QUEUE, those URLs are kept and shown with a `?`. A URL that FAILs is never kept.
+
+eBay and StockX are skipped (listings expire; resale pages are bot-walled), so their samples stay.
+It goes easy on the stores: 2 stores at a time (`--discover-concurrency`), a gap between requests to one host,
+and a time cap of 90 s per store (`--store-timeout`).
+
+Without `--write` the result goes to `probe-output/discovered.json` (same format as `sites.json`; try it with
+`sweep --sites probe-output/discovered.json`). With `--write`, `sites.json` is updated in place: entries with a
+`retailer_config` (Target pickup near a ZIP, Micro Center store 151, ...) keep their config and note on a new
+URL, stores where nothing was found keep their old samples, and `_README` / `_comment` are kept.
+`sweep --discover` runs a discovery (without writing `sites.json`) and sweeps what it found.
+
 `sites.json` has **sample** URLs for every supported store. They were written without being able to open
-the sites, so some may be stale. If one 404s or shows the wrong product, replace it with a current product
+the sites, so some may be stale (`discover --write` refreshes them). If one 404s or shows the wrong product, replace it with a current product
 page. A mix of in-stock and sold-out items is most useful. An entry can be a plain URL or
 `{"url": ..., "retailer_config": {"fulfillment": "pickup", "zip": "60601"}}`.
 

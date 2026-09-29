@@ -3,6 +3,8 @@
 # Then forwards every argument to probe.py, e.g.
 #   powershell -ExecutionPolicy Bypass -File .\run.ps1 serve
 #   powershell -ExecutionPolicy Bypass -File .\run.ps1 sweep --only target,bestbuy
+#   powershell -ExecutionPolicy Bypass -File .\run.ps1 discover --write    (refresh sites.json with current product URLs)
+#   powershell -ExecutionPolicy Bypass -File .\run.ps1 sweep --discover
 $ErrorActionPreference = 'Stop'
 
 $Here = Split-Path -Parent $MyInvocation.MyCommand.Path

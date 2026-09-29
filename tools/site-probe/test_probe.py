@@ -424,3 +424,430 @@ def test_engine_and_mode_are_recorded(tmp_path, fake_backend, monkeypatch):
     assert probe.describe_browser({"engine": "patchright", "mode": "cdp", "version": "142.0.1", "launched": True}) \
         == "patchright, cdp, Chrome 142.0.1"
     assert probe.describe_browser({}) == "unknown (older backend)"
+
+
+# --------------------------------------------------------------------------- discover
+
+
+import gzip
+
+
+class FakeNet:
+    """Offline stand-in for LiveNet: ``files`` maps URL -> bytes/str for get(), ``pages`` URL -> HTML."""
+
+    def __init__(self, files=None, pages=None):
+        self.files = {k: (v.encode() if isinstance(v, str) else v) for k, v in (files or {}).items()}
+        self.pages = pages or {}
+        self.gets: list[str] = []
+        self.paged: list[str] = []
+
+    async def get(self, url):
+        self.gets.append(url)
+        return (200, self.files[url]) if url in self.files else (404, b"")
+
+    async def page(self, url):
+        self.paged.append(url)
+        if url not in self.pages:
+            raise RuntimeError("HTTP 403")
+        return self.pages[url]
+
+
+def _urlset(*locs, lastmods=None):
+    body = "".join(
+        f"<url><loc>{loc}</loc>" + (f"<lastmod>{lastmods[i]}</lastmod>" if lastmods else "") + "</url>"
+        for i, loc in enumerate(locs))
+    return f'<?xml version="1.0"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">{body}</urlset>'
+
+
+def _index(*locs):
+    body = "".join(f"<sitemap><loc>{loc}</loc></sitemap>" for loc in locs)
+    return f'<?xml version="1.0"?><sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">{body}</sitemapindex>'
+
+
+def test_robots_sitemap_lines():
+    txt = ("User-agent: *\nDisallow: /cart\nsitemap: https://www.x.test/a.xml\n  SITEMAP:https://www.x.test/b.xml.gz  \n"
+           "Sitemap: /relative.xml\nSitemap: https://www.x.test/a.xml\n# Sitemap: https://no.test/c.xml\n")
+    assert probe.parse_robots_sitemaps(txt, "https://www.x.test") == [
+        "https://www.x.test/a.xml", "https://www.x.test/b.xml.gz", "https://www.x.test/relative.xml"]
+    assert probe.parse_robots_sitemaps("User-agent: *") == []
+
+
+def test_parse_sitemap_index_urlset_gzip_and_cdata():
+    idx = probe.parse_sitemap(_index("https://s.test/sitemap-products-1.xml.gz", "https://s.test/blog.xml"))
+    assert idx.kind == "index" and [e[0] for e in idx.entries] == [
+        "https://s.test/sitemap-products-1.xml.gz", "https://s.test/blog.xml"]
+    xml = _urlset("https://s.test/p/a?x=1&amp;y=2", "<![CDATA[https://s.test/p/b]]>", lastmods=["2026-09-01", "2026-09-02"])
+    for data in (xml, xml.encode(), gzip.compress(xml.encode())):  # str, bytes, .xml.gz bytes
+        sm = probe.parse_sitemap(data)
+        assert sm.kind == "urlset"
+        assert sm.entries == [("https://s.test/p/a?x=1&y=2", "2026-09-01"), ("https://s.test/p/b", "2026-09-02")]
+    assert probe.parse_sitemap("https://a.test/1\nhttps://a.test/2\n").entries[1][0] == "https://a.test/2"
+    assert probe.parse_sitemap(b"\x1f\x8bnot really gzip").entries == []
+
+
+def test_sitemap_rank_prefers_product_sitemaps():
+    urls = ["https://s.test/sitemap-blog.xml", "https://s.test/sitemap.xml", "https://s.test/sitemap-products-2.xml",
+            "https://s.test/sitemap-en-us-pdp.xml", "https://s.test/sitemap-fr-fr-pdp.xml"]
+    ranked = sorted(urls, key=probe.sitemap_rank, reverse=True)
+    assert ranked[0] == "https://s.test/sitemap-en-us-pdp.xml" and ranked[-1] == "https://s.test/sitemap-blog.xml"
+    assert probe.sitemap_rank(urls[3]) > probe.sitemap_rank(urls[4])
+
+
+@pytest.mark.parametrize("key,url,expected", [
+    ("target", "https://www.target.com/p/nintendo-switch-2/-/A-94693225#lnk=x", "https://www.target.com/p/nintendo-switch-2/-/A-94693225"),
+    ("target", "https://www.target.com/c/video-games/-/N-5xtg5", None),
+    ("bestbuy", "https://www.bestbuy.com/site/some-thing/6603968.p?skuId=6603968&intl=nosplash",
+     "https://www.bestbuy.com/site/some-thing/6603968.p?skuId=6603968&intl=nosplash"),
+    ("bestbuy", "https://www.bestbuy.com/product/x/JJGCQ8WQ7K/sku/6614313", "https://www.bestbuy.com/product/x/JJGCQ8WQ7K/sku/6614313"),
+    ("bestbuy", "https://www.bestbuy.com/site/promo/deals.c?id=abcat", None),
+    ("walmart", "https://www.walmart.com/ip/Nintendo-Switch-2/15949610846?athbdg=L1600", "https://www.walmart.com/ip/Nintendo-Switch-2/15949610846"),
+    ("walmart", "https://www.walmart.com/browse/electronics/3944", None),
+    ("samsclub", "https://www.samsclub.com/ip/Thing/prod123456", None),
+    ("samsclub", "https://www.samsclub.com/ip/Thing/16634389868", "https://www.samsclub.com/ip/Thing/16634389868"),
+    ("amazon", "https://www.amazon.com/PlayStation-5/dp/B0DGY63Z2H/ref=sr_1_1", "https://www.amazon.com/PlayStation-5/dp/B0DGY63Z2H/ref=sr_1_1"),
+    ("amazon", "https://www.amazon.com/dp/short", None),
+    ("jazwares", "https://shop.jazwares.com/products/squishmallows-chip?variant=1", "https://shop.jazwares.com/products/squishmallows-chip"),
+    ("jazwares", "https://shop.jazwares.com/collections/all", None),
+    ("newegg", "https://www.newegg.com/p/N82E16819113877", "https://www.newegg.com/p/N82E16819113877"),
+    ("newegg", "https://www.newegg.com/msi-rtx/p/N82E16814137917", "https://www.newegg.com/msi-rtx/p/N82E16814137917"),
+    ("newegg", "https://www.newegg.com/p/pl?d=gpu", None),
+    ("microcenter", "https://www.microcenter.com/product/687907/amd-ryzen", "https://www.microcenter.com/product/687907/amd-ryzen"),
+    ("microcenter", "https://www.microcenter.com/category/4294967292/cpus", None),
+    ("lego", "https://www.lego.com/en-us/product/millennium-falcon-75192", "https://www.lego.com/en-us/product/millennium-falcon-75192"),
+    ("lego", "https://www.lego.com/en-us/categories/star-wars", None),
+    ("homedepot", "https://www.homedepot.com/p/RYOBI-Drill-PCL206K1/315143462", "https://www.homedepot.com/p/RYOBI-Drill-PCL206K1/315143462"),
+    ("gamestop", "https://www.gamestop.com/video-games/switch/products/mario/11223344.html",
+     "https://www.gamestop.com/video-games/switch/products/mario/11223344.html"),
+    ("costco", "https://www.costco.com/x.product.4000362974.html", "https://www.costco.com/x.product.4000362974.html"),
+    ("nextwarehouse", "https://www.nextwarehouse.com/item/?p_num=1234567&n=PNY", "https://www.nextwarehouse.com/item/?p_num=1234567&n=PNY"),
+    ("target", "https://www.walmart.com/ip/x/15949610846", None),  # another store's URL
+    ("target", "https://www.target.com/p/x/-/A-94693225.jpg", None),  # asset
+    ("target", "https://www.target.com/cart", None),
+])
+def test_normalize_candidate_per_retailer(key, url, expected):
+    assert probe.normalize_candidate(url, key) == expected
+
+
+def test_every_registry_store_has_a_pattern_and_samples_match_it():
+    keys = {r.key for r in registry.RETAILERS}
+    assert len(keys) == 59
+    assert keys - set(probe.PRODUCT_PATTERNS) - set(probe.DISCOVER_SKIP) == set(), "stores without a product pattern"
+    assert set(probe.PRODUCT_PATTERNS) - keys == set()
+    assert set(probe.DISCOVER_SKIP) == {"ebay", "stockx"}
+    # a store the table does not know falls back to generic heuristics
+    assert probe.product_pattern("nope-store").search("/products/thing") and probe.product_pattern("x").search("/p/abc")
+    for key, entries in probe.load_sites(probe.DEFAULT_SITES).items():
+        if key in probe.DISCOVER_SKIP:
+            continue
+        for e in entries:
+            assert probe.normalize_candidate(e["url"], key), f"{key}: sample {e['url']} does not match its own pattern"
+
+
+def test_select_candidates_prefers_recent_and_is_deterministic():
+    pool = [(f"https://s.test/p/{i}", f"2026-01-{i:02d}") for i in range(1, 20)] + [("https://s.test/p/x", None)]
+    got = probe.select_candidates(pool, 3, "k")
+    assert len(got) == 3 and "https://s.test/p/x" not in got
+    assert all(int(u.rsplit("/", 1)[1]) >= 8 for u in got)  # only from the recent 12
+    assert got == probe.select_candidates(pool, 3, "k")
+    assert probe.select_candidates([("https://s.test/p/a", None)] * 3, 5) == ["https://s.test/p/a"]
+
+
+def _run(coro):
+    return asyncio.run(coro)
+
+
+def test_collect_from_sitemaps_follows_index_gz_and_prefers_product_sitemaps():
+    base = "https://www.target.com"
+    prod = "https://www.target.com/sitemap-products-1.xml.gz"
+    blog = "https://www.target.com/sitemap-blog.xml"
+    net = FakeNet({
+        f"{base}/robots.txt": f"User-agent: *\nSitemap: {blog}\nSitemap: {base}/sitemap_index.xml\n",
+        f"{base}/sitemap_index.xml": _index(blog, prod),
+        blog: _urlset(f"{base}/blog/post-1"),
+        prod: gzip.compress(_urlset(f"{base}/p/a/-/A-11111111", f"{base}/p/b/-/A-22222222", f"{base}/c/games/-/N-1",
+                                    lastmods=["2026-09-01", "2026-09-02", "2026-09-03"]).encode()),
+    })
+    pool, notes = {}, []
+    n = _run(probe.collect_from_sitemaps(net, probe.Budget(), base, "target", pool, notes))
+    assert n == 2 and pool == {f"{base}/p/a/-/A-11111111": "2026-09-01", f"{base}/p/b/-/A-22222222": "2026-09-02"}
+    assert net.gets.index(prod) < net.gets.index(blog) or blog not in net.gets  # product sitemap first
+    assert net.gets[0] == f"{base}/robots.txt"
+
+
+def test_collect_from_sitemaps_tries_default_locations_and_respects_budget():
+    base = "https://www.lego.com"
+    net = FakeNet({f"{base}/sitemap.xml": _urlset(*[f"{base}/en-us/product/set-{75190 + i}" for i in range(5)])})
+    pool, notes = {}, []
+    assert _run(probe.collect_from_sitemaps(net, probe.Budget(), base, "lego", pool, notes)) == 5
+    assert net.gets[:2] == [f"{base}/robots.txt", f"{base}/sitemap.xml"]
+    # nothing reachable: says so, and the request budget is honoured
+    net2, notes2 = FakeNet(), []
+    b = probe.Budget(max_requests=2)
+    assert _run(probe.collect_from_sitemaps(net2, b, base, "lego", {}, notes2)) == 0
+    assert len(net2.gets) == 2 and b.requests == 2 and notes2
+    # byte cap: a big first file stops further requests
+    big = FakeNet({f"{base}/robots.txt": f"Sitemap: {base}/a.xml\nSitemap: {base}/b.xml\n",
+                   f"{base}/a.xml": _urlset(f"{base}/en-us/product/x-11111"), f"{base}/b.xml": _urlset(f"{base}/en-us/product/y-22222")})
+    _run(probe.collect_from_sitemaps(big, probe.Budget(max_bytes=10), base, "lego", {}, []))
+    assert len(big.gets) == 1
+
+
+def test_collect_from_shopify_and_homepage_fallback():
+    base = "https://shop.jazwares.com"
+    net = FakeNet({f"{base}/products.json?limit=60": json.dumps(
+        {"products": [{"handle": "squish-a", "updated_at": "2026-09-01"}, {"handle": "squish-b"}]})})
+    pool = {}
+    assert _run(probe.collect_from_shopify(net, probe.Budget(), base, "jazwares", pool)) == 2
+    assert pool[f"{base}/products/squish-a"] == "2026-09-01"
+    # homepage: <a href>, relative links, embedded JSON paths, off-site and non-product links ignored
+    home = ('<a href="/products/one?variant=9">1</a><a href="https://evil.test/products/x">x</a>'
+            '<a href="/collections/all">c</a><script>{"u":"\\/products\\/two-thing"}</script>')
+    net2, notes, pool2 = FakeNet(pages={f"{base}/": home}), [], {}
+    assert _run(probe.collect_from_pages(net2, probe.Budget(), base, "jazwares", pool2, notes)) == 2
+    assert set(pool2) == {f"{base}/products/one", f"{base}/products/two-thing"}
+    # no products on the homepage: opens a listing page it links to
+    net3 = FakeNet(pages={f"{base}/": '<a href="/collections/all">all</a>', f"{base}/collections/all": '<a href="/products/deep">d</a>'})
+    pool3 = {}
+    assert _run(probe.collect_from_pages(net3, probe.Budget(), base, "jazwares", pool3, [])) == 1
+    assert net3.paged == [f"{base}/", f"{base}/collections/all"]
+    # unreachable homepage: a note, no crash
+    notes4 = []
+    assert _run(probe.collect_from_pages(FakeNet(), probe.Budget(), base, "jazwares", {}, notes4)) == 0 and notes4
+
+
+def _summary(status, verdict="OK"):
+    return {"status": status, "verdict": verdict, "price": "$1", "verdict_reason": verdict}
+
+
+def test_choose_verified_prefers_definite_and_mixes_stock():
+    v = [("u1", _summary("error", "FAIL")), ("u2", _summary("in_stock")), ("u3", _summary("in_stock")),
+         ("u4", _summary("unknown", "BLOCKED")), ("u5", _summary("out_of_stock"))]
+    assert [c["url"] for c in probe.choose_verified(v, 2)] == ["u2", "u5"]
+    assert [c["url"] for c in probe.choose_verified(v, 3)] == ["u2", "u5", "u3"]
+    assert [c["url"] for c in probe.choose_verified(v, 1)] == ["u2"]
+    only_out = [("a", _summary("out_of_stock")), ("b", _summary("out_of_stock"))]
+    assert [c["url"] for c in probe.choose_verified(only_out, 2)] == ["a", "b"]
+    # nothing definite: BLOCKED / QUEUE stand in (flagged); FAIL never does
+    soft = [("f", _summary("error", "FAIL")), ("b", _summary("error", "BLOCKED")), ("q", _summary("unknown", "QUEUE"))]
+    got = probe.choose_verified(soft, 2)
+    assert [(c["url"], c["definite"]) for c in got] == [("b", False), ("q", False)]
+    assert probe.choose_verified([("f", _summary("error", "FAIL"))], 2) == []
+
+
+@pytest.fixture
+def fake_checks(monkeypatch):
+    """checkers.run_check replaced: the answer depends on the product id in the URL."""
+    calls = []
+
+    async def fake_run_check(kind, url, generic_config, apple_config, retailer_config=None):
+        calls.append((url, retailer_config))
+        pid = int(url.rsplit("A-", 1)[1]) if "A-" in url else 0
+        if pid % 10 == 0:
+            return CheckResult(status="error", status_text="Check failed", error="HTTP 404 from www.target.com")
+        if pid % 10 == 1:
+            return CheckResult(status="in_stock", status_text="In stock", price="$10")
+        if pid % 10 == 2:
+            return CheckResult(status="out_of_stock", status_text="Out of stock")
+        return CheckResult(status="unknown", status_text="Unknown")
+
+    monkeypatch.setattr(checkers, "run_check", fake_run_check)
+    return calls
+
+
+def _target_net(ids):
+    base = "https://www.target.com"
+    return FakeNet({f"{base}/robots.txt": f"Sitemap: {base}/sitemap-products.xml\n",
+                    f"{base}/sitemap-products.xml": _urlset(*[f"{base}/p/thing/-/A-{i}" for i in ids])})
+
+
+def test_discover_store_verifies_and_prefers_definite_answers(fake_checks):
+    target = registry.retailer_by_key("target")
+    ids = [10000010, 10000020, 10000031, 10000043, 10000052]  # dead x2, in, unknown, out
+    res = _run(probe.discover_store(target, [{"url": "https://www.target.com/p/x/-/A-94693225"}], _target_net(ids),
+                                    per_store=2, max_tries=8, base_config={"zip": "60601"}))
+    assert res.source == "sitemap" and res.found == 5 and 0 < res.tried <= 5
+    assert len(res.chosen) == 2 and all(c["definite"] for c in res.chosen)
+    assert {c["status"] for c in res.chosen} == {"in_stock", "out_of_stock"}
+    assert all(rc == {"zip": "60601"} for _, rc in fake_checks)  # base config reaches the check
+    assert res.tried == len(fake_checks)
+
+
+def test_discover_store_all_dead_and_skipped_and_homepage_fallback(fake_checks):
+    target = registry.retailer_by_key("target")
+    res = _run(probe.discover_store(target, None, _target_net([10000010, 10000020, 10000030]), per_store=2))
+    assert res.chosen == [] and res.notes and res.tried == 3
+    assert _run(probe.discover_store(registry.retailer_by_key("ebay"), None, FakeNet())).skipped
+    assert _run(probe.discover_store(registry.retailer_by_key("stockx"), None, FakeNet())).skipped
+    # no sitemap at all: falls back to the homepage
+    home = FakeNet(pages={"https://www.target.com/": '<a href="/p/x/-/A-10000051">x</a><a href="/p/y/-/A-10000062">y</a>'})
+    res = _run(probe.discover_store(target, None, home, per_store=2))
+    assert res.source == "homepage" and len(res.chosen) == 2
+
+
+def test_discover_store_time_cap_and_crashing_check():
+    target = registry.retailer_by_key("target")
+
+    async def slow(url, rc):
+        await asyncio.sleep(60)
+
+    async def boom(url, rc):
+        raise RuntimeError("kaput")
+
+    net = _target_net([10000011, 10000021])
+    res = _run(probe.discover_store(target, None, net, time_cap=0.05, check=slow, min_check_time=0.05))
+    assert res.chosen == []  # nothing verified in time, and it returned promptly
+    res = _run(probe.discover_store(target, None, _target_net([10000011]), check=boom))
+    assert res.chosen == [] and res.tried == 1
+
+
+def test_discover_all_runs_two_stores_at_a_time(monkeypatch):
+    active, peak = [0], [0]
+
+    async def fake_store(retailer, samples, net, **kw):
+        active[0] += 1
+        peak[0] = max(peak[0], active[0])
+        await asyncio.sleep(0.02)
+        active[0] -= 1
+        return probe.StoreResult(key=retailer.key, name=retailer.name)
+
+    monkeypatch.setattr(probe, "discover_store", fake_store)
+    got = []
+    res = _run(probe.discover_all(["target", "walmart", "lego", "newegg", "bestbuy"], {"sites": {}}, net=FakeNet(),
+                                  on_result=got.append))
+    assert peak[0] == 2 and [r.key for r in res] == ["target", "walmart", "lego", "newegg", "bestbuy"] and len(got) == 5
+    with pytest.raises(probe.ProbeError):
+        _run(probe.discover_all(["nope"], {}, net=FakeNet()))
+
+
+SITES_DOC = {
+    "_README": "SAMPLE product URLs ... keep me",
+    "sites": {
+        "target": ["https://www.target.com/p/dead/-/A-1",
+                   {"url": "https://www.target.com/p/dead2/-/A-2",
+                    "retailer_config": {"fulfillment": "pickup", "zip": "60601", "radius_miles": 25}, "note": "store pickup near ZIP"}],
+        "bestbuy": [{"url": "https://www.bestbuy.com/site/x/1.p?skuId=1", "retailer_config": {"fulfillment": "delivery"}, "note": "n"},
+                    "https://www.bestbuy.com/site/y/2.p?skuId=2"],
+        "walmart": ["https://www.walmart.com/ip/dead/123456"],
+        "ebay": ["https://www.ebay.com/itm/387123456789"],
+        "stockx": ["https://stockx.com/nintendo-switch-2-console-us-version"],
+    },
+}
+
+
+def _chosen(*urls):
+    return [{"url": u, "status": "in_stock", "verdict": "OK", "price": None, "definite": True, "reason": ""} for u in urls]
+
+
+def test_merge_sites_preserves_config_comments_and_skipped_stores():
+    results = [
+        probe.StoreResult(key="target", chosen=_chosen("https://www.target.com/p/a/-/A-11111111", "https://www.target.com/p/b/-/A-22222222")),
+        probe.StoreResult(key="bestbuy", chosen=_chosen("https://www.bestbuy.com/site/n/9.p?skuId=9")),
+        probe.StoreResult(key="walmart", notes=["nothing found"]),  # nothing found: keeps the old sample
+        probe.StoreResult(key="ebay", skipped="expire"),
+        probe.StoreResult(key="stockx", skipped="walled"),
+    ]
+    out = probe.merge_sites(SITES_DOC, results, when=__import__("datetime").date(2026, 9, 29))
+    assert out["_README"] == SITES_DOC["_README"] and out["_comment"].startswith("Discovered 2026-09-29")
+    s = out["sites"]
+    assert s["target"] == [
+        {"url": "https://www.target.com/p/a/-/A-11111111",
+         "retailer_config": {"fulfillment": "pickup", "zip": "60601", "radius_miles": 25}, "note": "store pickup near ZIP"},
+        "https://www.target.com/p/b/-/A-22222222"]
+    assert s["bestbuy"] == [{"url": "https://www.bestbuy.com/site/n/9.p?skuId=9",
+                             "retailer_config": {"fulfillment": "delivery"}, "note": "n"}]
+    assert s["walmart"] == SITES_DOC["sites"]["walmart"]
+    assert s["ebay"] == SITES_DOC["sites"]["ebay"] and s["stockx"] == SITES_DOC["sites"]["stockx"]
+    assert SITES_DOC["sites"]["target"][0] == "https://www.target.com/p/dead/-/A-1"  # input untouched
+    # more config entries than discovered URLs: the config still survives
+    two_cfg = {"sites": {"microcenter": [{"url": "https://www.microcenter.com/product/1/a", "retailer_config": {"store_id": "151"}},
+                                         {"url": "https://www.microcenter.com/product/2/b", "retailer_config": {"store_id": "045"}}]}}
+    m = probe.merge_sites(two_cfg, [probe.StoreResult(key="microcenter", chosen=_chosen("https://www.microcenter.com/product/9/z"))])
+    assert [e["retailer_config"]["store_id"] for e in m["sites"]["microcenter"]] == ["151", "045"]
+
+
+def test_dump_sites_round_trips_and_is_loadable(tmp_path):
+    out = probe.merge_sites(SITES_DOC, [probe.StoreResult(key="target", chosen=_chosen("https://www.target.com/p/a/-/A-11111111"))])
+    text = probe.dump_sites(out)
+    assert json.loads(text) == out
+    p = tmp_path / "sites.json"
+    p.write_text(text, encoding="utf-8")
+    loaded = probe.load_sites(p)
+    assert loaded["target"][0]["retailer_config"]["zip"] == "60601" and "_comment" not in loaded
+
+
+def _patch_live(monkeypatch, net):
+    monkeypatch.setattr(probe, "LiveNet", lambda *a, **k: net)
+
+    async def no_shutdown():
+        pass
+
+    monkeypatch.setattr(probe, "_shutdown_backend", no_shutdown)
+
+
+def test_cli_discover_writes_discovered_json_or_sites_in_place(tmp_path, clean_browser_env, fake_checks, capsys):
+    _patch_live(clean_browser_env, _target_net([10000031, 10000042]))
+    sites = tmp_path / "sites.json"
+    sites.write_text(json.dumps(SITES_DOC), encoding="utf-8")
+    out = tmp_path / "out"
+    assert probe.main(["discover", "--only", "target", "--sites", str(sites), "--out", str(out)]) == 0
+    assert json.loads(sites.read_text()) == SITES_DOC  # not touched without --write
+    disc = json.loads((out / "discovered.json").read_text())
+    assert [e if isinstance(e, str) else e["url"] for e in disc["sites"]["target"]] == [
+        "https://www.target.com/p/thing/-/A-10000031", "https://www.target.com/p/thing/-/A-10000042"]
+    assert "target" in capsys.readouterr().out
+    assert probe.main(["discover", "--only", "target", "--sites", str(sites), "--out", str(out), "--write"]) == 0
+    written = json.loads(sites.read_text())
+    assert written["_README"] == SITES_DOC["_README"] and written["_comment"]
+    assert written["sites"]["target"][0]["retailer_config"]["fulfillment"] == "pickup"
+    assert written["sites"]["ebay"] == SITES_DOC["sites"]["ebay"] and written["sites"]["walmart"] == SITES_DOC["sites"]["walmart"]
+
+
+def test_cli_sweep_discover_checks_the_discovered_urls(tmp_path, clean_browser_env, fake_checks, capsys):
+    _patch_live(clean_browser_env, _target_net([10000031, 10000042]))
+    sites = tmp_path / "sites.json"
+    sites.write_text(json.dumps(SITES_DOC), encoding="utf-8")
+    out = tmp_path / "out"
+    assert probe.main(["sweep", "--discover", "--only", "target", "--sites", str(sites), "--out", str(out)]) == 0
+    assert json.loads(sites.read_text()) == SITES_DOC  # sites.json untouched
+    assert (out / "discovered.json").is_file()
+    report = json.loads((out / "report.json").read_text())
+    urls = {r["url"] for r in report["results"]}
+    assert urls == {"https://www.target.com/p/thing/-/A-10000031", "https://www.target.com/p/thing/-/A-10000042"}
+    # the sweep ran with the pickup config carried over to the first discovered URL
+    assert any(rc and rc.get("fulfillment") == "pickup" for _, rc in fake_checks)
+    assert "OK" in capsys.readouterr().out
+
+
+def test_livenet_plain_first_then_browser_and_soft_404(monkeypatch):
+    calls = []
+
+    def resp(status, body, url="https://s.test/x"):
+        return httpx.Response(status, content=body, request=httpx.Request("GET", url))
+
+    async def fake_http_get(url, **kw):
+        calls.append(("http", url))
+        if "robots" in url:
+            return resp(200, b"User-agent: *\nSitemap: https://s.test/sm.xml\n")
+        if url.endswith("soft.xml"):
+            return resp(200, b"<!doctype html><html><body>Not found</body></html>")
+        if url.endswith("missing.xml"):
+            return resp(404, b"")
+        return resp(403, b"Access Denied")
+
+    async def fake_browser(page_url, target_url, accept="application/json"):
+        calls.append(("browser", page_url, target_url))
+        return 200, "<urlset><url><loc>https://s.test/p/1</loc></url></urlset>", []
+
+    monkeypatch.setattr(fetcher, "http_get", fake_http_get)
+    monkeypatch.setattr(fetcher, "browser_fetch_from_page", fake_browser)
+    monkeypatch.setattr(fetcher, "browser_enabled", lambda: True)
+    net = probe.LiveNet(gap=0)
+    assert _run(net.get("https://s.test/robots.txt"))[0] == 200
+    assert _run(net.get("https://s.test/soft.xml")) == (404, b"")
+    assert _run(net.get("https://s.test/missing.xml")) == (404, b"")
+    status, body = _run(net.get("https://s.test/blocked.xml"))  # 403 -> the real browser, from the store's origin
+    assert status == 200 and b"<loc>https://s.test/p/1</loc>" in body
+    assert ("browser", "https://s.test/", "https://s.test/blocked.xml") in calls
+    n = len(calls)
+    _run(net.get("https://s.test/again.xml"))  # the host is known to need the browser: no plain attempt
+    assert calls[n][0] == "browser"

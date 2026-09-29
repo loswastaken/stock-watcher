@@ -1,5 +1,5 @@
 {
-  "_README": "SAMPLE product URLs, one or more per supported store (keys match backend/app/checkers/retailers/registry.py). They were written without live access to the sites, so some will be stale, delisted or redirect: replace any that 404 or point at the wrong product with a current product page you care about (a mix of in-stock and sold-out items is ideal). Each entry is either a URL string or {\"url\": ..., \"retailer_config\": {...}, \"note\": ...}; retailer_config accepts fulfillment (delivery|pickup|any), zip, radius_miles, store_id, official_only, condition.",
+  "_README": "SAMPLE product URLs, one or more per supported store (keys match backend/app/checkers/retailers/registry.py). They were written without live access to the sites, so some will be stale, delisted or redirect: run `./run.sh discover --write` to refresh them with current product URLs, or replace any that 404 or point at the wrong product with a current product page you care about (a mix of in-stock and sold-out items is ideal). Each entry is either a URL string or {\"url\": ..., \"retailer_config\": {...}, \"note\": ...}; retailer_config accepts fulfillment (delivery|pickup|any), zip, radius_miles, store_id, official_only, condition.",
   "sites": {
     "amd": [
       "https://www.amd.com/en/direct-buy/5335621300/us",

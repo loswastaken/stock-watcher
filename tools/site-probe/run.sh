@@ -2,6 +2,7 @@
 # Stock Watcher site probe launcher (macOS / Linux).
 # First run: creates .venv here, installs the backend's requirements and patchright's Chromium.
 # Then forwards every argument to probe.py, e.g.  ./run.sh serve   ./run.sh sweep --only target
+#   ./run.sh discover --write   (find current product URLs, update sites.json)   ./run.sh sweep --discover
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

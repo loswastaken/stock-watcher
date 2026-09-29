@@ -4,7 +4,8 @@ own computer and save everything they fetched, so the maintainers can see what e
 really returns.
 
     python probe.py check URL [URL ...] [--zip 60601 --fulfillment pickup ...]
-    python probe.py sweep [--only target,bestbuy] [--sites sites.json]
+    python probe.py sweep [--only target,bestbuy] [--sites sites.json] [--discover]
+    python probe.py discover [--only target,bestbuy] [--per-store 2] [--write]
     python probe.py bundle
     python probe.py serve [--port 8765]
     python probe.py fixture <bundle-dir|zip> --name target_in_stock
@@ -32,9 +33,10 @@ import time
 import uuid
 import zipfile
 import zlib
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
 HERE = Path(__file__).resolve().parent
 BACKEND = Path(os.environ.get("STOCK_WATCHER_BACKEND") or HERE.parent.parent / "backend").resolve()
@@ -533,6 +535,11 @@ def load_sites(path: Path = DEFAULT_SITES) -> dict[str, list[dict]]:
         raise ProbeError(f"sites file not found: {path}") from e
     except json.JSONDecodeError as e:
         raise ProbeError(f"{path} is not valid JSON: {e}") from e
+    return load_sites_data(data)
+
+
+def load_sites_data(data: Any) -> dict[str, list[dict]]:
+    """``load_sites`` for an already-parsed sites document."""
     sites = data.get("sites", data) if isinstance(data, dict) else {}
     out: dict[str, list[dict]] = {}
     for key, items in sites.items():
@@ -1066,6 +1073,752 @@ def start_server(port: int = 8765, out_root: Path = DEFAULT_OUT, sites_path: Pat
     return httpd, probe
 
 
+# --------------------------------------------------------------------------- discover
+#
+# Finds real, current product URLs for each store so sites.json does not rot: sitemaps first
+# (robots.txt -> Sitemap: lines, /sitemap.xml, /sitemap_index.xml, indexes followed, .xml.gz),
+# Shopify's /products.json, then the store's homepage in the real browser; candidates are
+# filtered with a per-store product-URL pattern and verified with the real checker.
+
+DISCOVER_SKIP = {
+    "ebay": "listings expire, so a discovered listing would be dead by the next sweep; keeping the sample",
+    "stockx": "resale product pages are bot-walled and have no public sitemap; keeping the sample",
+}
+DEFAULT_PER_STORE = 2
+DEFAULT_MAX_TRIES = 6
+DEFAULT_STORE_TIMEOUT = 90.0
+DEFAULT_DISCOVER_CONCURRENCY = 2
+DEFAULT_REQUEST_GAP = 0.75  # seconds between our own requests to one host
+MAX_SITEMAP_REQUESTS = 14  # per store (robots.txt included)
+MAX_SITEMAP_BYTES = 24 * 1024 * 1024  # per store, as downloaded
+MAX_SITEMAP_TEXT = 40 * 1024 * 1024  # one file, after gunzip
+MAX_LEAF_SITEMAPS = 5
+MAX_SITEMAP_DEPTH = 3
+POOL_TARGET = 80  # stop reading sitemaps once this many matching URLs are known
+
+# Product-page URL patterns per registry key (regexes, case-insensitive, searched in the URL's
+# "/path" and, when that does not match, in "/path?query"). Only URLs on the store's own hosts
+# are considered. Keys missing here fall back to GENERIC_PRODUCT_PATTERN.
+_SHOPIFY = r"/products/[^/?#]+"
+PRODUCT_PATTERNS: dict[str, str] = {
+    "amd": r"/direct-buy/\d+/us|/products/[^?#]+\.html$",
+    "asus": r"/us/[^/?#]+\.html$",
+    "acegraphics": _SHOPIFY,
+    "adorama": r"^/[A-Za-z0-9]{4,}\.html$",
+    "amazon": r"/dp/[A-Z0-9]{10}|/gp/product/[A-Z0-9]{10}",
+    "antonline": r"^/[^/]+/.+/\d{5,}/?$",
+    "bhphoto": r"/c/product/\d+-REG/",
+    "bjs": r"/product/[^/?#]+/\d{8,}",
+    "bandai": r"/item/[A-Z]?\d{6,}[A-Z0-9]*",
+    "bestbuy": r"/site/.+\.p\?skuId=\d+|/product/.+/sku/\d+",
+    "canon": r"/shop/p/[^/?#]+",
+    "consutronix": _SHOPIFY,
+    "costco": r"\.product\.\d+\.html|/p/-/",
+    "dell": r"/(?:spd|apd)/[^/?#]+",
+    "disney": r"-\d{8,}\.html$",
+    "evga": r"/products/product\.aspx\?pn=[\w-]+",
+    "fujifilm": r"^/[a-z0-9]+(?:-[a-z0-9]+){1,}/?$",
+    "gamefly": r"/(?:game|product|gear)/[^/?#]+/\d+",
+    "gamestop": r"/products/.+/\d+\.html",
+    "gigabyte": r"/(?:Graphics-Card|Motherboard|Laptop|Monitor|Gaming-PCs?|Mini-PcBarebone)/(?=[^/?#]*\d)[A-Za-z0-9][\w.-]*/?$",
+    "govee": _SHOPIFY,
+    "hallmark": r"-[0-9A-Z]{6,}\.html$",
+    "homedepot": r"/p/.+/\d{9}",
+    "jazwares": _SHOPIFY,
+    "kohls": r"/product/prd-\d+/",
+    "kroger": r"/p/[^/?#]+/\d{10,}",
+    "lg": r"^/us/[a-z0-9-]+/[a-z0-9]+-[a-z0-9-]*\d[a-z0-9-]*/?$",
+    "lego": r"/product/[^/?#]+-\d{4,}",
+    "leica": r"/en-US/(?:photography|sport-optics|observation)/[^?#]+/[^/?#]+$",
+    "lenovo": r"/p/[^?#]+/[0-9a-z]{8,}",
+    "msi": r"^/[^/]+/[^/]+/.*[^/?#]*\d[^/?#]*/?$",
+    "mattel": _SHOPIFY,
+    "meijer": r"/shopping/product/[^/?#]+/\d+",
+    "microcenter": r"/product/\d+/",
+    "microsoft": r"/d/[^/?#]+/[A-Za-z0-9]{12}",
+    "xbox": r"/configure/[A-Z0-9]{12}|/games/store/[^/?#]+/[A-Z0-9]{12}",
+    "nyxi": _SHOPIFY,
+    "neutronusa": _SHOPIFY,
+    "newegg": r"/p/(?:N82E\d+|[0-9A-Z]{4}-[0-9A-Z]{4}-[0-9A-Z]{4,5}|[0-9A-Z]{15})",
+    "nextwarehouse": r"/item/\?(?:[^#]*&)?p_num=\d+",
+    "ninja": r"/pdp/[^/?#]+/[^/?#]+\.html",
+    "nintendo": r"/us/store/products/[^/?#]+",
+    "nvidia": r"/graphics-cards/(?:[a-z0-9-]+/)*[a-z0-9-]*(?:rtx|gtx)-?\d{3,4}[a-z0-9-]*/?$",
+    "oculus": r"/quest/[a-z0-9-]+(?:/[a-z0-9-]+)?/?$",
+    "officedepot": r"/a/products/\d+/",
+    "popmart": r"/products/\d+/",
+    "playasia": r"^/[^/?#]+/\d+/[0-9a-z]{6,}/?$",
+    "psdirect": r"/buy-[a-z-]+/[^/?#]+\.\d{7,}",
+    "pokemoncenter": r"/product/[\d-]+/[^/?#]+",
+    "qvc": r"\.product\.[A-Z]?\d+\.html",
+    "robertscamera": r"^/[a-z0-9]+(?:-[a-z0-9]+){3,}/?$",
+    "samsclub": r"/ip/(?:.+/)?\d{6,}",
+    "target": r"/p/.+/-/A-\d+",
+    "toysrus": _SHOPIFY,
+    "verizon": r"/(?:smartphones|tablets|smartwatches|connected-devices|accessories|home-internet)/[^/?#]+/?$",
+    "walmart": r"/ip/(?:.+/)?\d{6,}",
+    "zotac": r"/us/[a-z0-9]+(?:-[a-z0-9]+){2,}/?$",
+}
+GENERIC_PRODUCT_PATTERN = (
+    r"/products?/[^/?#]+|/p/[^/?#]+|/dp/[^/?#]+|/ip/[^/?#]+|/item/[^/?#]+|/[^/?#]*\d{4,}[^/?#]*\.html$"
+)
+SHOPIFY_KEYS = frozenset(k for k, v in PRODUCT_PATTERNS.items() if v == _SHOPIFY)
+
+_DENY_PATH = re.compile(
+    r"\.(?:jpe?g|png|gif|webp|svg|css|js|json|pdf|xml|gz|zip|ico|mp4|woff2?)$"
+    r"|/(?:cart|checkout|account|login|signin|sign-in|register|wishlist|search|reviews?|gift-cards?)(?:/|$)",
+    re.I,
+)
+_compiled: dict[str, re.Pattern[str]] = {}
+
+
+def product_pattern(key: str) -> re.Pattern[str]:
+    """The compiled product-URL regex for a registry key (generic heuristics for unknown keys)."""
+    pat = _compiled.get(key)
+    if pat is None:
+        pat = _compiled[key] = re.compile(PRODUCT_PATTERNS.get(key) or GENERIC_PRODUCT_PATTERN, re.I)
+    return pat
+
+
+def normalize_candidate(url: str, key: str) -> str | None:
+    """A clean https product URL when ``url`` is a product page of store ``key``, else None.
+    The fragment is dropped; the query only when the pattern needs it (skuId=, pn=, p_num=)."""
+    try:
+        parts = urlsplit((url or "").strip())
+    except ValueError:
+        return None
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        return None
+    _, _, registry = backend()
+    r = registry.match_retailer(url)
+    if r is None or r.key != key:
+        return None
+    path = parts.path or "/"
+    if _DENY_PATH.search(path):
+        return None
+    pat = product_pattern(key)
+    if pat.search(path):
+        query = ""
+    elif parts.query and pat.search(f"{path}?{parts.query}"):
+        query = parts.query
+    else:
+        return None
+    return urlunsplit(("https", parts.netloc, path, query, ""))
+
+
+# ---- robots.txt / sitemaps
+
+_SITEMAP_LINE = re.compile(r"^\s*sitemap\s*:\s*(\S+)", re.I | re.M)
+_LOC = re.compile(r"<(?:\w+:)?loc\b[^>]*>(.*?)</(?:\w+:)?loc>", re.I | re.S)
+_LASTMOD = re.compile(r"<(?:\w+:)?lastmod\b[^>]*>(.*?)</(?:\w+:)?lastmod>", re.I | re.S)
+_ENTRY = re.compile(r"<(?:\w+:)?(url|sitemap)\b[^>]*>(.*?)</(?:\w+:)?\1\s*>", re.I | re.S)
+_INDEX_TAG = re.compile(r"<\s*(?:\w+:)?sitemapindex\b", re.I)
+
+
+def parse_robots_sitemaps(text: str, base: str = "") -> list[str]:
+    """The ``Sitemap:`` URLs listed in a robots.txt (relative ones resolved against ``base``)."""
+    out: list[str] = []
+    for m in _SITEMAP_LINE.finditer(text or ""):
+        u = urljoin(base, m.group(1).strip()) if base else m.group(1).strip()
+        if u.startswith(("http://", "https://")) and u not in out:
+            out.append(u)
+    return out
+
+
+def gunzip_limited(data: bytes, limit: int = MAX_SITEMAP_TEXT) -> bytes:
+    """Decompress gzip data (up to ``limit`` bytes out); b"" when it is not valid gzip."""
+    try:
+        return zlib.decompressobj(16 + zlib.MAX_WBITS).decompress(data, limit)
+    except zlib.error:
+        return b""
+
+
+@dataclasses.dataclass
+class Sitemap:
+    kind: str  # "index" (lists other sitemaps) or "urlset"
+    entries: list[tuple[str, str | None]]  # (loc, lastmod)
+
+
+def parse_sitemap(data: bytes | str) -> Sitemap:
+    """Parse a sitemap or sitemap index (plain, gzipped, or a plain-text URL list)."""
+    import html as _html
+
+    if isinstance(data, (bytes, bytearray)):
+        raw = bytes(data)
+        if raw[:2] == b"\x1f\x8b":
+            raw = gunzip_limited(raw)
+        text = raw.decode("utf-8", "replace")
+    else:
+        text = data
+    kind = "index" if _INDEX_TAG.search(text) else "urlset"
+
+    def clean(s: str) -> str:
+        s = s.strip()
+        if s.startswith("<![CDATA["):
+            s = s[9:].rsplit("]]>", 1)[0]
+        return _html.unescape(s.strip())
+
+    entries: list[tuple[str, str | None]] = []
+    for m in _ENTRY.finditer(text):
+        loc = _LOC.search(m.group(2))
+        if not loc:
+            continue
+        lm = _LASTMOD.search(m.group(2))
+        entries.append((clean(loc.group(1)), clean(lm.group(1)) if lm else None))
+    if not entries:
+        entries = [(clean(m.group(1)), None) for m in _LOC.finditer(text)]
+    if not entries and "<" not in text[:200]:  # plain-text sitemap
+        entries = [(ln.strip(), None) for ln in text.splitlines() if ln.strip().startswith(("http://", "https://"))]
+    return Sitemap(kind, [e for e in entries if e[0].startswith(("http://", "https://"))])
+
+
+_SM_GOOD = re.compile(r"product|/pdp|pdps|item|sku|goods|listing|/p[-_.]", re.I)
+_SM_BAD = re.compile(r"blog|article|news|page|categor|collection|image|video|brand|store|location|cms|content|"
+                     r"help|support|review|faq|tag|manufactur|landing|media|forum", re.I)
+_SM_US = re.compile(r"en[-_]us|[-_/]us[-_./]", re.I)
+_SM_OTHER_LOCALE = re.compile(r"[-_/](?:fr|de|es|it|ja|ko|zh|pt|nl|sv|da|nb|fi|pl|tr)[-_./]|[-_](?:ca|uk|gb|au|in|mx|br|jp)\b", re.I)
+
+
+def sitemap_rank(url: str) -> int:
+    """Higher = read first: product-looking names and US locales win; blog/category/image sitemaps lose."""
+    name = urlsplit(url).path
+    score = 0
+    if _SM_GOOD.search(name):
+        score += 3
+    if _SM_BAD.search(name):
+        score -= 2
+    if _SM_US.search(name):
+        score += 1
+    if _SM_OTHER_LOCALE.search(name):
+        score -= 1
+    return score
+
+
+@dataclasses.dataclass
+class Budget:
+    """Caps the requests and bytes one store's discovery may spend."""
+    max_requests: int = MAX_SITEMAP_REQUESTS
+    max_bytes: int = MAX_SITEMAP_BYTES
+    requests: int = 0
+    bytes: int = 0
+
+    @property
+    def left(self) -> bool:
+        return self.requests < self.max_requests and self.bytes < self.max_bytes
+
+
+async def budgeted_get(net: Any, budget: Budget, url: str) -> tuple[int | None, bytes]:
+    """``net.get`` that counts against the budget and never raises; (None, b"") when over budget."""
+    if not budget.left:
+        return None, b""
+    budget.requests += 1
+    try:
+        status, body = await net.get(url)
+    except Exception:  # noqa: BLE001 - one bad request must not end discovery
+        return None, b""
+    body = body or b""
+    budget.bytes += len(body)
+    return status, body
+
+
+async def collect_from_sitemaps(net: Any, budget: Budget, base: str, key: str, pool: dict[str, str | None],
+                                notes: list[str], *, want: int = POOL_TARGET, max_leaves: int = MAX_LEAF_SITEMAPS) -> int:
+    """Read ``base``'s sitemaps and add matching product URLs to ``pool`` ({url: lastmod}).
+    Returns how many were added."""
+    start = len(pool)
+    status, body = await budgeted_get(net, budget, f"{base}/robots.txt")
+    seeds = parse_robots_sitemaps(body.decode("utf-8", "replace"), base) if status == 200 else []
+    for extra in (f"{base}/sitemap.xml", f"{base}/sitemap_index.xml"):
+        if extra not in seeds:
+            seeds.append(extra)
+    queue: list[tuple[str, int]] = [(u, 0) for u in seeds]
+    seen: set[str] = set()
+    leaves = 0
+    missing = 0
+    while queue and budget.left and leaves < max_leaves and len(pool) - start < want:
+        queue.sort(key=lambda it: (-sitemap_rank(it[0]), it[1]))  # stable: robots order kept among equals
+        url, depth = queue.pop(0)
+        if url in seen:
+            continue
+        seen.add(url)
+        status, body = await budgeted_get(net, budget, url)
+        if status != 200 or not body:
+            missing += 1
+            continue
+        sm = parse_sitemap(body)
+        if sm.kind == "index":
+            if depth + 1 <= MAX_SITEMAP_DEPTH:
+                queue.extend((loc, depth + 1) for loc, _ in sm.entries if loc not in seen)
+            continue
+        leaves += 1
+        for loc, lastmod in sm.entries:
+            cand = normalize_candidate(loc, key)
+            if cand and cand not in pool:
+                pool[cand] = lastmod
+                if len(pool) - start >= want:
+                    break
+    if len(pool) == start:
+        notes.append(f"sitemaps: no {key} product URLs ({missing} of {len(seen)} sitemap request(s) failed)"
+                     if seen else "sitemaps: none reachable")
+    return len(pool) - start
+
+
+async def collect_from_shopify(net: Any, budget: Budget, base: str, key: str, pool: dict[str, str | None]) -> int:
+    """Shopify storefronts publish /products.json (real handles + updated_at)."""
+    status, body = await budgeted_get(net, budget, f"{base}/products.json?limit=60")
+    if status != 200 or not body:
+        return 0
+    try:
+        products = json.loads(body.decode("utf-8", "replace")).get("products") or []
+    except (ValueError, AttributeError):
+        return 0
+    added = 0
+    for p in products:
+        handle = p.get("handle") if isinstance(p, dict) else None
+        cand = normalize_candidate(f"{base}/products/{handle}", key) if handle else None
+        if cand and cand not in pool:
+            pool[cand] = p.get("updated_at")
+            added += 1
+    return added
+
+
+# ---- homepage links
+
+class _LinkParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.hrefs: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list) -> None:
+        if tag == "a":
+            for k, v in attrs:
+                if k == "href" and v:
+                    self.hrefs.append(v)
+
+
+_EMBEDDED_PATH = re.compile(r"""["'](/[^"'\s<>\\]{6,240})["']""")
+
+
+def extract_links(html: str, base: str) -> list[str]:
+    """Absolute URLs of every <a href> in ``html`` plus root-relative paths embedded in scripts/JSON."""
+    parser = _LinkParser()
+    with contextlib.suppress(Exception):
+        parser.feed(html or "")
+    hrefs = list(parser.hrefs)
+    hrefs += _EMBEDDED_PATH.findall((html or "").replace("\\/", "/"))
+    out: list[str] = []
+    seen: set[str] = set()
+    for h in hrefs:
+        h = h.strip()
+        if not h or h.startswith(("#", "javascript:", "mailto:", "tel:")):
+            continue
+        u = urljoin(base + "/", h)
+        if u not in seen:
+            seen.add(u)
+            out.append(u)
+    return out
+
+
+_LISTING_HINT = re.compile(
+    r"/(?:collections?|c|category|categories|browse|shop|deals|new|new-arrivals|best-?sellers?|gaming|toys|"
+    r"video-games|electronics|cameras|graphics-cards|consoles|laptops|tvs|products)(?:/|$)", re.I)
+
+
+def pick_listing_links(links: list[str], key: str, limit: int = 2) -> list[str]:
+    """Same-store category/listing pages worth opening when the homepage itself shows no products."""
+    _, _, registry = backend()
+    out: list[str] = []
+    for u in links:
+        try:
+            parts = urlsplit(u)
+        except ValueError:
+            continue
+        r = registry.match_retailer(u)
+        if r is None or r.key != key or parts.query or _DENY_PATH.search(parts.path):
+            continue
+        if _LISTING_HINT.search(parts.path) and not product_pattern(key).search(parts.path):
+            u2 = urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
+            if u2 not in out:
+                out.append(u2)
+        if len(out) >= limit:
+            break
+    return out
+
+
+async def collect_from_pages(net: Any, budget: Budget, base: str, key: str, pool: dict[str, str | None],
+                             notes: list[str]) -> int:
+    """Open the homepage (in the real browser) and collect product links; when it shows none, up to two
+    listing pages linked from it."""
+    start = len(pool)
+
+    async def page(url: str) -> str:
+        if not budget.left:
+            return ""
+        budget.requests += 1
+        try:
+            html = await net.page(url)
+        except Exception as e:  # noqa: BLE001
+            notes.append(f"page {url}: {str(e).splitlines()[0][:120] if str(e) else type(e).__name__}")
+            return ""
+        budget.bytes += len(html or "")
+        return html or ""
+
+    html = await page(f"{base}/")
+    links = extract_links(html, base)
+    for u in links:
+        cand = normalize_candidate(u, key)
+        if cand and cand not in pool:
+            pool[cand] = None
+    if len(pool) == start and links:
+        for listing in pick_listing_links(links, key):
+            for u in extract_links(await page(listing), base):
+                cand = normalize_candidate(u, key)
+                if cand and cand not in pool:
+                    pool[cand] = None
+            if len(pool) > start:
+                break
+    if len(pool) == start:
+        notes.append("homepage: no product links found")
+    return len(pool) - start
+
+
+# ---- candidates, verification, results
+
+def select_candidates(pool: list[tuple[str, str | None]], limit: int, seed: str = "") -> list[str]:
+    """Up to ``limit`` URLs to try: the most recently modified first (a fresh lastmod means the page is live),
+    shuffled among themselves (deterministically) so in- and out-of-stock items both turn up."""
+    import random
+
+    rng = random.Random(seed)
+    seen: set[str] = set()
+    dated: list[tuple[str, str]] = []
+    undated: list[str] = []
+    for url, lastmod in pool:
+        if url in seen:
+            continue
+        seen.add(url)
+        (dated.append((url, lastmod)) if lastmod else undated.append(url))  # type: ignore[arg-type]
+    dated.sort(key=lambda p: p[1], reverse=True)
+    top = [u for u, _ in dated[: max(limit * 4, limit)]]
+    rng.shuffle(top)
+    rng.shuffle(undated)
+    return (top + undated)[:limit]
+
+
+def _definite(s: dict) -> bool:
+    return s.get("verdict") == "OK" and s.get("status") in ("in_stock", "out_of_stock")
+
+
+def choose_verified(verified: list[tuple[str, dict]], per_store: int) -> list[dict]:
+    """Pick the URLs to keep from checked candidates ``[(url, summary)]``.
+
+    Definite answers (in_stock / out_of_stock) win, one of each first when asking for two or more; if
+    nothing was definite, BLOCKED / QUEUE ones (real pages the checker could not read, flagged
+    ``definite: False``) stand in; FAIL ones (404, wrong page, errors) are never kept."""
+    def row(url: str, s: dict, definite: bool) -> dict:
+        return {"url": url, "status": s.get("status"), "verdict": s.get("verdict"), "price": s.get("price"),
+                "definite": definite, "reason": s.get("verdict_reason")}
+
+    good = [(u, s) for u, s in verified if _definite(s)]
+    chosen: list[tuple[str, dict]] = []
+    ins = [p for p in good if p[1].get("status") == "in_stock"]
+    outs = [p for p in good if p[1].get("status") == "out_of_stock"]
+    for group in ((ins, outs) if per_store >= 2 else (ins + outs,)):
+        if group and len(chosen) < per_store:
+            chosen.append(group[0])
+    for p in good:
+        if len(chosen) < per_store and p not in chosen:
+            chosen.append(p)
+    if chosen:
+        return [row(u, s, True) for u, s in chosen]
+    soft = [(u, s) for u, s in verified if s.get("verdict") in ("BLOCKED", "QUEUE")]
+    return [row(u, s, False) for u, s in soft[:per_store]]
+
+
+def _enough(verified: list[tuple[str, dict]], per_store: int) -> bool:
+    good = [s for _, s in verified if _definite(s)]
+    both = {"in_stock", "out_of_stock"} <= {s.get("status") for s in good}
+    return len(good) >= per_store and (per_store < 2 or both or len(verified) >= 4)
+
+
+@dataclasses.dataclass
+class StoreResult:
+    key: str
+    name: str = ""
+    source: str = ""  # sitemap, shopify, homepage (joined with "+") or ""
+    found: int = 0  # matching product URLs discovered
+    tried: int = 0  # candidates checked
+    chosen: list[dict] = dataclasses.field(default_factory=list)
+    notes: list[str] = dataclasses.field(default_factory=list)
+    skipped: str | None = None
+
+
+def store_bases(retailer: Any, samples: list[dict] | None) -> list[str]:
+    """Origins to look for sitemaps on: the hosts of the store's current sample URLs, else its registry host."""
+    bases: list[str] = []
+    for s in samples or []:
+        host = urlsplit(s.get("url") or "").hostname
+        if host and f"https://{host}" not in bases:
+            bases.append(f"https://{host}")
+    if not bases:
+        host = retailer.hosts[0]
+        bases.append(f"https://{'www.' + host if host.count('.') == 1 else host}")
+    return bases[:2]
+
+
+async def verify_url(url: str, retailer_config: dict | None = None) -> dict:
+    """The real check (checkers.run_check through probe_one), no bundle saved."""
+    return await probe_one(url, retailer_config or None, None, preview=False, out_root=None)
+
+
+async def discover_store(retailer: Any, samples: list[dict] | None, net: Any, *, per_store: int = DEFAULT_PER_STORE,
+                         max_tries: int = DEFAULT_MAX_TRIES, time_cap: float = DEFAULT_STORE_TIMEOUT,
+                         check: Callable[[str, dict | None], Any] | None = None, base_config: dict | None = None,
+                         batch: int = 2, min_check_time: float = 10.0,
+                         clock: Callable[[], float] = time.monotonic) -> StoreResult:
+    """Find up to ``per_store`` real, current product URLs for one store (see the section comment)."""
+    key = retailer.key
+    res = StoreResult(key=key, name=retailer.name)
+    if key in DISCOVER_SKIP:
+        res.skipped = DISCOVER_SKIP[key]
+        return res
+    check = check or verify_url
+    t_end = clock() + time_cap
+    budget = Budget()
+    pool: dict[str, str | None] = {}
+    sources: list[str] = []
+
+    async def gather_pool() -> None:
+        bases = store_bases(retailer, samples)
+        for base in bases:
+            if await collect_from_sitemaps(net, budget, base, key, pool, res.notes) and "sitemap" not in sources:
+                sources.append("sitemap")
+        if len(pool) < max_tries and key in SHOPIFY_KEYS:
+            if await collect_from_shopify(net, budget, bases[0], key, pool):
+                sources.append("shopify")
+        if len(pool) < max_tries:
+            if await collect_from_pages(net, budget, bases[0], key, pool, res.notes):
+                sources.append("homepage")
+
+    try:
+        await asyncio.wait_for(gather_pool(), timeout=max(1.0, time_cap * 0.6))
+    except asyncio.TimeoutError:
+        res.notes.append("discovery time cap reached")
+    res.source = "+".join(sources)
+    res.found = len(pool)
+    cands = select_candidates(list(pool.items()), max_tries, key)
+    verified: list[tuple[str, dict]] = []
+
+    async def verify(url: str) -> tuple[str, dict]:
+        try:
+            s = await asyncio.wait_for(check(url, dict(base_config or {})), timeout=max(min_check_time, t_end - clock()))
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            s = {"status": "error", "verdict": "FAIL", "verdict_reason": f"{type(e).__name__}: {e}" if str(e) else "timed out"}
+        return url, s
+
+    for i in range(0, len(cands), max(1, batch)):
+        if i and t_end - clock() < 5:
+            res.notes.append("store time cap reached")
+            break
+        verified += await asyncio.gather(*(verify(u) for u in cands[i:i + max(1, batch)]))
+        if _enough(verified, per_store):
+            break
+    res.tried = len(verified)
+    res.chosen = choose_verified(verified, per_store)
+    if not res.chosen:
+        res.notes.append("no candidate gave a usable answer" if verified else "no candidates to check")
+    return res
+
+
+# ---- the network, as discovery sees it
+
+class LiveNet:
+    """Fetches through the backend's fetcher: plain HTTP first (impersonating Chrome for hosts that need it),
+    the real browser (same persistent profile the checkers use, so bot walls stay passed) when that is blocked."""
+
+    def __init__(self, gap: float = DEFAULT_REQUEST_GAP):
+        self.gap = gap
+        self._last: dict[str, float] = {}
+        self._locks: dict[str, asyncio.Lock] = {}
+        self._browser_hosts: set[str] = set()
+
+    async def _pause(self, url: str) -> None:
+        host = urlsplit(url).hostname or ""
+        lock = self._locks.setdefault(host, asyncio.Lock())
+        async with lock:
+            wait = self._last.get(host, 0.0) + self.gap - time.monotonic()
+            if wait > 0:
+                await asyncio.sleep(wait)
+            self._last[host] = time.monotonic()
+
+    async def get(self, url: str) -> tuple[int | None, bytes]:
+        _, fetcher, _ = backend()
+        host = urlsplit(url).hostname or ""
+        await self._pause(url)
+        resp = None
+        if host not in self._browser_hosts:
+            try:
+                resp = await fetcher.http_get(url, headers={"Accept": "application/xml,text/xml,text/plain,*/*"})
+            except fetcher.FetchError:
+                resp = None
+            if resp is not None:
+                body = resp.content
+                head = body[:60_000].decode("utf-8", "replace")
+                blocked = resp.status_code in (403, 429, 503) or fetcher.looks_like_challenge(head)
+                if resp.status_code in (404, 410):
+                    return resp.status_code, b""
+                if not blocked:
+                    if head.lstrip()[:15].lower().startswith(("<!doctype html", "<html")):
+                        return 404, b""  # an HTML page where XML/text was expected: soft 404
+                    return resp.status_code, (body if resp.status_code < 400 else b"")
+        if fetcher.browser_enabled():
+            self._browser_hosts.add(host)
+            try:
+                status, text, _ = await fetcher.browser_fetch_from_page(
+                    f"https://{host}/", url, accept="application/xml,text/xml,text/plain,*/*")
+            except Exception:  # noqa: BLE001
+                return None, b""
+            return status, text.encode("utf-8", "replace")
+        return (resp.status_code if resp is not None else None), b""
+
+    async def page(self, url: str) -> str:
+        _, fetcher, _ = backend()
+        await self._pause(url)
+        res = await fetcher.fetch_html(url, render_js=fetcher.browser_enabled(), needs=None)
+        return res.text
+
+
+# ---- table, merge and write
+
+def format_discovery(results: list[StoreResult]) -> str:
+    """A table: one row per kept URL (or one row saying why a store has none)."""
+    rows = [("store", "source", "found", "tried", "status", "url")]
+    for r in results:
+        if r.skipped:
+            rows.append((r.key, "skipped", "", "", "", f"({r.skipped})"))
+        elif not r.chosen:
+            rows.append((r.key, r.source or "-", str(r.found), str(r.tried), "none", "; ".join(r.notes) or "nothing found"))
+        else:
+            for i, c in enumerate(r.chosen):
+                status = c["status"] if c["definite"] else f"{c['verdict']}?"
+                rows.append((r.key if i == 0 else "", r.source if i == 0 else "", str(r.found) if i == 0 else "",
+                             str(r.tried) if i == 0 else "", str(status), c["url"]))
+    widths = [max(len(row[i]) for row in rows) for i in range(5)]
+    lines = ["  ".join(c.ljust(widths[i]) for i, c in enumerate(row[:5])) + "  " + row[5] for row in rows]
+    lines.insert(1, "-" * min(100, len(lines[0])))
+    return "\n".join(lines)
+
+
+def _entry_cfg(e: Any) -> dict:
+    return dict(e.get("retailer_config") or {}) if isinstance(e, dict) else {}
+
+
+def merge_sites(raw: dict, results: list[StoreResult], *, when: dt.date | None = None) -> dict:
+    """A new sites document: discovered URLs replace each found store's sample URLs.
+
+    Entries that carry a ``retailer_config`` (Target pickup near a ZIP, Micro Center store 151, Best Buy
+    delivery...) keep that config and their note, moved onto discovered URLs; stores discovery skipped or
+    found nothing for keep their existing entries; every ``_`` key (``_README``...) is preserved and
+    ``_comment`` records the run."""
+    when = when or dt.date.today()
+    doc = dict(raw) if isinstance(raw, dict) else {}
+    sites_in = doc.get("sites") if isinstance(doc.get("sites"), dict) else {k: v for k, v in doc.items() if not k.startswith("_")}
+    sites = dict(sites_in)
+    changed: list[str] = []
+    for r in results:
+        urls = [c["url"] for c in r.chosen]
+        if r.skipped or not urls:
+            continue
+        old = sites.get(r.key) or []
+        old = old if isinstance(old, list) else [old]
+        cfg_entries = [e for e in old if _entry_cfg(e)]
+        new: list[Any] = []
+        for i in range(max(len(urls), len(cfg_entries))):
+            url = urls[i % len(urls)]
+            if i < len(cfg_entries):
+                e = cfg_entries[i]
+                item: dict[str, Any] = {"url": url, "retailer_config": _entry_cfg(e)}
+                if e.get("note"):
+                    item["note"] = e["note"]
+                new.append(item)
+            else:
+                new.append(url)
+        sites[r.key] = new
+        changed.append(r.key)
+    out = {k: v for k, v in doc.items() if k.startswith("_")}
+    out["_comment"] = (f"Discovered {when.isoformat()} by `probe.py discover` for {len(changed)} store(s): real product URLs "
+               f"from sitemaps / the storefront, verified with the real checker (in-stock and sold-out mixed). "
+               f"Stores it skips (ebay, stockx) keep hand-picked samples.")
+    out["sites"] = sites
+    return out
+
+
+def dump_sites(doc: dict) -> str:
+    """JSON like the hand-written sites.json: one store per block, one entry per line."""
+    lines = ["{"]
+    for k, v in doc.items():
+        if k == "sites":
+            continue
+        lines.append(f"  {json.dumps(k)}: {json.dumps(v)},")
+    lines.append('  "sites": {')
+    items = list((doc.get("sites") or {}).items())
+    for si, (key, entries) in enumerate(items):
+        entries = entries if isinstance(entries, list) else [entries]
+        lines.append(f"    {json.dumps(key)}: [")
+        for ei, e in enumerate(entries):
+            lines.append(f"      {json.dumps(e)}" + ("," if ei < len(entries) - 1 else ""))
+        lines.append("    ]" + ("," if si < len(items) - 1 else ""))
+    lines += ["  }", "}"]
+    return "\n".join(lines) + "\n"
+
+
+def read_sites_doc(path: Path) -> dict:
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {"sites": {}}
+    except json.JSONDecodeError as e:
+        raise ProbeError(f"{path} is not valid JSON: {e}") from e
+    return data if isinstance(data, dict) else {"sites": {}}
+
+
+async def discover_all(only: list[str] | None, sites_doc: dict, *, per_store: int = DEFAULT_PER_STORE,
+                       concurrency: int = DEFAULT_DISCOVER_CONCURRENCY, max_tries: int = DEFAULT_MAX_TRIES,
+                       time_cap: float = DEFAULT_STORE_TIMEOUT, base_config: dict | None = None, net: Any = None,
+                       check: Callable[[str, dict | None], Any] | None = None,
+                       on_result: Callable[[StoreResult], None] | None = None) -> list[StoreResult]:
+    """Discover for the chosen registry stores, ``concurrency`` stores at a time."""
+    _, _, registry = backend()
+    known = {r.key: r for r in registry.RETAILERS}
+    if only:
+        unknown = [k for k in only if k not in known]
+        if unknown:
+            raise ProbeError(f"Unknown store(s): {', '.join(unknown)}. Known stores: {', '.join(sorted(known))}")
+    retailers = [known[k] for k in only] if only else list(registry.RETAILERS)
+    samples = load_sites_data(sites_doc)
+    net = net or LiveNet()
+    sem = asyncio.Semaphore(max(1, concurrency))
+    results: list[StoreResult | None] = [None] * len(retailers)
+
+    async def one(i: int, r: Any) -> None:
+        async with sem:
+            try:
+                res = await discover_store(r, samples.get(r.key), net, per_store=per_store, max_tries=max_tries,
+                                           time_cap=time_cap, check=check, base_config=base_config)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001 - one store must not stop the rest
+                res = StoreResult(key=r.key, name=r.name, notes=[f"discovery crashed: {type(e).__name__}: {e}"])
+            results[i] = res
+            if on_result:
+                on_result(res)
+
+    await asyncio.gather(*(one(i, r) for i, r in enumerate(retailers)))
+    return [r for r in results if r is not None]
+
+
 # --------------------------------------------------------------------------- CLI
 
 
@@ -1149,6 +1902,17 @@ def _add_browser_opts(p: argparse.ArgumentParser) -> None:
                    help="use a Chrome you started with --remote-debugging-port, e.g. http://127.0.0.1:9222")
 
 
+def _add_discover_opts(p: argparse.ArgumentParser, with_only: bool = True) -> None:
+    p.add_argument("--per-store", type=int, default=DEFAULT_PER_STORE, metavar="N",
+                   help=f"product URLs to keep per store (default {DEFAULT_PER_STORE}: one in stock, one sold out when possible)")
+    p.add_argument("--max-tries", type=int, default=DEFAULT_MAX_TRIES, metavar="N",
+                   help=f"candidates to check per store (default {DEFAULT_MAX_TRIES})")
+    p.add_argument("--store-timeout", type=float, default=DEFAULT_STORE_TIMEOUT, metavar="SECONDS",
+                   help=f"time cap per store (default {DEFAULT_STORE_TIMEOUT:.0f})")
+    p.add_argument("--discover-concurrency", type=int, default=DEFAULT_DISCOVER_CONCURRENCY, metavar="N",
+                   help=f"stores discovered at once (default {DEFAULT_DISCOVER_CONCURRENCY})")
+
+
 def _cli_config(a: argparse.Namespace) -> dict:
     return config_from_options(zip_code=a.zip, fulfillment=a.fulfillment, radius=a.radius,
                                store_id=a.store_id, any_seller=a.any_seller)
@@ -1180,23 +1944,89 @@ def cmd_check(a: argparse.Namespace) -> int:
     return 0 if all(s.get("verdict") == "OK" for s in results) else 1
 
 
+def _discover_args(a: argparse.Namespace) -> dict:
+    return {"per_store": a.per_store, "concurrency": a.discover_concurrency, "max_tries": a.max_tries,
+            "time_cap": a.store_timeout}
+
+
+def _print_discovery(results: list[StoreResult]) -> None:
+    print("\n" + format_discovery(results))
+    found = sum(1 for r in results if r.chosen)
+    print(f"\n{found} of {len(results)} store(s) have discovered URLs "
+          f"({sum(1 for r in results if r.skipped)} skipped on purpose).")
+
+
+def cmd_discover(a: argparse.Namespace) -> int:
+    apply_browser_options(a)
+    rc = _cli_config(a)
+    only = [k.strip() for k in (a.only or "").split(",") if k.strip()] or None
+    if a.per_store < 1:
+        raise ProbeError("--per-store must be at least 1")
+    doc = read_sites_doc(a.sites)
+    backend()
+    print(f"Discovering up to {a.per_store} product URL(s) per store, {a.discover_concurrency} store(s) at a time "
+          f"(<= {a.store_timeout:.0f}s each). This can take several minutes…")
+    print(f"Browser: {describe_browser(browser_info())}")
+
+    def on_result(r: StoreResult) -> None:
+        got = f"{len(r.chosen)} URL(s)" if r.chosen else ("skipped" if r.skipped else "nothing usable")
+        print(f"  {r.key:<14} {got}  [{r.source or '-'}, {r.found} found, {r.tried} checked]", flush=True)
+
+    async def main() -> list[StoreResult]:
+        try:
+            return await discover_all(only, doc, base_config=rc, on_result=on_result, **_discover_args(a))
+        finally:
+            await _shutdown_backend()
+
+    results = asyncio.run(main())
+    _print_discovery(results)
+    merged = merge_sites(doc, results)
+    if a.write:
+        Path(a.sites).write_text(dump_sites(merged), encoding="utf-8")
+        print(f"Updated {_rel(a.sites)}. Next: ./run.sh sweep")
+    else:
+        Path(a.out).mkdir(parents=True, exist_ok=True)
+        dest = Path(a.out) / "discovered.json"
+        dest.write_text(dump_sites(merged), encoding="utf-8")
+        print(f"Wrote {_rel(dest)} (sites.json format). Use --write to update {_rel(a.sites)}, or "
+              f"`sweep --sites {_rel(dest)}` to try it first.")
+    return 0
+
+
 def cmd_sweep(a: argparse.Namespace) -> int:
     apply_browser_options(a)
     rc = _cli_config(a)
     only = [k.strip() for k in (a.only or "").split(",") if k.strip()] or None
-    entries = select_entries(load_sites(a.sites), only)
+    if a.discover:
+        doc = read_sites_doc(a.sites)
+        entries: list[dict] = []
+    else:
+        doc = {}
+        entries = select_entries(load_sites(a.sites), only)
     backend()
-    total = len(entries)
-    print(f"Checking {total} URL(s) with concurrency {a.concurrency}. This can take a few minutes…")
     print(f"Browser: {describe_browser(browser_info())}")
     done = [0]
+    total = [len(entries)]
 
     def on_result(_i: int, s: dict) -> None:
         done[0] += 1
-        print(format_progress(done[0], total, s), flush=True)
+        print(format_progress(done[0], total[0], s), flush=True)
 
     async def main() -> list[dict]:
+        nonlocal entries
         try:
+            if a.discover:
+                print("Discovering current product URLs first…")
+                found = await discover_all(only, doc, base_config=rc, **_discover_args(a))
+                _print_discovery(found)
+                merged = merge_sites(doc, found)
+                Path(a.out).mkdir(parents=True, exist_ok=True)
+                dest = Path(a.out) / "discovered.json"
+                dest.write_text(dump_sites(merged), encoding="utf-8")
+                print(f"(saved to {_rel(dest)}; sites.json is unchanged)")
+                entries = select_entries(load_sites_data(merged), only)
+                total[0] = len(entries)
+            print(f"Checking {len(entries)} URL(s) with concurrency {a.concurrency}. This can take a few minutes…")
             return await run_entries(entries, concurrency=a.concurrency, preview=a.preview, base_config=rc,
                                      out_root=a.out, on_result=on_result)
         finally:
@@ -1264,8 +2094,20 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--sites", type=Path, default=DEFAULT_SITES, help="sites file (default sites.json)")
     s.add_argument("--concurrency", type=int, default=3)
     s.add_argument("--preview", action="store_true", help="also run the add-item preview for each URL")
+    s.add_argument("--discover", action="store_true",
+                   help="first find current product URLs (like `discover`, without --write), then sweep those")
+    _add_discover_opts(s, with_only=False)
     _add_check_opts(s)
     s.set_defaults(func=cmd_sweep)
+
+    d = sub.add_parser("discover", help="find real, current product URLs for each store (sitemaps / storefront)")
+    d.add_argument("--only", help="comma-separated store keys, e.g. target,bestbuy")
+    d.add_argument("--sites", type=Path, default=DEFAULT_SITES, help="sites file to read / update (default sites.json)")
+    d.add_argument("--write", action="store_true",
+                   help="update sites.json in place (default: write probe-output/discovered.json)")
+    _add_discover_opts(d)
+    _add_check_opts(d)
+    d.set_defaults(func=cmd_discover)
 
     b = sub.add_parser("bundle", help="zip probe-output/ (cookies stripped) to share with the maintainers")
     b.add_argument("--out", type=Path, default=DEFAULT_OUT, help="folder to zip (default probe-output/)")
