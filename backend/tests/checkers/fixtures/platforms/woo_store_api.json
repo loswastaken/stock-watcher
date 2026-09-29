@@ -1,0 +1,5 @@
+[{"id": 812, "name": "RTX 5080 Gaming PC", "slug": "rtx-5080-gaming-pc", "sku": "CX-5080",
+  "prices": {"price": "219900", "regular_price": "229900", "sale_price": "219900", "currency_code": "USD", "currency_minor_unit": 2},
+  "images": [{"id": 9, "src": "https://consutronix.com/wp-content/uploads/5080.jpg"}],
+  "is_purchasable": true, "is_in_stock": true, "is_on_backorder": false,
+  "stock_availability": {"text": "3 in stock", "class": "in-stock"}}]

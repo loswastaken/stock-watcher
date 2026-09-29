@@ -1,0 +1,4 @@
+{"action": "Product-Variation", "product": {"id": "465012345678", "productName": "Stitch Plush – Medium 15''",
+ "available": true, "readyToOrder": true,
+ "availability": {"messages": ["Pre-Order: ships by October 20"]},
+ "price": {"sales": {"value": "29.99", "currency": "USD"}}}}

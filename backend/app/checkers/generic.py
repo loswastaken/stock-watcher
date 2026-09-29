@@ -13,6 +13,11 @@ is recorded in ``detail["signals"]``):
    button → out.
 4. Otherwise ``unknown``.
 
+Before any of that, ``check_generic`` (auto mode) lets the platform recipes in
+``retailers/platforms.py`` (Shopify, SFCC, BigCommerce, WooCommerce, Magento, OpenCart)
+answer from the platform's own product data; their conclusive verdict wins. A virtual
+waiting room yields ``unknown`` with ``detail["queue"] = True`` (see ``queue_result``).
+
 Availability semantics: *orderable* counts as in stock — InStock, LimitedAvailability,
 OnlineOnly, InStoreOnly, PreOrder, PreSale, BackOrder, MadeToOrder. The status text says
 which ("Pre-order", "Backorder", ...). OutOfStock, SoldOut, Discontinued → out of stock.
@@ -29,6 +34,7 @@ from bs4 import BeautifulSoup, Tag
 
 from .base import Availability, CheckResult
 from .fetcher import fetch_html, has_product_signals, host_of
+from .retailers.platforms import detect_and_check, queue_result
 from .util import absolutize, clean_text, format_price, loads_lenient, parse_amount
 
 log = logging.getLogger("stockwatcher.checkers.generic")
@@ -874,9 +880,34 @@ def _needs_for(cfg: GenericConfig) -> Callable[[str], bool]:
     return has_product_signals
 
 
+def merge_page_meta(res: CheckResult, page: CheckResult) -> CheckResult:
+    """Fill ``res``'s missing title/image/price from a generic ``analyze`` of the page and
+    append the page's signals (for display) after ``res``'s own."""
+    res.title = res.title or page.title
+    res.image_url = res.image_url or page.image_url
+    res.price = res.price or page.price
+    sigs = list(res.detail.get("signals") or []) + list(page.detail.get("signals") or [])
+    res.detail["signals"] = list(dict.fromkeys(sigs))[:15]
+    res.detail.setdefault("generic_status", page.status)
+    return res
+
+
 async def check_generic(url: str, config: dict | None) -> CheckResult:
     cfg = GenericConfig.from_dict(config)
     fetched = await fetch_html(url, render_js=cfg.render_js, needs=_needs_for(cfg))
+    via = "browser" if fetched.via_browser else "http"
+    if fetched.queued:
+        res = queue_result(mode=cfg.mode, fetched_via=via)
+        res.detail["matched"] = "waiting room"
+        return res
+    if cfg.mode == "auto":
+        plat = await detect_and_check(url, fetched.text, fetched.url, fetched.headers, None)
+        if plat is not None:
+            merge_page_meta(plat, analyze(fetched.text, url, cfg, base_url=fetched.url))
+            plat.detail.setdefault("mode", cfg.mode)
+            plat.detail["fetched_via"] = via
+            return plat
     result = analyze(fetched.text, url, cfg, base_url=fetched.url)
-    result.detail["fetched_via"] = "browser" if fetched.via_browser else "http"
+    result.detail["fetched_via"] = via
+    result.detail.setdefault("adapter", "generic")
     return result

@@ -55,9 +55,18 @@ async def run_check(kind: str, url: str, generic_config: dict | None, apple_conf
         return _error(f"{type(e).__name__}: {e}")
 
 
+def _retailer_info(url: str) -> dict | None:
+    try:
+        r = _retailers.match_retailer(url or "")
+    except Exception:  # noqa: BLE001
+        return None
+    return r.to_dict() if r is not None else None
+
+
 async def _preview(url: str) -> dict:
     is_apple = _apple.is_apple_url(url)
-    out = {"name": None, "image_url": None, "price": None, "status": "unknown", "is_apple": is_apple}
+    out = {"name": None, "image_url": None, "price": None, "status": "unknown", "is_apple": is_apple,
+           "retailer": _retailer_info(url)}
     if is_apple:
         info = await _apple.resolve_apple(url)
         out["name"] = info.get("product_name")
@@ -74,24 +83,33 @@ async def _preview(url: str) -> dict:
             out["price"] = chosen.get("price")
         if out["name"] or out["image_url"]:
             return out
+        try:
+            fetched = await _fetcher.fetch_html(url)
+        except _fetcher.FetchError as e:
+            out["status"] = "error"
+            out["error"] = str(e)
+            return out
+        res = _generic.analyze(fetched.text, url, None, base_url=fetched.url)
+        out.update(name=res.title, image_url=res.image_url, price=out["price"] or res.price)
+        return out
+    # Same path as a check: site adapter first, then platform recipes / generic analysis.
     try:
-        fetched = await _fetcher.fetch_html(url)
+        res = await _retailers.run_adapter(url, None, None)
+        if res is None:
+            res = await _generic.check_generic(url, None)
     except _fetcher.FetchError as e:
         out["status"] = "error"
         out["error"] = str(e)
         return out
-    res = _generic.analyze(fetched.text, url, None, base_url=fetched.url)
-    out.update(
-        name=out["name"] or res.title,
-        image_url=out["image_url"] or res.image_url,
-        price=out["price"] or res.price,
-        status="unknown" if is_apple else res.status,
-    )
+    out.update(name=res.title, image_url=res.image_url, price=res.price, status=res.status)
+    if res.status == "error":
+        out["error"] = res.error or res.status_text
     return out
 
 
 async def preview_url(url: str) -> dict:
-    """→ {name, image_url, price, status, is_apple} (plus ``error`` on failure). Never raises."""
+    """→ {name, image_url, price, status, is_apple, retailer} (plus ``error`` on failure).
+    ``retailer`` is the registry entry's ``to_dict()`` or None. Never raises."""
     try:
         return await asyncio.wait_for(_preview(url), PREVIEW_TIMEOUT)
     except asyncio.CancelledError:
@@ -99,7 +117,8 @@ async def preview_url(url: str) -> dict:
     except Exception as e:  # noqa: BLE001
         log.info("preview failed for %s: %s", url, e)
         return {"name": None, "image_url": None, "price": None, "status": "error",
-                "is_apple": _apple.is_apple_url(url or ""), "error": str(e) or type(e).__name__}
+                "is_apple": _apple.is_apple_url(url or ""), "retailer": _retailer_info(url),
+                "error": str(e) or type(e).__name__}
 
 
 async def resolve_apple(url: str) -> dict:

@@ -1,0 +1,7 @@
+{"id": 7001, "title": "Govee RGBIC Floor Lamp", "handle": "rgbic-floor-lamp", "available": true,
+ "price": 8999, "featured_image": "//us.govee.com/cdn/shop/files/floor-lamp-js.jpg?v=2",
+ "variants": [
+   {"id": 40001, "title": "Black", "available": false, "price": 8999, "sku": "H6072-B"},
+   {"id": 40002, "title": "White", "available": true, "price": 9499, "sku": "H6072-W",
+    "featured_image": {"src": "https://us.govee.com/cdn/shop/files/floor-lamp-white.jpg"}}
+ ]}
