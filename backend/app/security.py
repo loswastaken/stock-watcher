@@ -73,7 +73,14 @@ def create_session(db: Session, user_id: int, request: Request) -> str:
     return token
 
 
-def set_session_cookie(response: Response, token: str) -> None:
+def cookie_is_secure(request: Request) -> bool:
+    mode = get_settings().cookie_secure
+    if mode == "auto":
+        return request.url.scheme == "https"
+    return mode == "true"
+
+
+def set_session_cookie(response: Response, token: str, request: Request) -> None:
     s = get_settings()
     response.set_cookie(
         COOKIE_NAME,
@@ -81,15 +88,14 @@ def set_session_cookie(response: Response, token: str) -> None:
         max_age=s.session_days * 86400,
         httponly=True,
         samesite="lax",
-        secure=s.cookie_secure,
+        secure=cookie_is_secure(request),
         path="/",
     )
 
 
-def clear_session_cookie(response: Response) -> None:
-    s = get_settings()
+def clear_session_cookie(response: Response, request: Request) -> None:
     response.delete_cookie(
-        COOKIE_NAME, path="/", httponly=True, samesite="lax", secure=s.cookie_secure
+        COOKIE_NAME, path="/", httponly=True, samesite="lax", secure=cookie_is_secure(request)
     )
 
 

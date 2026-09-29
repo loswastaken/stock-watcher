@@ -61,7 +61,7 @@ def setup(body: SetupRequest, request: Request, response: Response, db: Session 
             raise HTTPException(status_code=409, detail="Setup has already been completed")
         user = make_user(db, body.username, body.password, is_admin=True)
     token = create_session(db, user.id, request)
-    set_session_cookie(response, token)
+    set_session_cookie(response, token, request)
     return user
 
 
@@ -81,7 +81,7 @@ def login(body: Credentials, request: Request, response: Response, db: Session =
         raise HTTPException(status_code=401, detail="Invalid username or password")
     login_limiter.reset(ip, key)
     token = create_session(db, user.id, request)
-    set_session_cookie(response, token)
+    set_session_cookie(response, token, request)
     return user
 
 
@@ -95,7 +95,7 @@ def logout(request: Request, db: Session = Depends(get_db)):
             db.delete(row)
             db.commit()
     resp = Response(status_code=204)
-    clear_session_cookie(resp)
+    clear_session_cookie(resp, request)
     return resp
 
 

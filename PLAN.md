@@ -51,7 +51,7 @@ README.md
 |---|---|---|
 | `DATA_DIR` | `/data` | SQLite at `$DATA_DIR/stockwatcher.db`, images in `$DATA_DIR/images/` |
 | `SECRET_KEY` | auto-generated & persisted to `$DATA_DIR/secret.key` | |
-| `COOKIE_SECURE` | `true` | set `false` for plain-http LAN testing |
+| `COOKIE_SECURE` | `auto` | `auto` = Secure only over HTTPS (incl. X-Forwarded-Proto); `true`/`false` force |
 | `SESSION_DAYS` | `30` | |
 | `MIN_INTERVAL_SECONDS` | `60` | floor for per-item interval |
 | `CHECK_CONCURRENCY` | `4` | |

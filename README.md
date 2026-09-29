@@ -65,7 +65,7 @@ If using a reverse proxy (e.g., Synology DSM reverse proxy):
 2. Create a reverse proxy rule:
    - Forward HTTPS host (e.g., `stockwatcher.example.com`)
    - To `http://localhost:8095` (or your container's host IP)
-3. **Keep `COOKIE_SECURE=true`** when behind HTTPS—the app automatically trusts `X-Forwarded-*` headers
+3. Leave `COOKIE_SECURE=auto`: the login cookie is marked Secure when the request came in over HTTPS (reverse proxy / Cloudflare Tunnel via `X-Forwarded-Proto`) and still works over plain-http LAN
 
 ## Configuration
 
@@ -75,7 +75,7 @@ If using a reverse proxy (e.g., Synology DSM reverse proxy):
 |---|---|---|
 | `DATA_DIR` | `/data` | SQLite database and images location |
 | `SECRET_KEY` | auto-generated | Persisted to `$DATA_DIR/secret.key` |
-| `COOKIE_SECURE` | `true` | Set to `false` for plain-HTTP LAN testing |
+| `COOKIE_SECURE` | `auto` | `auto` = Secure cookie only over HTTPS; `true`/`false` to force |
 | `SESSION_DAYS` | `30` | Session cookie expiry |
 | `MIN_INTERVAL_SECONDS` | `60` | Minimum check interval per item (seconds) |
 | `CHECK_CONCURRENCY` | `4` | Concurrent checks during scheduler loop |
