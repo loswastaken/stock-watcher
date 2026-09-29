@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from . import db, scheduler
 from .checkers import shutdown as shutdown_checkers
 from .config import get_settings, prepare_data_dir
-from .routers import apple, auth, health, images, items, notifications, settings, stats, system, users
+from .routers import apple, auth, health, images, items, notifications, retailers, settings, stats, system, users
 from .security import SecurityMiddleware
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -63,7 +63,7 @@ def create_app() -> FastAPI:
         detail, errors = _validation_message(exc)
         return JSONResponse(status_code=422, content={"detail": detail, "errors": errors})
 
-    for module in (health, auth, users, settings, items, notifications, apple, stats, images, system):
+    for module in (health, auth, users, settings, items, notifications, apple, stats, images, system, retailers):
         app.include_router(module.router, prefix="/api")
 
     @app.api_route("/api/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],

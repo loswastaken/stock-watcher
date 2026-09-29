@@ -24,6 +24,8 @@ def load_json(name: str):
 async def _checker_state(monkeypatch):
     monkeypatch.setattr(fetcher, "HOST_MIN_GAP", 0.0)
     monkeypatch.setenv("ENABLE_BROWSER", "false")
+    # respx mocks httpx only: keep impersonated hosts (curl_cffi) on httpx unless a test opts in.
+    monkeypatch.setenv("STOCKWATCHER_IMPERSONATE", "0")
     fetcher._browser_hosts.clear()
     apple._cache.clear()
     yield

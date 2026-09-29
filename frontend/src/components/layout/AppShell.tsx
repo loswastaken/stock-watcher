@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query';
-import { Bell, LayoutGrid, Plus, Settings, ShoppingBag, Users } from 'lucide-react';
+import { Bell, LayoutGrid, Plus, Settings, ShoppingBag, Store, Users } from 'lucide-react';
 import { Suspense, useEffect, useRef } from 'react';
 import { Link, NavLink, Outlet, useLocation } from 'react-router-dom';
 import { api } from '@/lib/api';
@@ -21,13 +21,16 @@ interface NavItem {
   end?: boolean;
   admin?: boolean;
   badge?: boolean;
+  /** Left out of the phone tab bar (reachable from the user menu instead). */
+  desktopOnly?: boolean;
 }
 
 const NAV: NavItem[] = [
   { to: '/', label: 'Dashboard', icon: LayoutGrid, end: true },
   { to: '/notifications', label: 'Notifications', icon: Bell, badge: true },
+  { to: '/stores', label: 'Stores', icon: Store },
   { to: '/purchased', label: 'Purchased', icon: ShoppingBag },
-  { to: '/settings', label: 'Settings', icon: Settings },
+  { to: '/settings', label: 'Settings', icon: Settings, desktopOnly: true },
   { to: '/admin/users', label: 'Users', icon: Users, admin: true },
 ];
 
@@ -150,8 +153,8 @@ export function AppShell() {
               <Plus className="size-6" />
             </Link>
           </div>
-          {/* Users stays in the user menu on phones, keeping the bar to five tabs. */}
-          {nav.slice(2).filter((n) => !n.admin).map((n) => (
+          {/* Settings and Users stay in the user menu on phones, keeping the bar to five tabs. */}
+          {nav.slice(2).filter((n) => !n.admin && !n.desktopOnly).map((n) => (
             <TabLink key={n.to} item={n} badge={0} />
           ))}
         </div>

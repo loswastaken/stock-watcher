@@ -2,15 +2,18 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   AlertTriangle,
   ArrowLeft,
+  BadgeCheck,
   Bell,
   Clock,
   Code2,
+  DollarSign,
   Globe,
   ImagePlus,
   Link2,
   Loader2,
   MapPin,
   Package,
+  PackageCheck,
   RefreshCw,
   Save,
   ScanSearch,
@@ -30,6 +33,7 @@ import { ItemImage } from '@/components/ItemImage';
 import { AppleLogo } from '@/components/Logo';
 import { PageHeader } from '@/components/PageHeader';
 import { PageLoader } from '@/components/PageLoader';
+import { RetailerChip } from '@/components/RetailerBadge';
 import { StatusBadge } from '@/components/StatusBadge';
 import { Button, buttonClasses } from '@/components/ui/button';
 import { Card, CardBody, CardHeader } from '@/components/ui/card';
@@ -41,7 +45,20 @@ import { useDebounce } from '@/hooks/useDebounce';
 import { upsertItem, useItemActions } from '@/hooks/useItemActions';
 import { api, ApiError, errorMessage } from '@/lib/api';
 import { qk } from '@/lib/queryClient';
-import type { AppleConfig, ApplePart, GenericConfig, GenericMode, Item, ItemCreate, ItemKind, Settings } from '@/lib/types';
+import { matchRetailer, useRetailers } from '@/lib/retailers';
+import type {
+  AppleConfig,
+  ApplePart,
+  Fulfillment,
+  GenericConfig,
+  GenericMode,
+  Item,
+  ItemCreate,
+  ItemKind,
+  Retailer,
+  RetailerConfig,
+  Settings,
+} from '@/lib/types';
 import { cn, formatInterval, hostOf, isAppleUrl, isValidUrl } from '@/lib/utils';
 
 const INTERVAL_PRESETS = [1, 2, 5, 15, 60];
@@ -98,6 +115,67 @@ interface FormState {
   notify: boolean;
   generic: GenericConfig;
   apple: AppleConfig;
+  /** Price limit ("" = none). */
+  maxPrice: string;
+  retailer: { fulfillment: Fulfillment; zip: string; radius_miles: number; store_id: string; official_only: boolean };
+}
+
+type FieldKey =
+  | 'url'
+  | 'interval'
+  | 'selector'
+  | 'text'
+  | 'parts'
+  | 'zip'
+  | 'watch'
+  | 'distance'
+  | 'maxPrice'
+  | 'storeZip'
+  | 'storeId'
+  | 'radius';
+type FieldErrors = Partial<Record<FieldKey, string>>;
+
+const MAX_RADIUS = 250;
+/** Radius as sent to the API: a whole number of miles in 1-250. */
+const cleanRadius = (v: number) => Math.min(MAX_RADIUS, Math.max(1, Math.round(Number.isFinite(v) ? v : 25)));
+
+/** Map a request field (FastAPI 422 `loc`, minus "body") to the form field that shows it. */
+function fieldFor(loc: (string | number)[]): FieldKey | null {
+  const [head, sub] = loc.filter((p) => p !== 'body').map(String);
+  switch (head) {
+    case 'url':
+      return 'url';
+    case 'interval_minutes':
+      return 'interval';
+    case 'max_price':
+      return 'maxPrice';
+    case 'retailer_config':
+      return sub === 'radius_miles' ? 'radius' : sub === 'zip' ? 'storeZip' : sub === 'store_id' ? 'storeId' : null;
+    case 'apple_config':
+      return sub === 'zip' ? 'zip' : sub === 'max_distance_miles' ? 'distance' : sub === 'parts' ? 'parts' : null;
+    case 'generic_config':
+      return sub === 'selector' ? 'selector' : 'text';
+    default:
+      return null;
+  }
+}
+
+/** Field-level errors from a backend 422 (validation array or a known plain message). */
+function serverFieldErrors(err: unknown): FieldErrors {
+  const out: FieldErrors = {};
+  if (!(err instanceof ApiError) || err.status !== 422) return out;
+  const { detail } = err;
+  if (Array.isArray(detail)) {
+    for (const d of detail as { loc?: (string | number)[]; msg?: string }[]) {
+      const f = fieldFor(d.loc ?? []);
+      if (f && !out[f]) out[f] = (d.msg ?? 'Invalid value').replace(/^Value error, /, '');
+    }
+  } else if (typeof detail === 'string') {
+    if (/^Pickup needs/i.test(detail)) out.storeZip = detail;
+    else if (/interval_minutes/.test(detail)) out.interval = detail;
+    else if (/apple_config/.test(detail)) out.parts = detail;
+  }
+  return out;
 }
 
 function initialState(item: Item | null, d: typeof FALLBACK_SETTINGS): FormState {
@@ -122,6 +200,14 @@ function initialState(item: Item | null, d: typeof FALLBACK_SETTINGS): FormState
       watch_delivery: item?.apple_config?.watch_delivery ?? true,
       pickup_today_only: item?.apple_config?.pickup_today_only ?? true,
     },
+    maxPrice: item?.max_price != null ? String(item.max_price) : '',
+    retailer: {
+      fulfillment: item?.retailer_config?.fulfillment ?? 'delivery',
+      zip: item?.retailer_config?.zip ?? d.default_zip ?? '',
+      radius_miles: item?.retailer_config?.radius_miles ?? d.default_max_distance_miles ?? 25,
+      store_id: item?.retailer_config?.store_id ?? '',
+      official_only: item?.retailer_config?.official_only ?? true,
+    },
   };
 }
 
@@ -134,13 +220,19 @@ function ItemFormInner({ item, defaults }: { item: Item | null; defaults: typeof
   const [nameTouched, setNameTouched] = useState(isEdit);
   const [kindTouched, setKindTouched] = useState(isEdit);
   const [submitted, setSubmitted] = useState(false);
+  const [serverErrors, setServerErrors] = useState<FieldErrors>({});
   const [file, setFile] = useState<File | null>(null);
   const [filePreview, setFilePreview] = useState<string | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
 
+  // Backend field errors belong to the values that were submitted; editing clears them.
+  useEffect(() => setServerErrors({}), [s]);
+
   const set = <K extends keyof FormState>(k: K, v: FormState[K]) => setS((p) => ({ ...p, [k]: v }));
   const setGeneric = (patch: Partial<GenericConfig>) => setS((p) => ({ ...p, generic: { ...p.generic, ...patch } }));
   const setApple = (patch: Partial<AppleConfig>) => setS((p) => ({ ...p, apple: { ...p.apple, ...patch } }));
+  const setRetailerCfg = (patch: Partial<FormState['retailer']>) =>
+    setS((p) => ({ ...p, retailer: { ...p.retailer, ...patch } }));
 
   const url = s.url.trim();
   const urlValid = isValidUrl(url);
@@ -162,6 +254,17 @@ function ItemFormInner({ item, defaults }: { item: Item | null; defaults: typeof
     if (!nameTouched && p.name) setS((prev) => ({ ...prev, name: p.name ?? prev.name }));
     if (!kindTouched && p.is_apple) setS((prev) => ({ ...prev, kind: 'apple' }));
   }, [preview.data]);
+
+  // --- Store (retailer) detection ------------------------------------------
+  const retailers = useRetailers();
+  const retailer: Retailer | null =
+    (urlValid && debouncedUrl === url && urlChanged ? preview.data?.retailer : null) ??
+    (isEdit && url === item?.url ? item?.retailer ?? null : null) ??
+    matchRetailer(retailers.data, url);
+  const showStoreOptions = s.kind === 'generic' && !!retailer && (retailer.pickup || retailer.seller_filter);
+  const wantsPickup = showStoreOptions && !!retailer?.pickup && s.retailer.fulfillment !== 'delivery';
+  // Micro Center pickup is per store (store ID), not a ZIP + distance search.
+  const byStoreId = retailer?.key === 'microcenter';
 
   const appleUrl = isAppleUrl(url);
   const showKindToggle = appleUrl || s.kind === 'apple' || !!preview.data?.is_apple;
@@ -219,7 +322,7 @@ function ItemFormInner({ item, defaults }: { item: Item | null; defaults: typeof
   // --- Validation ----------------------------------------------------------
   const intervalNum = Number(s.interval);
   const errors = useMemo(() => {
-    const e: Partial<Record<'url' | 'interval' | 'selector' | 'text' | 'parts' | 'zip' | 'watch' | 'distance', string>> = {};
+    const e: FieldErrors = {};
     if (!url) e.url = 'Paste a product URL';
     else if (!urlValid) e.url = 'Enter a valid http(s) URL';
     if (!Number.isFinite(intervalNum) || intervalNum < 1) e.interval = 'Minimum is 1 minute';
@@ -228,16 +331,26 @@ function ItemFormInner({ item, defaults }: { item: Item | null; defaults: typeof
       if (s.generic.mode === 'selector' && !s.generic.selector?.trim()) e.selector = 'Enter a CSS selector';
       if (s.generic.mode === 'text' && !s.generic.in_stock_text?.trim() && !s.generic.out_of_stock_text?.trim())
         e.text = 'Enter at least one phrase';
+      if (wantsPickup && byStoreId) {
+        const sid = s.retailer.store_id.trim();
+        if (s.retailer.fulfillment === 'pickup' && !sid) e.storeId = 'Store ID is required for pickup';
+        else if (sid && !/^\d{1,4}$/.test(sid)) e.storeId = 'Enter the store number (digits only)';
+      } else if (wantsPickup) {
+        if (s.retailer.fulfillment === 'pickup' && !s.retailer.zip.trim()) e.storeZip = 'ZIP code is required for pickup';
+        const r = s.retailer.radius_miles;
+        if (!Number.isFinite(r) || r < 1 || r > MAX_RADIUS) e.radius = `Between 1 and ${MAX_RADIUS} miles`;
+      }
     } else {
       if (!s.apple.parts.length) e.parts = 'Select at least one model';
       if (!s.apple.zip.trim()) e.zip = 'ZIP code is required for store availability';
       if (!s.apple.watch_pickup && !s.apple.watch_delivery) e.watch = 'Watch pickup, delivery, or both';
       if (!(s.apple.max_distance_miles > 0)) e.distance = 'Enter a distance';
     }
+    if (s.maxPrice.trim() && !(Number(s.maxPrice) > 0)) e.maxPrice = 'Enter a price above 0, or leave blank';
     return e;
-  }, [url, urlValid, intervalNum, s]);
+  }, [url, urlValid, intervalNum, s, wantsPickup, byStoreId]);
   const hasErrors = Object.keys(errors).length > 0;
-  const show = (k: keyof typeof errors) => (submitted ? errors[k] : undefined);
+  const show = (k: FieldKey) => (submitted ? errors[k] : undefined) ?? serverErrors[k];
 
   // --- Save ----------------------------------------------------------------
   const cleanGeneric = (): GenericConfig => ({
@@ -253,6 +366,32 @@ function ItemFormInner({ item, defaults }: { item: Item | null; defaults: typeof
     max_distance_miles: Number(s.apple.max_distance_miles),
   });
 
+  const maxPrice = s.maxPrice.trim() ? Number(s.maxPrice) : null;
+  /** Retailer options as sent: location fields only when pickup is wanted. */
+  const cleanRetailer = (): Partial<RetailerConfig> => {
+    const out: Partial<RetailerConfig> = {
+      fulfillment: wantsPickup ? s.retailer.fulfillment : 'delivery',
+      official_only: s.retailer.official_only,
+    };
+    if (wantsPickup && byStoreId) out.store_id = s.retailer.store_id.trim() || null;
+    else if (wantsPickup) {
+      out.zip = s.retailer.zip.trim() || null;
+      out.radius_miles = cleanRadius(s.retailer.radius_miles);
+    }
+    return out;
+  };
+  /** On edit: keep stored options the form doesn't show (store_id, condition) for the same store. */
+  const editRetailerConfig = (): RetailerConfig | null => {
+    if (!showStoreOptions || !retailer) return null;
+    const prev: Partial<RetailerConfig> = item?.retailer_config ?? {};
+    const sameStore = !!item?.retailer && item.retailer.key === retailer.key;
+    const kept = { ...prev };
+    delete kept.zip;
+    delete kept.radius_miles;
+    const base: Partial<RetailerConfig> = sameStore ? (wantsPickup ? prev : kept) : { condition: prev.condition };
+    return { ...base, ...cleanRetailer() } as RetailerConfig;
+  };
+
   const save = useMutation({
     mutationFn: async () => {
       let saved: Item;
@@ -263,6 +402,8 @@ function ItemFormInner({ item, defaults }: { item: Item | null; defaults: typeof
           kind: s.kind,
           interval_minutes: intervalNum,
           notify_enabled: s.notify,
+          max_price: maxPrice,
+          retailer_config: editRetailerConfig(),
           ...(s.kind === 'apple' ? { apple_config: cleanApple() } : { generic_config: cleanGeneric() }),
         });
       } else {
@@ -273,6 +414,8 @@ function ItemFormInner({ item, defaults }: { item: Item | null; defaults: typeof
           notify_enabled: s.notify,
           ...(s.name.trim() ? { name: s.name.trim() } : {}),
           ...(!file && autoImage ? { image_url: autoImage } : {}),
+          ...(maxPrice != null ? { max_price: maxPrice } : {}),
+          ...(showStoreOptions ? { retailer_config: cleanRetailer() as RetailerConfig } : {}),
           ...(s.kind === 'apple' ? { apple_config: cleanApple() } : { generic_config: cleanGeneric() }),
         };
         saved = await api.createItem(body);
@@ -293,7 +436,10 @@ function ItemFormInner({ item, defaults }: { item: Item | null; defaults: typeof
       toast.success(isEdit ? 'Changes saved' : 'Now watching', { description: saved.name });
       navigate(`/items/${saved.id}`, { replace: !isEdit ? false : true });
     },
-    onError: (e) => toast.error(isEdit ? "Couldn't save changes" : "Couldn't add item", { description: errorMessage(e) }),
+    onError: (e) => {
+      setServerErrors(serverFieldErrors(e));
+      toast.error(isEdit ? "Couldn't save changes" : "Couldn't add item", { description: errorMessage(e) });
+    },
   });
 
   const onSubmit = (e: FormEvent) => {
@@ -377,6 +523,14 @@ function ItemFormInner({ item, defaults }: { item: Item | null; defaults: typeof
                   {preview.isError ? errorMessage(preview.error) : preview.data?.error} — you can still save it and fill in the
                   details manually.
                 </p>
+              )}
+              {retailer && (
+                <div className="-mt-2 flex flex-wrap items-center gap-2">
+                  <RetailerChip retailer={retailer} className="shadow-none ring-zinc-200 dark:ring-zinc-700" />
+                  <span className="text-xs text-zinc-500 dark:text-zinc-400">
+                    {retailer.note ?? 'Supported store — checked with a dedicated integration.'}
+                  </span>
+                </div>
               )}
 
               <Field label="Name" htmlFor="name" hint={!isEdit ? 'Leave blank to use the page title.' : undefined}>
@@ -607,6 +761,139 @@ function ItemFormInner({ item, defaults }: { item: Item | null; defaults: typeof
             </Card>
           )}
 
+          {/* Store options */}
+          {showStoreOptions && retailer && (
+            <Card>
+              <CardHeader
+                icon={<Store />}
+                title={`${retailer.name} options`}
+                description="Where you want to buy it, and from whom."
+              />
+              <CardBody className="space-y-5">
+                {retailer.pickup && (
+                  <div className="space-y-2">
+                    <p className="text-sm font-medium text-zinc-800 dark:text-zinc-200">Alert me for</p>
+                    <Segmented<Fulfillment>
+                      ariaLabel="Fulfillment"
+                      value={s.retailer.fulfillment}
+                      onChange={(fulfillment) => setRetailerCfg({ fulfillment })}
+                      options={[
+                        { value: 'delivery', label: 'Delivery', icon: <Truck /> },
+                        { value: 'pickup', label: 'Pickup', icon: <Store /> },
+                        { value: 'any', label: 'Both', icon: <PackageCheck /> },
+                      ]}
+                    />
+                    <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                      {s.retailer.fulfillment === 'delivery'
+                        ? 'Shipping / delivery availability online.'
+                        : s.retailer.fulfillment === 'pickup'
+                          ? byStoreId
+                            ? `In-store pickup at your ${retailer.name} store.`
+                            : 'In-store pickup at stores near your ZIP.'
+                          : 'Alert when it can be shipped or picked up nearby.'}
+                    </p>
+                  </div>
+                )}
+                {wantsPickup && byStoreId && (
+                  <div className="grid gap-5 sm:grid-cols-2">
+                    <Field
+                      label="Store ID"
+                      htmlFor="store-id"
+                      error={show('storeId')}
+                      hint={
+                        <>
+                          The 3-digit store number from {retailer.domain}’s store picker (the <code>storeid=</code> part
+                          of the URL).{s.retailer.fulfillment === 'any' ? ' Leave blank for the site’s default store.' : ''}
+                        </>
+                      }
+                    >
+                      <Input
+                        id="store-id"
+                        inputMode="numeric"
+                        autoComplete="off"
+                        placeholder="131"
+                        maxLength={4}
+                        value={s.retailer.store_id}
+                        onChange={(e) => setRetailerCfg({ store_id: e.target.value })}
+                        leading={<Store />}
+                        invalid={!!show('storeId')}
+                      />
+                    </Field>
+                  </div>
+                )}
+                {wantsPickup && !byStoreId && (
+                  <div className="grid gap-5 sm:grid-cols-2">
+                    <Field label="ZIP code" htmlFor="store-zip" error={show('storeZip')} hint="Stores are searched around this ZIP.">
+                      <Input
+                        id="store-zip"
+                        inputMode="numeric"
+                        autoComplete="postal-code"
+                        placeholder="60302"
+                        maxLength={10}
+                        value={s.retailer.zip}
+                        onChange={(e) => setRetailerCfg({ zip: e.target.value })}
+                        leading={<MapPin />}
+                        invalid={!!show('storeZip')}
+                      />
+                    </Field>
+                    <Field
+                      label="Travel distance"
+                      htmlFor="store-radius"
+                      error={show('radius')}
+                      aside={
+                        <span className="text-sm font-medium tabular-nums text-zinc-900 dark:text-zinc-100">
+                          {Number.isFinite(s.retailer.radius_miles) ? s.retailer.radius_miles : '–'} mi
+                        </span>
+                      }
+                    >
+                      <div className="flex h-9 items-center gap-3">
+                        <input
+                          id="store-radius"
+                          type="range"
+                          min={1}
+                          max={100}
+                          step={1}
+                          value={Number.isFinite(s.retailer.radius_miles) ? Math.min(s.retailer.radius_miles, 100) : 1}
+                          onChange={(e) => setRetailerCfg({ radius_miles: Number(e.target.value) })}
+                          className="sw-range"
+                        />
+                        <Input
+                          type="number"
+                          min={1}
+                          max={250}
+                          aria-label="Travel distance in miles"
+                          step={1}
+                          value={Number.isFinite(s.retailer.radius_miles) ? s.retailer.radius_miles : ''}
+                          onChange={(e) =>
+                            setRetailerCfg({ radius_miles: e.target.value === '' ? NaN : Number(e.target.value) })
+                          }
+                          onBlur={() => {
+                            const r = s.retailer.radius_miles;
+                            if (Number.isFinite(r) && r !== cleanRadius(r)) setRetailerCfg({ radius_miles: cleanRadius(r) });
+                          }}
+                          invalid={!!show('radius')}
+                          className="w-20 text-right tabular-nums"
+                        />
+                      </div>
+                    </Field>
+                  </div>
+                )}
+                {retailer.seller_filter && (
+                  <div className="rounded-xl border border-zinc-200 p-4 dark:border-zinc-800">
+                    <SwitchRow
+                      id="official-only"
+                      icon={<BadgeCheck />}
+                      title="Official seller only"
+                      description={`Ignore marketplace / third-party listings — only alert when ${retailer.name} itself sells it.`}
+                      checked={s.retailer.official_only}
+                      onCheckedChange={(v) => setRetailerCfg({ official_only: v })}
+                    />
+                  </div>
+                )}
+              </CardBody>
+            </Card>
+          )}
+
           {/* Schedule */}
           <Card>
             <CardHeader icon={<Clock />} title="Schedule & alerts" />
@@ -646,11 +933,37 @@ function ItemFormInner({ item, defaults }: { item: Item | null; defaults: typeof
                   </div>
                 </div>
               </Field>
+              <Field
+                label="Price limit"
+                htmlFor="max-price"
+                error={show('maxPrice')}
+                hint="Only alert when it's in stock at or below this price. Leave blank for any price."
+              >
+                <div className="w-full sm:w-44">
+                  <Input
+                    id="max-price"
+                    type="number"
+                    inputMode="decimal"
+                    min={0}
+                    step="0.01"
+                    placeholder="No limit"
+                    value={s.maxPrice}
+                    onChange={(e) => set('maxPrice', e.target.value)}
+                    leading={<DollarSign />}
+                    className="tabular-nums"
+                    invalid={!!show('maxPrice')}
+                  />
+                </div>
+              </Field>
               <SwitchRow
                 id="notify"
                 icon={<Bell />}
                 title="Alerts"
-                description="Get one alert (ntfy + notification center) when this comes back in stock. Alerts then pause until you re-arm them, so you're never spammed."
+                description={
+                  qc.getQueryData<Settings>(qk.settings)?.auto_rearm
+                    ? 'Get an alert (ntfy + notification center) every time this comes back in stock.'
+                    : "Get one alert (ntfy + notification center) when this comes back in stock. Alerts then pause until you re-arm them, so you're never spammed."
+                }
                 checked={s.notify}
                 onCheckedChange={(v) => set('notify', v)}
               />

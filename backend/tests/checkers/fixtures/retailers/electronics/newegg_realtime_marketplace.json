@@ -1,0 +1,13 @@
+{
+  "MainItem": {
+    "Item": "9SIA4REK4R6437",
+    "Description": {"Title": "ASUS ROG Astral GeForce RTX 5090 OC 32GB (Renewed)"},
+    "Image": {"Normal": {"ImageName": "A4RE_1_20250130123456.jpg"}},
+    "UnitCost": 3999.0,
+    "FinalPrice": 3899.0,
+    "Instock": true,
+    "Stock": 2,
+    "SellerId": "A4RE",
+    "SellerName": "GPU Deals Direct"
+  }
+}

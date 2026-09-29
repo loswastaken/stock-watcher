@@ -1,0 +1,5 @@
+{"data":{"productId":"0004549600051","upc":"0004549600051","brand":"Nintendo","description":"Nintendo Switch 2 Mario Kart World Bundle",
+"images":[{"perspective":"front","featured":true,"sizes":[{"size":"xlarge","url":"https://www.kroger.com/product/images/xlarge/front/0004549600051"},{"size":"large","url":"https://www.kroger.com/product/images/large/front/0004549600051"}]}],
+"items":[{"itemId":"0004549600051","inventory":{"stockLevel":"LOW"},"favorite":false,
+"fulfillment":{"curbside":true,"delivery":true,"inStore":true,"shipToHome":false},
+"price":{"regular":499.99,"promo":0},"size":"1 ct","soldBy":"Unit"}]}}

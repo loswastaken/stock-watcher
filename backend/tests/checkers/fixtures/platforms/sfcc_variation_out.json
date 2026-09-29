@@ -1,0 +1,4 @@
+{"action": "Product-Variation", "product": {"id": "20023800", "productName": "Nintendo Switch 2 Console",
+ "available": false, "readyToOrder": true,
+ "availability": {"messages": ["Out of Stock"]},
+ "price": {"sales": {"value": 449.99, "currency": "USD", "formatted": "$449.99"}}}}

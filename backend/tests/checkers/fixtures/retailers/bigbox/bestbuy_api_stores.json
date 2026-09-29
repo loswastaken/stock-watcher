@@ -1,0 +1,4 @@
+{"ispuEligible":true,"stores":[
+ {"storeID":"281","name":"Richfield","address":"1000 W 78th St","city":"Richfield","state":"MN","postalCode":"55423","distance":3.4,"lowStock":false},
+ {"storeID":"12","name":"Roseville","city":"Roseville","state":"MN","distance":11.9,"lowStock":true},
+ {"storeID":"1409","name":"Duluth","city":"Duluth","state":"MN","distance":150.2,"lowStock":false}]}

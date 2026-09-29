@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   AlertTriangle,
   Bell,
+  BellRing,
   CheckCircle2,
   Dices,
   Download,
@@ -16,13 +17,15 @@ import {
   Server,
   SlidersHorizontal,
   Smartphone,
+  Store,
   Sun,
   Timer,
   UserRound,
+  Volume2,
   X,
 } from 'lucide-react';
 import { useEffect, useState, type FormEvent, type ReactNode } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { toast } from 'sonner';
 import { FormError } from '@/components/AuthLayout';
 import { PageHeader } from '@/components/PageHeader';
@@ -42,7 +45,13 @@ import { useTheme } from '@/lib/theme';
 import type { Settings, SettingsUpdate, TestNotificationResult, Theme } from '@/lib/types';
 import { cn, isValidUrl } from '@/lib/utils';
 import { SwitchRow } from '@/components/ui/switch';
-import { browserNotifyEnabled, browserNotifySupported, enableBrowserNotify, setBrowserNotify } from '@/lib/browserNotify';
+import {
+  browserNotifyEnabled,
+  browserNotifySupported,
+  enableBrowserNotify,
+  playAlertSound,
+  setBrowserNotify,
+} from '@/lib/browserNotify';
 
 type Tab = 'notifications' | 'defaults' | 'appearance' | 'account' | 'updates';
 const TABS: Tab[] = ['notifications', 'defaults', 'appearance', 'account', 'updates'];
@@ -347,6 +356,8 @@ function NotificationsTab({ settings }: { settings: Settings }) {
         </Card>
       </form>
 
+      <AlertBehaviorCard settings={settings} />
+
       <BrowserNotificationsCard />
 
       <Card>
@@ -386,6 +397,78 @@ function NotificationsTab({ settings }: { settings: Settings }) {
         </CardBody>
       </Card>
     </div>
+  );
+}
+
+function AlertBehaviorCard({ settings }: { settings: Settings }) {
+  const qc = useQueryClient();
+  const save = useMutation({
+    mutationFn: (body: SettingsUpdate) => api.updateSettings(body),
+    onMutate: async (body) => {
+      // Stop an in-flight settings fetch from overwriting the optimistic value (or the snapshot).
+      await qc.cancelQueries({ queryKey: qk.settings });
+      const prev = qc.getQueryData<Settings>(qk.settings);
+      qc.setQueryData<Settings>(qk.settings, (s) => (s ? { ...s, ...(body as Partial<Settings>) } : s));
+      return { prev };
+    },
+    onSuccess: (s) => qc.setQueryData(qk.settings, s),
+    onError: (e, _b, ctx) => {
+      if (ctx?.prev) qc.setQueryData(qk.settings, ctx.prev);
+      toast.error("Couldn't save settings", { description: errorMessage(e) });
+    },
+  });
+  const muted = settings.muted_retailers?.length ?? 0;
+
+  return (
+    <Card>
+      <CardHeader icon={<BellRing />} title="Alert behavior" description="How often you're alerted, and how." />
+      <CardBody className="space-y-4">
+        <SwitchRow
+          id="auto-rearm"
+          title="Alert on every restock"
+          description="After an alert, an item's alerts pause; with this on they turn back on by themselves once it sells out again, so you're alerted on every restock. Off = alerts stay paused until you turn them back on. Items you muted yourself stay muted."
+          checked={!!settings.auto_rearm}
+          onCheckedChange={(v) => save.mutate({ auto_rearm: v })}
+        />
+        <div className="h-px bg-zinc-100 dark:bg-zinc-800" />
+        <SwitchRow
+          id="alert-sound"
+          icon={<Volume2 />}
+          title="Play a sound"
+          description={
+            <>
+              Chime in this web app when a new alert arrives (while it's open).{' '}
+              <button
+                type="button"
+                onClick={playAlertSound}
+                className="font-medium text-indigo-600 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/60 dark:text-indigo-400"
+              >
+                Preview
+              </button>
+            </>
+          }
+          checked={settings.alert_sound !== false}
+          onCheckedChange={(v) => save.mutate({ alert_sound: v })}
+        />
+        <div className="h-px bg-zinc-100 dark:bg-zinc-800" />
+        <div className="flex items-start justify-between gap-4 py-1">
+          <div className="flex min-w-0 gap-3">
+            <div className="mt-0.5 text-zinc-400 [&_svg]:size-4">
+              <Store />
+            </div>
+            <div className="min-w-0">
+              <p className="text-sm font-medium text-zinc-800 dark:text-zinc-200">Muted stores</p>
+              <p className="mt-0.5 text-xs text-zinc-500 dark:text-zinc-400">
+                {muted ? `${muted} store${muted === 1 ? '' : 's'} never alert.` : 'Every store can alert.'} Mute stores you don't buy from.
+              </p>
+            </div>
+          </div>
+          <Link to="/stores" className="shrink-0 text-sm font-medium text-indigo-600 hover:underline dark:text-indigo-400">
+            Manage
+          </Link>
+        </div>
+      </CardBody>
+    </Card>
   );
 }
 

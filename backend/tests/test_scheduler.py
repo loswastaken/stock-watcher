@@ -33,7 +33,7 @@ def set_checker(monkeypatch, *results):
     queue = list(results)
     calls = []
 
-    async def fake(kind, url, gc, ac):
+    async def fake(kind, url, gc, ac, retailer_config=None):
         calls.append((kind, url))
         r = queue.pop(0) if len(queue) > 1 else queue[0]
         if isinstance(r, Exception):
@@ -65,7 +65,7 @@ async def test_new_keys_alert_once_and_delivery_recorded(world, monkeypatch, res
     assert it.consecutive_errors == 0 and it.last_change_at is not None
     ns = notifs(uid)
     assert len(ns) == 1 and ns[0].delivered is True and ns[0].delivery_error is None
-    assert ns[0].item_id == iid and "Widget" in ns[0].title and ns[0].message == "label-stock"
+    assert ns[0].item_id == iid and "Widget" in ns[0].title and ns[0].message == "$10 · label-stock"
     assert route.call_count == 1
     req = route.calls.last.request
     payload = json.loads(req.content)
@@ -214,7 +214,7 @@ async def test_no_concurrent_duplicate_checks(world, monkeypatch):
     gate = asyncio.Event()
     started = 0
 
-    async def slow(kind, url, gc, ac):
+    async def slow(kind, url, gc, ac, retailer_config=None):
         nonlocal started
         started += 1
         await gate.wait()
@@ -236,7 +236,7 @@ async def test_no_concurrent_duplicate_checks(world, monkeypatch):
 async def test_deleted_item_mid_check(world, monkeypatch):
     uid, iid = world
 
-    async def deleting(kind, url, gc, ac):
+    async def deleting(kind, url, gc, ac, retailer_config=None):
         with db.SessionLocal() as s:
             s.delete(s.get(Item, iid))
             s.commit()
@@ -275,7 +275,7 @@ async def test_tick_runs_due_items_with_concurrency_limit(world, monkeypatch):
     running = 0
     peak = 0
 
-    async def fake(kind, url, gc, ac):
+    async def fake(kind, url, gc, ac, retailer_config=None):
         nonlocal running, peak
         running += 1
         peak = max(peak, running)

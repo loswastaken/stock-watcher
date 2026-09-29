@@ -117,7 +117,7 @@ def test_crud_and_history(admin, preview_mock):
 
 
 def test_manual_check_runs_scheduler_path(admin, preview_mock, monkeypatch):
-    async def fake_run_check(kind, url, gc, ac):
+    async def fake_run_check(kind, url, gc, ac, retailer_config=None):
         return fake_result("in_stock", ("stock",), price="$5.00", detail={"signals": ["json-ld: InStock"]})
 
     monkeypatch.setattr("app.scheduler.run_check", fake_run_check)
@@ -256,7 +256,7 @@ async def test_create_downloads_image_in_background(db_ready, respx_mock, monkey
         s.add(it); s.commit()
         iid = it.id
 
-    async def fake_run_check(*a):
+    async def fake_run_check(*a, **k):
         return fake_result("out_of_stock", ())
 
     monkeypatch.setattr("app.scheduler.run_check", fake_run_check)

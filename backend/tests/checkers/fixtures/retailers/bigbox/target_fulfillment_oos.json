@@ -1,0 +1,5 @@
+{"data":{"product":{"tcin":"89444444","fulfillment":{"sold_out":true,
+"shipping_options":{"availability_status":"OUT_OF_STOCK","available_to_promise_quantity":0.0},
+"store_options":[
+ {"location_id":"1234","location_name":"Oak Park","order_pickup":{"availability_status":"UNAVAILABLE"}},
+ {"location_id":"2345","location_name":"Forest Park","order_pickup":{"availability_status":"UNAVAILABLE"}}]}}}}

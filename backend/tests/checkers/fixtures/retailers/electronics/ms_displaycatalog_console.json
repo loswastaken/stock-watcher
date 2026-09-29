@@ -1,0 +1,39 @@
+{
+  "BigIds": ["8WJ714N3RBTL"],
+  "HasMorePages": false,
+  "Products": [
+    {
+      "ProductId": "8WJ714N3RBTL",
+      "ProductKind": "Physical",
+      "ProductType": "Devices",
+      "LocalizedProperties": [
+        {
+          "ProductTitle": "Xbox Series X – 1TB Digital Edition (White)",
+          "Language": "en-us",
+          "Images": [
+            {"ImagePurpose": "Logo", "Uri": "//store-images.s-microsoft.com/image/apps.1.logo"},
+            {"ImagePurpose": "Poster", "Uri": "//store-images.s-microsoft.com/image/apps.2.poster"}
+          ]
+        }
+      ],
+      "DisplaySkuAvailabilities": [
+        {
+          "Sku": {"SkuId": "0001", "LocalizedProperties": [{"SkuTitle": "Xbox Series X Digital – White"}],
+                  "Properties": {"IsPreOrder": false}},
+          "Availabilities": [
+            {"AvailabilityId": "9VVD83N4DBSC", "Actions": ["Details", "License", "Browse"],
+             "OrderManagementData": {"Price": {"ListPrice": 599.99, "MSRP": 599.99, "CurrencyCode": "USD"}}}
+          ]
+        },
+        {
+          "Sku": {"SkuId": "0002", "LocalizedProperties": [{"SkuTitle": "Xbox Series X – 1TB Digital Edition"}],
+                  "Properties": {"IsPreOrder": false}},
+          "Availabilities": [
+            {"AvailabilityId": "9X3DG4F5LCRW", "Actions": ["Details", "Fulfill", "Purchase", "Browse", "Curate"],
+             "OrderManagementData": {"Price": {"ListPrice": 649.99, "MSRP": 649.99, "CurrencyCode": "USD"}}}
+          ]
+        }
+      ]
+    }
+  ]
+}

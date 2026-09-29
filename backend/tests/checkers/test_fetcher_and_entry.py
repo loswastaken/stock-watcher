@@ -209,7 +209,7 @@ async def test_preview_generic():
     p = await checkers.preview_url(URL)
     assert p == {"name": "Aurora X1 Espresso Machine",
                  "image_url": "https://cdn.brewco.example/products/aurora-x1_1200x.jpg?v=1712",
-                 "price": "$1,099.00", "status": "in_stock", "is_apple": False}
+                 "price": "$1,099.00", "status": "in_stock", "is_apple": False, "retailer": None}
 
 
 @respx.mock
@@ -226,7 +226,7 @@ async def test_preview_apple_uses_resolve():
     respx.get(url).mock(return_value=httpx.Response(200, text=load("apple_airpods.html")))
     p = await checkers.preview_url(url)
     assert p == {"name": "AirPods 4", "image_url": "https://www.apple.com/is/airpods-4-select-202409?wid=1200",
-                 "price": "$129.00", "status": "unknown", "is_apple": True}
+                 "price": "$129.00", "status": "unknown", "is_apple": True, "retailer": None}
 
 
 async def test_resolve_apple_never_raises(monkeypatch):

@@ -1,0 +1,4 @@
+{"action": "Product-Variation", "product": {"id": "M1234", "productName": "Ornament Set",
+ "available": true, "readyToOrder": false,
+ "availability": {"messages": ["Select Styles for Availability"]},
+ "price": {"sales": {"value": 19.99, "currency": "USD"}}}}

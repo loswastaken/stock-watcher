@@ -1,0 +1,4 @@
+{"data":{"product":{"tcin":"89444444","fulfillment":{"sold_out":false,
+"shipping_options":{"availability_status":"IN_STOCK"},
+"store_options":[{"location_id":"3456","location_name":"Chicago Lincoln Park","location_available_to_promise_quantity":1.0,
+ "order_pickup":{"availability_status":"LIMITED_STOCK"}}]}}}}

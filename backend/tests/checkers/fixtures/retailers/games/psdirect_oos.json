@@ -1,0 +1,6 @@
+{"products": [{
+  "code": "3006222",
+  "name": "PlayStation®5 Pro Console",
+  "price": {"currencyIso": "USD", "value": 749.99, "formattedValue": "$749.99"},
+  "stock": {"stockLevelStatus": "outOfStock"}
+}]}

@@ -36,6 +36,9 @@ def settings_out(s: UserSettings) -> SettingsOut:
         default_max_distance_miles=s.default_max_distance_miles or 25,
         notify_on_out_of_stock=bool(s.notify_on_out_of_stock),
         theme=s.theme or "dark",
+        muted_retailers=[k for k in (s.muted_retailers or []) if isinstance(k, str)],
+        auto_rearm=bool(s.auto_rearm),
+        alert_sound=s.alert_sound is not False,
     )
 
 

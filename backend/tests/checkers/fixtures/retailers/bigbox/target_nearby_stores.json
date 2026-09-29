@@ -1,0 +1,6 @@
+{"data":{"nearby_stores":{"count":4,"stores":[
+ {"store_id":"1234","location_name":"Oak Park","distance":3.2,"mailing_address":{"city":"Oak Park","region":"IL","postal_code":"60302"}},
+ {"store_id":"2345","location_name":"Forest Park","distance":4.8,"mailing_address":{"region":"IL"}},
+ {"store_id":"3456","location_name":"Chicago Lincoln Park","distance":9.1,"mailing_address":{"region":"IL"}},
+ {"store_id":"9999","location_name":"Far Away","distance":80.0,"mailing_address":{"region":"IN"}}
+]}}}

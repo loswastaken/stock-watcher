@@ -1,0 +1,5 @@
+{"action": "Product-Variation", "product": {"id": "20023800", "productName": "Nintendo Switch 2 Console",
+ "available": true, "readyToOrder": true,
+ "availability": {"messages": ["In Stock"], "inStockDate": null},
+ "price": {"sales": {"value": 449.99, "currency": "USD", "formatted": "$449.99"}, "list": null},
+ "images": {"large": [{"url": "https://media.gamestop.com/i/gamestop/20023800?w=1200", "alt": "Switch 2"}]}}}

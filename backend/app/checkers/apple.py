@@ -516,7 +516,9 @@ async def _client() -> httpx.AsyncClient:
         if s.client is not None and (s.client.is_closed or time.monotonic() - s.created > JAR_TTL):
             _drop_client(s)
         if s.client is None:
-            s.client = fetcher.make_client(headers=_BASE_HEADERS)
+            # HTTP/1.1 as before: the shared default is now HTTP/2, but this checker works
+            # with its established fingerprint, so keep it unchanged.
+            s.client = fetcher.make_client(headers=_BASE_HEADERS, http2=False)
             s.created = time.monotonic()
             s.warmed = False
         if not s.warmed:
