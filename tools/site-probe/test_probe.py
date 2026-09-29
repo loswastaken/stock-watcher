@@ -368,3 +368,59 @@ def test_serve_ui_and_api(tmp_path, fake_backend):
         httpd.server_close()
         with contextlib.suppress(Exception):
             srv.close()
+
+
+# --------------------------------------------------------------------------- browser options
+
+
+@pytest.fixture
+def clean_browser_env(monkeypatch):
+    for k in ("ENABLE_BROWSER", "BROWSER_MODE", "BROWSER_CHANNEL", "BROWSER_CDP_URL", "BROWSER_PROFILE_DIR"):
+        monkeypatch.delenv(k, raising=False)
+    return monkeypatch
+
+
+def _parse(*argv):
+    return probe.build_parser().parse_args(list(argv))
+
+
+def test_browser_flags_map_to_backend_env(clean_browser_env):
+    import os
+
+    a = _parse("sweep", "--headless", "--chrome", "--cdp", "http://127.0.0.1:9222")
+    probe.apply_browser_options(a, platform="linux")
+    assert os.environ["BROWSER_MODE"] == "headless" and os.environ["BROWSER_CHANNEL"] == "chrome"
+    assert os.environ["BROWSER_CDP_URL"] == "http://127.0.0.1:9222"
+    assert os.environ["BROWSER_PROFILE_DIR"] == str(probe.DEFAULT_PROFILE)
+    with pytest.raises(SystemExit):
+        _parse("check", "https://x.test/p", "--headed", "--headless")  # mutually exclusive
+
+
+def test_macos_defaults_to_installed_chrome(clean_browser_env):
+    import os
+
+    clean_browser_env.setattr(fetcher, "chrome_installed", lambda: True)
+    probe.apply_browser_options(_parse("check", "https://x.test/p"), platform="darwin")
+    assert os.environ["BROWSER_CHANNEL"] == "chrome" and "BROWSER_MODE" not in os.environ  # auto = headed on macOS
+    clean_browser_env.delenv("BROWSER_CHANNEL")
+    probe.apply_browser_options(_parse("check", "https://x.test/p", "--no-chrome", "--headed"), platform="darwin")
+    assert os.environ["BROWSER_CHANNEL"] == "chromium" and os.environ["BROWSER_MODE"] == "headed"
+    clean_browser_env.delenv("BROWSER_CHANNEL")
+    clean_browser_env.setattr(fetcher, "chrome_installed", lambda: False)
+    probe.apply_browser_options(_parse("serve"), platform="darwin")
+    assert "BROWSER_CHANNEL" not in os.environ
+
+
+def test_engine_and_mode_are_recorded(tmp_path, fake_backend, monkeypatch):
+    info = {"engine": "patchright", "mode": "headed-xvfb", "channel": "chromium", "version": "141.0.7390.37",
+            "persistent_profile": True, "cdp": False, "launched": True}
+    monkeypatch.setattr(fetcher, "browser_info", lambda: dict(info))
+    s = asyncio.run(probe.probe_one(URLS["target"], out_root=tmp_path, preview=False))
+    doc = json.loads((Path(s["bundle_path"]) / "result.json").read_text())
+    assert doc["environment"]["browser"]["engine"] == "patchright"
+    assert doc["environment"]["browser"]["mode"] == "headed-xvfb"
+    md, _ = probe.write_report([s], tmp_path)
+    assert "Browser engine: patchright, headed-xvfb, chromium 141.0.7390.37, persistent profile." in md.read_text()
+    assert probe.describe_browser({"engine": "patchright", "mode": "cdp", "version": "142.0.1", "launched": True}) \
+        == "patchright, cdp, Chrome 142.0.1"
+    assert probe.describe_browser({}) == "unknown (older backend)"

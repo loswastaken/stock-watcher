@@ -11,4 +11,7 @@ beautifulsoup4==4.12.*
 lxml==5.*
 extruct==0.18.*
 playwright==1.56.*
+# Playwright fork without the automation/CDP leaks bot managers detect; same version as
+# playwright so both use one Chromium build (python -m patchright install chromium).
+patchright==1.56.*
 pillow==11.*

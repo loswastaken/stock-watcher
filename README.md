@@ -92,10 +92,53 @@ If using a reverse proxy (e.g., Synology DSM reverse proxy):
 | `CHECK_CONCURRENCY` | `4` | Concurrent checks during scheduler loop |
 | `STATIC_DIR` | `/app/static` | Built SPA location (inside container) |
 | `TZ` | `UTC` | Timezone for scheduler and logs |
-| `ENABLE_BROWSER` | `true` | Allow Playwright Chromium fallback for JS pages |
+| `ENABLE_BROWSER` | `true` | Allow the real-browser (Chromium) fallback for JS pages and bot-protected stores |
+| `BROWSER_MODE` | `auto` | `auto` = headed on a screen, or on a built-in virtual display (Xvfb) in Docker; `headed`; `headless` |
+| `BROWSER_CHANNEL` | bundled Chromium | `chrome` = the installed Google Chrome (desktop only; not in the Docker image) |
+| `BROWSER_CDP_URL` | – | Use a Chrome you run instead of launching one, e.g. `http://chromium:9223` (see below) |
+| `BROWSER_CHALLENGE_WAIT` | `20` | Seconds a "Just a moment…" / "Access Denied" check gets to clear before giving up |
+| `BROWSER_CONCURRENCY` | `2` | Browser tabs open at once |
+| `BROWSER_PROFILE_DIR` | `$DATA_DIR/browser-profile` | Browser profile; keeps the cookies stores set after their bot check |
 | `STOCKWATCHER_IMPERSONATE` | `true` | Use Chrome TLS impersonation (curl_cffi) for bot-protected stores such as Best Buy; `false` to use plain HTTP |
 | `BESTBUY_API_KEY` | – | Optional [Best Buy developer key](https://developer.bestbuy.com/): most reliable Best Buy checks, plus store pickup |
 | `KROGER_CLIENT_ID` / `KROGER_CLIENT_SECRET` | – | Optional [Kroger developer app](https://developer.kroger.com/): stock at your nearest Kroger-family store |
+
+### Bot-protected stores (real browser)
+
+Stores behind Cloudflare, Akamai, PerimeterX or Imperva block plain requests and headless browsers.
+Stock Watcher uses a real Chromium ([patchright](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright-python),
+a Playwright build without automation tells). In Docker it runs headed on a virtual display, keeps its
+cookies in `/data/browser-profile`, and gives a bot check up to `BROWSER_CHALLENGE_WAIT` seconds to pass.
+Stores known to need it go straight to the browser.
+
+If a store still says *Blocked by bot protection*, point Stock Watcher at a Chrome you can see and
+solve the captcha in once. Add to the same compose file:
+
+```yaml
+  chromium:
+    image: lscr.io/linuxserver/chromium:latest
+    container_name: chromium
+    restart: unless-stopped
+    shm_size: 1gb
+    security_opt: [seccomp:unconfined]
+    environment:
+      TZ: America/New_York
+      CUSTOM_USER: admin        # login for the web desktop
+      PASSWORD: change-me
+      CHROME_CLI: "--remote-debugging-port=9222 --user-data-dir=/config/stockwatcher-profile"
+    volumes:
+      - /volume2/docker/chromium:/config   # keeps its cookies
+    ports:
+      - "192.168.1.10:3001:3001"           # web desktop, your NAS's LAN IP only
+  chromium-cdp:  # Chrome only listens on its own localhost: forward it to stock-watcher (not published)
+    image: alpine/socat
+    restart: unless-stopped
+    network_mode: "service:chromium"
+    command: tcp-listen:9223,fork,reuseaddr tcp-connect:127.0.0.1:9222
+```
+
+Set `BROWSER_CDP_URL: "http://chromium:9223"` on `stock-watcher`, recreate both, open
+`https://192.168.1.10:3001`, visit the store and pass its check. Checks then run in that Chrome, with its cookies.
 
 ### ntfy Setup (Notifications)
 
@@ -238,6 +281,18 @@ Frontend dev server runs on `http://localhost:5173` and proxies `/api` requests 
 - Increase `shm_size` in docker-compose (set to `1gb` by default)
 - Chromium needs shared memory for rendering
 - Restart the container after adjusting
+- The log line `browser started: {...}` shows the engine and mode (`headed-xvfb` is the normal Docker mode).
+  Set `BROWSER_MODE: "headless"` to rule out the virtual display.
+- A crashed run's profile locks are cleared automatically. If the profile itself is broken, stop the
+  container and delete `data/browser-profile/`; it only holds store cookies.
+
+### A store says "Blocked by bot protection"
+
+- Some stores clear after the first check stores a cookie in the browser profile. Give it a few checks.
+- Raise `BROWSER_CHALLENGE_WAIT` (e.g. `40`) for slow challenges.
+- Use a Chrome you can see (`BROWSER_CDP_URL`, see [Bot-protected stores](#bot-protected-stores-real-browser))
+  and solve the captcha there once.
+- Run the [site probe](tools/site-probe/README.md) on your computer with `--chrome` or `--cdp` to see what the store sends.
 
 ### "Cannot log in" / Sessions not persisting
 

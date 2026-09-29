@@ -40,6 +40,8 @@ HERE = Path(__file__).resolve().parent
 BACKEND = Path(os.environ.get("STOCK_WATCHER_BACKEND") or HERE.parent.parent / "backend").resolve()
 DEFAULT_OUT = HERE / "probe-output"
 DEFAULT_SITES = HERE / "sites.json"
+# The probe's own persistent browser profile (store cookies survive between runs).
+DEFAULT_PROFILE = HERE / ".browser-profile"
 LIVE_FIXTURES = BACKEND / "tests" / "checkers" / "fixtures" / "live"
 PROBE_VERSION = 1
 MAX_BODY = 2_000_000
@@ -73,11 +75,35 @@ def backend() -> tuple[Any, Any, Any]:
 
 
 def playwright_available() -> bool:
-    try:
-        import playwright  # noqa: F401
-    except ImportError:
-        return False
-    return True
+    """patchright or playwright is importable."""
+    import importlib.util
+
+    return any(importlib.util.find_spec(n) is not None for n in ("patchright", "playwright"))
+
+
+def browser_info() -> dict:
+    """The backend's browser engine / mode (``fetcher.browser_info()``), {} on an older backend."""
+    with contextlib.suppress(Exception):
+        _, fetcher, _ = backend()
+        fn = getattr(fetcher, "browser_info", None)
+        if callable(fn):
+            return dict(fn())
+    return {}
+
+
+def describe_browser(info: dict) -> str:
+    """One line for the report header, e.g. "patchright, headed-xvfb, chrome 141.0.7390.37, persistent profile"."""
+    if not info:
+        return "unknown (older backend)"
+    parts = [str(info.get("engine") or "no engine installed"), str(info.get("mode") or "?")]
+    if info.get("mode") != "cdp":
+        parts.append(" ".join(str(x) for x in (info.get("channel") or "chromium", info.get("version")) if x))
+        parts.append("persistent profile" if info.get("persistent_profile") else "temporary profile")
+    elif info.get("version"):
+        parts.append(f"Chrome {info['version']}")
+    if not info.get("launched"):
+        parts.append("not started")
+    return ", ".join(p for p in parts if p)
 
 
 # --------------------------------------------------------------------------- scrubbing
@@ -371,6 +397,7 @@ def environment_info() -> dict:
         "python": platform.python_version(),
         "browser_enabled": os.environ.get("ENABLE_BROWSER", "true"),
         "playwright_installed": playwright_available(),
+        "browser": browser_info(),
     }
 
 
@@ -577,6 +604,8 @@ def write_report(results: list[dict], out_root: Path = DEFAULT_OUT, *, title: st
         f"Generated {now} on {env['os']} ({env['machine']}), Python {env['python']}, "
         f"browser {'on' if env['browser_enabled'].lower() not in ('0', 'false', 'no', 'off') else 'off'}"
         f" (playwright {'installed' if env['playwright_installed'] else 'missing'}).",
+        "",
+        f"Browser engine: {describe_browser(env.get('browser') or {})}.",
         "",
         f"**{len(results)} checks:** " + ", ".join(f"{counts[v]} {v}" for v in VERDICTS),
         "",
@@ -1064,6 +1093,38 @@ def _apply_browser_flag(flag: bool | None) -> None:
         os.environ["ENABLE_BROWSER"] = "true" if flag else "false"
 
 
+def _chrome_installed() -> bool:
+    with contextlib.suppress(Exception):
+        _, fetcher, _ = backend()
+        fn = getattr(fetcher, "chrome_installed", None)
+        if callable(fn):
+            return bool(fn())
+    return False
+
+
+def apply_browser_options(a: argparse.Namespace, *, platform: str | None = None) -> None:
+    """Map the browser flags to the backend's environment variables.
+
+    --headed / --headless -> BROWSER_MODE; --chrome / --no-chrome -> BROWSER_CHANNEL;
+    --cdp URL -> BROWSER_CDP_URL. The probe keeps its own profile (.browser-profile/). On
+    macOS the default is a headed, installed Google Chrome when there is one."""
+    _apply_browser_flag(getattr(a, "browser", None))
+    os.environ.setdefault("BROWSER_PROFILE_DIR", str(DEFAULT_PROFILE))
+    mode = getattr(a, "browser_mode", None)
+    if mode:
+        os.environ["BROWSER_MODE"] = mode
+    cdp = getattr(a, "cdp", None)
+    if cdp:
+        os.environ["BROWSER_CDP_URL"] = cdp
+    chrome = getattr(a, "chrome", None)
+    if chrome is True:
+        os.environ["BROWSER_CHANNEL"] = "chrome"
+    elif chrome is False:
+        os.environ["BROWSER_CHANNEL"] = "chromium"
+    elif (platform or sys.platform) == "darwin" and not os.environ.get("BROWSER_CHANNEL") and _chrome_installed():
+        os.environ["BROWSER_CHANNEL"] = "chrome"
+
+
 def _add_check_opts(p: argparse.ArgumentParser) -> None:
     p.add_argument("--zip", help="ZIP code for pickup / local availability")
     p.add_argument("--fulfillment", choices=["delivery", "pickup", "any"])
@@ -1071,8 +1132,21 @@ def _add_check_opts(p: argparse.ArgumentParser) -> None:
     p.add_argument("--store-id", help="a specific store id (Micro Center, Target, ...)")
     p.add_argument("--any-seller", action="store_true", help="also count marketplace / third-party sellers")
     p.add_argument("--browser", action=argparse.BooleanOptionalAction, default=None,
-                   help="allow/deny the headless Chromium fallback (default: the app's default, on)")
+                   help="allow/deny the browser fallback (default: the app's default, on)")
+    _add_browser_opts(p)
     p.add_argument("--out", type=Path, default=DEFAULT_OUT, help="output folder (default probe-output/)")
+
+
+def _add_browser_opts(p: argparse.ArgumentParser) -> None:
+    g = p.add_mutually_exclusive_group()
+    g.add_argument("--headed", dest="browser_mode", action="store_const", const="headed",
+                   help="show the browser window (default on macOS/Windows; Linux uses Xvfb when there is no screen)")
+    g.add_argument("--headless", dest="browser_mode", action="store_const", const="headless",
+                   help="run the browser without a window")
+    p.add_argument("--chrome", action=argparse.BooleanOptionalAction, default=None,
+                   help="use your installed Google Chrome instead of the bundled Chromium (default on macOS when installed)")
+    p.add_argument("--cdp", metavar="URL",
+                   help="use a Chrome you started with --remote-debugging-port, e.g. http://127.0.0.1:9222")
 
 
 def _cli_config(a: argparse.Namespace) -> dict:
@@ -1087,7 +1161,7 @@ async def _shutdown_backend() -> None:
 
 
 def cmd_check(a: argparse.Namespace) -> int:
-    _apply_browser_flag(a.browser)
+    apply_browser_options(a)
     rc = _cli_config(a)
     entries = [{"key": None, "url": u, "retailer_config": {}, "note": None} for u in a.urls]
 
@@ -1107,13 +1181,14 @@ def cmd_check(a: argparse.Namespace) -> int:
 
 
 def cmd_sweep(a: argparse.Namespace) -> int:
-    _apply_browser_flag(a.browser)
+    apply_browser_options(a)
     rc = _cli_config(a)
     only = [k.strip() for k in (a.only or "").split(",") if k.strip()] or None
     entries = select_entries(load_sites(a.sites), only)
     backend()
     total = len(entries)
     print(f"Checking {total} URL(s) with concurrency {a.concurrency}. This can take a few minutes…")
+    print(f"Browser: {describe_browser(browser_info())}")
     done = [0]
 
     def on_result(_i: int, s: dict) -> None:
@@ -1146,7 +1221,7 @@ def cmd_bundle(a: argparse.Namespace) -> int:
 
 
 def cmd_serve(a: argparse.Namespace) -> int:
-    _apply_browser_flag(a.browser)
+    apply_browser_options(a)
     backend()
     httpd, probe = start_server(a.port, a.out, a.sites, a.concurrency)
     url = f"http://127.0.0.1:{httpd.server_address[1]}/"
@@ -1204,6 +1279,7 @@ def build_parser() -> argparse.ArgumentParser:
     v.add_argument("--concurrency", type=int, default=3)
     v.add_argument("--out", type=Path, default=DEFAULT_OUT)
     v.add_argument("--browser", action=argparse.BooleanOptionalAction, default=None)
+    _add_browser_opts(v)
     v.add_argument("--open", action=argparse.BooleanOptionalAction, default=True, help="open it in your browser")
     v.set_defaults(func=cmd_serve)
 

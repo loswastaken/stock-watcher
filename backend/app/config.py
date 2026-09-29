@@ -27,6 +27,15 @@ class Settings(BaseSettings):
     static_dir: Path = Path("/app/static")
     tz: str = "UTC"
     enable_browser: bool = True
+    # Real-browser engine (read from the environment by app.checkers.fetcher; listed here
+    # so they are documented and validated in one place).
+    # auto = headed on a display / on a private Xvfb display, else headless.
+    browser_mode: str = "auto"  # auto | headed | headless (unknown values act as auto)
+    browser_channel: str | None = None  # "chrome" = installed Google Chrome; default bundled Chromium
+    browser_cdp_url: str | None = None  # attach to a running Chrome, e.g. http://192.168.1.10:9222
+    browser_challenge_wait: float = 20.0  # seconds a bot challenge gets to clear by itself
+    browser_concurrency: int = 2  # pages (tabs) open at once
+    browser_profile_dir: Path | None = None  # default: $DATA_DIR/browser-profile
     app_version: str = "dev"
     # In-app updates: "latest" is read from the public image; "Update now" asks an existing
     # Watchtower (HTTP API mode) to update this container. No Docker socket in the app.
@@ -38,7 +47,7 @@ class Settings(BaseSettings):
     login_max_failures: int = 10
     login_window_seconds: int = 900
 
-    @field_validator("secret_key", mode="before")
+    @field_validator("secret_key", "browser_channel", "browser_cdp_url", "browser_profile_dir", mode="before")
     @classmethod
     def _blank_secret_is_none(cls, v):
         if isinstance(v, str) and not v.strip():

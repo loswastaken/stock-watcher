@@ -14,9 +14,14 @@ services:
       # WATCHTOWER_URL: "http://<nas-ip>:8080"
       # WATCHTOWER_TOKEN: "<the Watchtower container's WATCHTOWER_HTTP_API_TOKEN>"
       # SECRET_KEY: ""  # Optional; otherwise generated and stored in /data/secret.key
+      # Real browser for bot-protected stores: headed Chromium on a built-in virtual display,
+      # cookies kept in /data/browser-profile. See README "Bot-protected stores".
+      # BROWSER_MODE: "auto"  # auto | headed | headless
+      # BROWSER_CDP_URL: "http://chromium:9223"  # use a Chrome you run (see README) instead
     labels:
       # Auto-updates via an existing Watchtower. Its scope must match this label
       # (WATCHTOWER_SCOPE); remove the scope line if your Watchtower has no scope.
       com.centurylinklabs.watchtower.enable: "true"
       com.centurylinklabs.watchtower.scope: "homelab"
-    shm_size: 1gb  # Required for Chromium in Playwright
+    shm_size: 1gb  # Required for Chromium
+    init: true  # reaps the browser's and Xvfb's child processes

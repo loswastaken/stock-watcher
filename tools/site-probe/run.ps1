@@ -1,5 +1,5 @@
 # Stock Watcher site probe launcher (Windows PowerShell).
-# First run: creates .venv here, installs the backend's requirements and Playwright's Chromium.
+# First run: creates .venv here, installs the backend's requirements and patchright's Chromium.
 # Then forwards every argument to probe.py, e.g.
 #   powershell -ExecutionPolicy Bypass -File .\run.ps1 serve
 #   powershell -ExecutionPolicy Bypass -File .\run.ps1 sweep --only target,bestbuy
@@ -54,8 +54,12 @@ if ($Have -ne $Want) {
 
 $PwOk = Join-Path $Venv '.playwright-ok'
 if (-not (Test-Path $PwOk)) {
-    Write-Host 'Installing the headless Chromium used for bot-protected pages (one time) ...'
-    & $VPy -m playwright install chromium
+    # patchright and playwright are pinned to the same release: one Chromium serves both.
+    $Engine = 'patchright'
+    & $VPy -c 'import patchright' 2>$null | Out-Null
+    if ($LASTEXITCODE -ne 0) { $Engine = 'playwright' }
+    Write-Host "Installing the Chromium used for bot-protected pages ($Engine, one time) ..."
+    & $VPy -m $Engine install chromium
     if ($LASTEXITCODE -eq 0) { New-Item -ItemType File -Path $PwOk -Force | Out-Null }
     else { Write-Warning 'Chromium install failed; browser fallback will not work. You can still run with --no-browser.' }
 }

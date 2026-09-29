@@ -289,6 +289,8 @@ async def test_fetch_html_returns_queued_without_raising(monkeypatch):
         raise AssertionError("a waiting room must not trigger the browser")
 
     monkeypatch.setattr(fetcher, "browser_fetch", no_browser)
+    # GameStop is a registry "browser" store (browser-first); this is about the plain path.
+    monkeypatch.setattr(fetcher, "_retailer_needs_browser", lambda u: False)
     url = "https://www.gamestop.com/consoles/ps5/20012345.html"
     respx.get(url).mock(return_value=httpx.Response(302, headers={"Location": "https://gamestop.queue-it.net/?c=gs"}))
     respx.get("https://gamestop.queue-it.net/?c=gs").mock(return_value=httpx.Response(503, text="<html>busy</html>"))

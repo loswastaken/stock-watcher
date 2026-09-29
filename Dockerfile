@@ -17,7 +17,7 @@ COPY frontend/ .
 RUN npm run build
 
 
-# Stage 2: Runtime (Python + FastAPI + Playwright)
+# Stage 2: Runtime (Python + FastAPI + a real Chromium on a virtual display)
 FROM python:3.12-slim-bookworm
 
 # Environment variables
@@ -33,9 +33,14 @@ WORKDIR /app
 # Copy backend requirements
 COPY backend/requirements.txt .
 
-# Install Python dependencies
+# Python dependencies, then Chromium (+ its system libraries) for patchright. patchright and
+# playwright are pinned to the same release, so they share this one Chromium build.
+# Xvfb gives Chromium a virtual display: it runs headed (a real browser, not headless) even
+# though the container has no screen. xauth is needed by xvfb-run for debugging by hand.
 RUN pip install --no-cache-dir -r requirements.txt && \
-    python -m playwright install --with-deps chromium && \
+    python -m patchright install --with-deps chromium && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends xvfb xauth fonts-liberation fonts-noto-color-emoji && \
     rm -rf /var/lib/apt/lists/*
 
 # Copy backend source code

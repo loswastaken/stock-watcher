@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Stock Watcher site probe launcher (macOS / Linux).
-# First run: creates .venv here, installs the backend's requirements and Playwright's Chromium.
+# First run: creates .venv here, installs the backend's requirements and patchright's Chromium.
 # Then forwards every argument to probe.py, e.g.  ./run.sh serve   ./run.sh sweep --only target
 set -euo pipefail
 
@@ -42,13 +42,17 @@ if [ ! -f "$STAMP" ] || [ "$(cat "$STAMP")" != "$WANT" ]; then
 fi
 
 if [ ! -f "$VENV/.playwright-ok" ]; then
-  echo "Installing the headless Chromium used for bot-protected pages (one time) ..."
-  if "$VPY" -m playwright install chromium; then
+  # patchright (the stealthier Playwright the checker prefers) and playwright are pinned to the
+  # same release, so this one Chromium serves both.
+  ENGINE=patchright
+  "$VPY" -c 'import patchright' 2>/dev/null || ENGINE=playwright
+  echo "Installing the Chromium used for bot-protected pages ($ENGINE, one time) ..."
+  if "$VPY" -m "$ENGINE" install chromium; then
     touch "$VENV/.playwright-ok"
   else
     echo "WARNING: Chromium install failed; browser fallback will not work." >&2
-    echo "  Linux may need: sudo $VPY -m playwright install-deps chromium" >&2
-    echo "  You can still run with --no-browser." >&2
+    echo "  Linux may need: sudo $VPY -m $ENGINE install-deps chromium" >&2
+    echo "  With Google Chrome installed you can use --chrome instead; or run with --no-browser." >&2
   fi
 fi
 
