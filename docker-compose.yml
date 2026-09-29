@@ -6,15 +6,11 @@ services:
     ports:
       - "8095:8000"  # host:container — change the left side if 8095 is taken
     volumes:
-      - /volume2/stock-watcher/data:/data
+      - /volume2/docker/stock-watcher/data:/data
     environment:
       TZ: America/New_York  # Change to your timezone
       COOKIE_SECURE: "true"  # Set to false only for plain HTTP on LAN
       # SECRET_KEY: ""  # Optional; otherwise generated and stored in /data/secret.key
     labels:
-      com.centurylinklabs.watchtower.enable: "true"
+      com.centurylinklabs.watchtower.enable: "false"  # keep other Watchtowers away; updates are manual
     shm_size: 1gb  # Required for Chromium in Playwright
-
-# Auto-updates use your existing Watchtower container (see README → Auto-Updates).
-# Only one Watchtower should run per Docker host: a second instance stops the first.
-# If you don't have one yet, deploy deploy/watchtower-compose.yml.

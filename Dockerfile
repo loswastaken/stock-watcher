@@ -50,8 +50,7 @@ ENV APP_VERSION=${APP_VERSION}
 
 LABEL org.opencontainers.image.title="Stock Watcher" \
       org.opencontainers.image.description="Self-hosted restock alert watcher with ntfy notifications" \
-      org.opencontainers.image.source="https://github.com/loswastaken/stock-watcher" \
-      com.centurylinklabs.watchtower.enable="true"
+      org.opencontainers.image.source="https://github.com/loswastaken/stock-watcher"
 
 # Volume for persistent data (SQLite + images)
 VOLUME /data
