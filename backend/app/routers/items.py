@@ -29,7 +29,7 @@ from .settings import get_or_create_settings
 log = logging.getLogger("stockwatcher.items")
 router = APIRouter(prefix="/items", tags=["items"])
 
-PREVIEW_TIMEOUT = 45
+PREVIEW_TIMEOUT = 65  # just above checkers.PREVIEW_TIMEOUT, which returns its own error
 
 
 def _host(url: str) -> str:

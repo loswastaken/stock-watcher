@@ -40,6 +40,39 @@ async def test_blocked_status_falls_back_to_browser(monkeypatch, status):
 
 
 @respx.mock
+@pytest.mark.parametrize("exc", [httpx.ReadTimeout("stalled"), httpx.ConnectError("reset")])
+async def test_timeout_or_network_error_falls_back_to_browser(monkeypatch, exc):
+    # Akamai-style protection (e.g. Best Buy) stalls plain clients instead of returning 403.
+    monkeypatch.setenv("ENABLE_BROWSER", "true")
+    respx.get(URL).mock(side_effect=exc)
+    calls: list = []
+    monkeypatch.setattr(fetcher, "browser_fetch", _fake_browser(load("button_enabled.html"), calls))
+    res = await fetcher.fetch_html(URL)
+    assert calls == [URL] and res.via_browser
+
+
+@respx.mock
+async def test_timeout_without_browser_still_errors(monkeypatch):
+    monkeypatch.setenv("ENABLE_BROWSER", "false")
+    respx.get(URL).mock(side_effect=httpx.ReadTimeout("stalled"))
+    with pytest.raises(fetcher.FetchError, match="Timed out"):
+        await fetcher.fetch_html(URL)
+
+
+@respx.mock
+async def test_timeout_and_browser_failure_reports_both(monkeypatch):
+    monkeypatch.setenv("ENABLE_BROWSER", "true")
+    respx.get(URL).mock(side_effect=httpx.ReadTimeout("stalled"))
+
+    async def fail(url):
+        raise fetcher.FetchError("Browser fetch failed: TimeoutError")
+
+    monkeypatch.setattr(fetcher, "browser_fetch", fail)
+    with pytest.raises(fetcher.FetchError, match="Timed out.*browser retry also failed"):
+        await fetcher.fetch_html(URL)
+
+
+@respx.mock
 async def test_challenge_page_falls_back_to_browser(monkeypatch):
     monkeypatch.setenv("ENABLE_BROWSER", "true")
     respx.get(URL).mock(return_value=httpx.Response(200, text=load("cloudflare_challenge.html")))
