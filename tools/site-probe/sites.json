@@ -1,0 +1,101 @@
+{
+  "_README": "SAMPLE product URLs, one or more per supported store (keys match backend/app/checkers/retailers/registry.py). They were written without live access to the sites, so some will be stale, delisted or redirect: replace any that 404 or point at the wrong product with a current product page you care about (a mix of in-stock and sold-out items is ideal). Each entry is either a URL string or {\"url\": ..., \"retailer_config\": {...}, \"note\": ...}; retailer_config accepts fulfillment (delivery|pickup|any), zip, radius_miles, store_id, official_only, condition.",
+  "sites": {
+    "amd": [
+      "https://www.amd.com/en/direct-buy/5335621300/us",
+      "https://www.amd.com/en/products/processors/desktops/ryzen/9000-series/amd-ryzen-7-9800x3d.html"
+    ],
+    "asus": ["https://shop.asus.com/us/90mb1ir0-m0aay0-rog-strix-b850-f-gaming-wifi.html"],
+    "acegraphics": ["https://acegraphicscards.com/products/msi-geforce-rtx-5070-ventus-2x-oc-12g"],
+    "adorama": ["https://www.adorama.com/ifjx100vs.html"],
+    "amazon": [
+      "https://www.amazon.com/dp/B0D1XD1ZV3",
+      "https://www.amazon.com/PlayStation-5-Pro-Console/dp/B0DGY63Z2H"
+    ],
+    "antonline": ["https://www.antonline.com/Sony/Electronics/Gaming_Devices/Gaming_Consoles/1520631"],
+    "bhphoto": ["https://www.bhphotovideo.com/c/product/1809440-REG/fujifilm_16821474_x100vi_digital_camera_silver.html"],
+    "bjs": ["https://www.bjs.com/product/nintendo-switch-2-console/3000000000005530939"],
+    "bandai": ["https://p-bandai.com/us/item/N2780424001001"],
+    "bestbuy": [
+      "https://www.bestbuy.com/site/sony-playstation-5-pro-console-white/6603968.p?skuId=6603968",
+      "https://www.bestbuy.com/product/nintendo-switch-2-system-black/JJGCQ8WQ7K/sku/6614313",
+      {"url": "https://www.bestbuy.com/site/apple-airpods-pro-2-white/6447382.p?skuId=6447382",
+       "retailer_config": {"fulfillment": "pickup", "zip": "60601"}, "note": "store pickup near ZIP"}
+    ],
+    "canon": ["https://www.usa.canon.com/shop/p/eos-r6-mark-ii-body"],
+    "consutronix": ["https://consutronix.com/products/gigabyte-geforce-rtx-5080-windforce-oc-sff-16g"],
+    "costco": ["https://www.costco.com/nintendo-switch-2-console-bundle.product.4000362974.html"],
+    "dell": ["https://www.dell.com/en-us/shop/alienware-aurora-gaming-desktop/spd/alienware-aurora-ac16250-gaming-desktop"],
+    "disney": ["https://www.disneystore.com/stitch-plush-lilo-stitch-medium-15-412304478404.html"],
+    "evga": ["https://www.evga.com/products/product.aspx?pn=220-G7-1000-X1"],
+    "fujifilm": ["https://shopusa.fujifilm-x.com/x100vi-silver/"],
+    "gamefly": ["https://www.gamefly.com/game/mario-kart-world/5022850"],
+    "gamestop": ["https://www.gamestop.com/video-games/nintendo-switch-2/consoles/products/nintendo-switch-2-console/20019703.html"],
+    "gigabyte": ["https://www.gigabyte.com/Graphics-Card/GV-N5090GAMING-OC-32GD"],
+    "govee": ["https://us.govee.com/products/govee-rgbic-floor-lamp-basic"],
+    "hallmark": ["https://www.hallmark.com/ornaments/keepsake-ornaments/star-wars-the-mandalorian-grogu-ornament-1KOB1234.html"],
+    "homedepot": ["https://www.homedepot.com/p/RYOBI-ONE-18V-Cordless-3-8-in-Drill-Driver-Kit-with-1-5-Ah-Battery-and-Charger-PCL206K1/315143462"],
+    "jazwares": [
+      "https://www.squishmallows.com/products/squishmallows-original-16-inch-cam-the-cat",
+      "https://shop.jazwares.com/products/squishmallows-original-12-inch-wendy-the-frog"
+    ],
+    "kohls": ["https://www.kohls.com/product/prd-6589434/lego-icons-orchid-plant-decor-building-set-10311.jsp"],
+    "kroger": ["https://www.kroger.com/p/pokemon-trading-card-game-scarlet-violet-booster-pack/0082050005556"],
+    "lg": ["https://www.lg.com/us/tvs/lg-oled65c5pua-oled-4k-tv"],
+    "lego": [
+      "https://www.lego.com/en-us/product/millennium-falcon-75192",
+      "https://www.lego.com/en-us/product/the-botanical-collection-orchid-10311"
+    ],
+    "leica": ["https://leica-camera.com/en-US/photography/cameras/q/q3-black"],
+    "lenovo": ["https://www.lenovo.com/us/en/p/laptops/legion-laptops/legion-pro-series/legion-pro-7i-gen-10-16-inch-intel/83f5cto1wwus1"],
+    "msi": ["https://us-store.msi.com/Graphics-Cards/NVIDIA-GPU/GeForce-RTX-50-Series/GeForce-RTX-5070-Ti-16G-GAMING-TRIO-OC"],
+    "mattel": [
+      "https://creations.mattel.com/products/masters-of-the-universe-origins-he-man",
+      "https://shop.mattel.com/products/barbie-dreamhouse-hmx10"
+    ],
+    "meijer": ["https://www.meijer.com/shopping/product/nintendo-switch-2-console/4549659.html"],
+    "microcenter": [
+      "https://www.microcenter.com/product/687907/amd-ryzen-7-9800x3d-granite-ridge-am5-470ghz-8-core-boxed-processor-heatsink-not-included",
+      {"url": "https://www.microcenter.com/product/687907/amd-ryzen-7-9800x3d-granite-ridge-am5-470ghz-8-core-boxed-processor-heatsink-not-included",
+       "retailer_config": {"fulfillment": "pickup", "store_id": "151"}, "note": "store 151 = Chicago; pick your own"}
+    ],
+    "microsoft": ["https://www.microsoft.com/en-us/d/surface-laptop-7th-edition/8mzbmmcjzqpv"],
+    "xbox": ["https://www.xbox.com/en-US/configure/8WJ714N3RBTL"],
+    "nyxi": ["https://nyxigame.com/products/nyxi-hyperion-pro-wireless-joy-pad"],
+    "neutronusa": ["https://neutronusa.com/products/zotac-gaming-geforce-rtx-5070-twin-edge-oc"],
+    "newegg": [
+      "https://www.newegg.com/p/N82E16819113877",
+      "https://www.newegg.com/msi-geforce-rtx-5070-ti-rtx-5070-ti-16g-gaming-trio-oc/p/N82E16814137917"
+    ],
+    "nextwarehouse": ["https://www.nextwarehouse.com/item/?p_num=1234567&n=PNY+GeForce+RTX+5080"],
+    "ninja": ["https://www.ninjakitchen.com/pdp/ninja-creami-deluxe-11-in-1-ice-cream-frozen-treat-maker/zidNC501.html"],
+    "nintendo": ["https://www.nintendo.com/us/store/products/nintendo-switch-2-system-123669/"],
+    "nvidia": [
+      "https://marketplace.nvidia.com/en-us/consumer/graphics-cards/nvidia-geforce-rtx-5090/",
+      "https://www.nvidia.com/en-us/geforce/graphics-cards/50-series/rtx-5080/"
+    ],
+    "oculus": ["https://www.meta.com/quest/quest-3/"],
+    "officedepot": ["https://www.officedepot.com/a/products/9690143/Nintendo-Switch-2-Console/"],
+    "popmart": ["https://www.popmart.com/us/products/1123/THE-MONSTERS---Big-into-Energy-Series-Vinyl-Plush-Pendant-Blind-Box"],
+    "playasia": ["https://www.play-asia.com/mario-kart-world/13/70gk5t"],
+    "psdirect": ["https://direct.playstation.com/en-us/buy-consoles/playstation5-pro-console.3009726"],
+    "pokemoncenter": ["https://www.pokemoncenter.com/product/10-10185-101/pokemon-tcg-scarlet-and-violet-prismatic-evolutions-elite-trainer-box"],
+    "qvc": ["https://www.qvc.com/Nintendo-Switch-2-Console.product.E312345.html"],
+    "robertscamera": ["https://www.robertscamera.com/fujifilm-x100vi-digital-camera-silver"],
+    "samsclub": ["https://www.samsclub.com/ip/Nintendo-Switch-2-Mario-Kart-World-Bundle/16634389868"],
+    "stockx": ["https://stockx.com/nintendo-switch-2-console-us-version"],
+    "target": [
+      "https://www.target.com/p/nintendo-switch-2-console/-/A-94693225",
+      {"url": "https://www.target.com/p/pokemon-trading-card-game-scarlet-38-violet-prismatic-evolutions-elite-trainer-box/-/A-93954435",
+       "retailer_config": {"fulfillment": "pickup", "zip": "60601", "radius_miles": 25}, "note": "store pickup near ZIP"}
+    ],
+    "toysrus": ["https://www.macys.com/shop/product/toys-r-us-geoffrey-plush?ID=12345678"],
+    "verizon": ["https://www.verizon.com/smartphones/apple-iphone-17-pro/"],
+    "walmart": [
+      "https://www.walmart.com/ip/PlayStation-5-Pro-Console/5113183757",
+      "https://www.walmart.com/ip/Nintendo-Switch-2-Console/15949610846"
+    ],
+    "zotac": ["https://www.zotacstore.com/us/zotac-gaming-geforce-rtx-5080-solid-oc"],
+    "ebay": ["https://www.ebay.com/itm/387123456789"]
+  }
+}
