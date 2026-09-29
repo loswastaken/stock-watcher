@@ -126,6 +126,8 @@ def test_courier_detected_from_flags_and_types():
         ({"regular": {"deliveryOptions": [{"displayName": "Standard Delivery", "date": "Fri 10/3"}]}}, False),
         ({"regular": {"deliveryOptions": [{"displayName": "Courier", "date": "Not available"}]}}, False),
         ({"regular": {"isCourierEligible": "true"}}, True),
+        ({"regular": {"deliveryOptions": [{"displayName": "Today", "date": "Order by 3pm, delivers within 2 hours"}]}}, True),
+        ({"regular": {"deliveryOptions": [{"displayName": "Standard", "date": "Order within 2 hours for delivery Fri"}]}}, False),
         ({"regular": {"courierAvailable": 1}}, False),
         ("garbage", False),
         (None, False),

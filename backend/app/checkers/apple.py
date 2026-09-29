@@ -527,8 +527,36 @@ async def _import_cookies(cookies: list[dict]) -> None:
         log.debug("cookie import failed: %s", e)
 
 
+# After Apple blocks plain HTTP, go straight to the browser for a while (monotonic deadline).
+BROWSER_PREFERENCE_TTL = 30 * 60
+_prefer_browser_until = 0.0
+
+
+async def _fetch_via_browser(url: str, referer: str, reason: str) -> Any:
+    global _prefer_browser_until
+    if not fetcher.browser_enabled():
+        raise AppleError(f"Apple blocked the availability request ({reason}); browser fallback disabled")
+    try:
+        status, text, cookies = await fetcher.browser_fetch_from_page(referer, url)
+    except FetchError as e:
+        raise AppleError(f"Apple blocked the availability request ({reason}); browser retry failed: {e}") from e
+    data = _parse_json(text) if status == 200 else None
+    if data is None:
+        _prefer_browser_until = 0.0
+        raise AppleError(f"Apple blocked the availability request ({reason}; browser got HTTP {status})")
+    _prefer_browser_until = time.monotonic() + BROWSER_PREFERENCE_TTL
+    await _import_cookies(cookies)
+    return data
+
+
 async def _fetch_fulfillment_uncached(parts: list[str], zip_code: str, referer: str) -> Any:
     url = fulfillment_url(parts, zip_code)
+    if fetcher.browser_enabled() and _prefer_browser_until > time.monotonic():
+        try:
+            return await _fetch_via_browser(url, referer, "recently blocked")
+        except AppleError as e:
+            log.info("apple browser path failed, trying plain HTTP: %s", e)
+
     headers = dict(_XHR_HEADERS, Referer=referer)
     client = await _client()
     resp = await fetcher.http_get(url, headers=headers, client=client)
@@ -542,17 +570,7 @@ async def _fetch_fulfillment_uncached(parts: list[str], zip_code: str, referer: 
     reason = f"HTTP {resp.status_code}" if resp.status_code != 200 else "non-JSON response"
     log.info("apple fulfillment blocked (%s); retrying via browser", reason)
     await _reset_client()
-    if not fetcher.browser_enabled():
-        raise AppleError(f"Apple blocked the availability request ({reason}); browser fallback disabled")
-    try:
-        status, text, cookies = await fetcher.browser_fetch_from_page(referer, url)
-    except FetchError as e:
-        raise AppleError(f"Apple blocked the availability request ({reason}); browser retry failed: {e}") from e
-    data = _parse_json(text) if status == 200 else None
-    if data is None:
-        raise AppleError(f"Apple blocked the availability request ({reason}; browser got HTTP {status})")
-    await _import_cookies(cookies)
-    return data
+    return await _fetch_via_browser(url, referer, reason)
 
 
 def _merge(payloads: list[Any]) -> Any:
@@ -959,8 +977,10 @@ async def shutdown() -> None:
     if same and s.client is not None:
         with contextlib.suppress(Exception):
             await s.client.aclose()
+    global _prefer_browser_until
     _sess = _AppleSession()
     _cache.clear()
+    _prefer_browser_until = 0.0
 
 
 fetcher.register_shutdown(shutdown)

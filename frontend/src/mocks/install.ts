@@ -93,7 +93,7 @@ async function handle(path: string, method: string, body: unknown): Promise<Resp
     const b = body as Record<string, unknown>;
     Object.assign(settings, b);
     if ('ntfy_token' in b) settings.ntfy_token_set = !!b.ntfy_token;
-    delete (settings as Record<string, unknown>).ntfy_token;
+    delete (settings as unknown as Record<string, unknown>).ntfy_token;
     return json(settings);
   }
   if (p === '/settings/test-notification')

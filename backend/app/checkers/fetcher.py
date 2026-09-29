@@ -272,11 +272,9 @@ async def fetch_html(
         except FetchError as e:
             log.info("browser fallback failed for %s: %s", url, e)
             bres = None
-        if bres is not None and 200 <= bres.status < 400 and not looks_like_challenge(bres.text):
+        if bres is not None and bres.status < 400 and not looks_like_challenge(bres.text):
             if reason != "no product signals":
-                _mark_browser_host(url)
-            return bres
-        if bres is not None and reason == "no product signals" and bres.status < 400:
+                _mark_browser_host(url)  # skip the doomed plain request for a while
             return bres
 
     if resp.status_code >= 400:

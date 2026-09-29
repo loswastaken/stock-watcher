@@ -495,7 +495,10 @@ def _is_hidden(el: Tag) -> bool:
         return True
     if _HIDDEN_STYLE_RE.search(str(el.get("style") or "")):
         return True
-    return bool(_HIDDEN_CLASSES & set(_classes(el)))
+    cls = _classes(el)
+    if any(":" in c for c in cls):  # Tailwind-style "hidden md:block" is visible on desktop
+        return False
+    return bool(_HIDDEN_CLASSES & set(cls))
 
 
 def _strip_noise(soup: BeautifulSoup) -> None:
