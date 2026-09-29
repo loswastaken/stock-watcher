@@ -233,6 +233,86 @@ async def test_woocommerce_dom_fallback_when_api_blocked():
     assert "p.stock" in r.detail["matched"]
 
 
+def _woo_item(**kw):
+    item = dict(fxj("woo_store_api.json")[0])
+    item.update(kw)
+    return item
+
+
+@respx.mock
+@pytest.mark.parametrize("legacy", [False, True])
+async def test_woocommerce_ignores_store_api_item_for_another_product(legacy):
+    # Old Store API versions ignore ?slug= and list the latest products instead.
+    respx.get(WOO).mock(return_value=httpx.Response(200, text=fx("woo_product.html")))
+    other = [_woo_item(id=99, slug="red-hat", name="Red Hat", permalink="https://consutronix.com/product/red-hat/")]
+    if legacy:
+        respx.get(WOO_API).mock(return_value=httpx.Response(404))
+        respx.get("https://consutronix.com/wp-json/wc/store/products").mock(return_value=httpx.Response(200, json=other))
+    else:
+        respx.get(WOO_API).mock(return_value=httpx.Response(200, json=other))
+        respx.get("https://consutronix.com/wp-json/wc/store/products").mock(return_value=httpx.Response(404))
+    r = await generic.check_generic(WOO, {"mode": "auto"})
+    assert r.status == "out_of_stock" and "p.stock" in r.detail["matched"]  # the page's own stock line
+    assert r.title == "RTX 5080 Gaming PC"
+
+
+@respx.mock
+async def test_woocommerce_matches_by_permalink_or_slug_anywhere_in_list():
+    respx.get(WOO).mock(return_value=httpx.Response(200, text=fx("woo_product.html")))
+    items = [_woo_item(id=99, slug="red-hat", is_in_stock=False),
+             _woo_item(slug="rtx-5080-gaming-pc-2", permalink="https://consutronix.com/product/rtx-5080-gaming-pc/")]
+    respx.get(WOO_API).mock(return_value=httpx.Response(200, json=items))
+    r = await generic.check_generic(WOO, {"mode": "auto"})
+    assert r.status == "in_stock" and r.detail["product_id"] == 812
+
+
+def _woo_variable(**kw):
+    return _woo_item(type="variable", variations=[
+        {"id": 901, "attributes": [{"name": "Color", "value": "red"}, {"name": "Size", "value": ""}]},
+        {"id": 902, "attributes": [{"name": "Color", "value": "blue"}, {"name": "Size", "value": ""}]},
+    ], **kw)
+
+
+@respx.mock
+@pytest.mark.parametrize("query", ["attribute_pa_color=blue&attribute_size=xl", "variation_id=902"])
+async def test_woocommerce_variation_in_url_uses_the_variation(query):
+    url = f"{WOO}?{query}"
+    respx.get(url).mock(return_value=httpx.Response(200, text=fx("woo_product.html")))
+    respx.get(WOO_API).mock(return_value=httpx.Response(200, json=[_woo_variable()]))
+    var = respx.get(f"{WOO_API}/902").mock(return_value=httpx.Response(200, json={
+        "id": 902, "parent": 812, "type": "variation", "name": "RTX 5080 Gaming PC - Blue", "is_in_stock": False,
+        "is_purchasable": True, "prices": {"price": "209900", "currency_code": "USD", "currency_minor_unit": 2}}))
+    r = await platforms.check_woocommerce(url, fx("woo_product.html"), url, {}, None)
+    assert var.called
+    # the parent says in stock (some variation is); the chosen variation is not
+    assert r.status == "out_of_stock" and r.detail["product_id"] == 902 and "variation 902" in r.detail["matched"]
+    assert r.price == "$2,099.00" and r.image_url == "https://consutronix.com/wp-content/uploads/5080.jpg"
+
+
+@respx.mock
+@pytest.mark.parametrize("query", ["attribute_pa_color=green", "variation_id=999"])
+async def test_woocommerce_unresolved_variation_defers_to_generic(query):
+    url = f"{WOO}?{query}"
+    respx.get(WOO_API).mock(return_value=httpx.Response(200, json=[_woo_variable()]))
+    assert await platforms.check_woocommerce(url, fx("woo_product.html"), url, {}, None) is None
+
+
+@respx.mock
+async def test_woocommerce_variation_fetch_failure_defers_to_generic():
+    url = f"{WOO}?attribute_pa_color=blue"
+    respx.get(WOO_API).mock(return_value=httpx.Response(200, json=[_woo_variable()]))
+    respx.get(f"{WOO_API}/902").mock(return_value=httpx.Response(404))
+    assert await platforms.check_woocommerce(url, fx("woo_product.html"), url, {}, None) is None
+
+
+@respx.mock
+async def test_woocommerce_variable_parent_out_of_stock_means_every_variation_is():
+    url = f"{WOO}?attribute_pa_color=blue"
+    respx.get(WOO_API).mock(return_value=httpx.Response(200, json=[_woo_variable(is_in_stock=False)]))
+    r = await platforms.check_woocommerce(url, fx("woo_product.html"), url, {}, None)
+    assert r.status == "out_of_stock" and r.detail["product_id"] == 812
+
+
 # ------------------------------------------------------------------ Magento / OpenCart
 
 

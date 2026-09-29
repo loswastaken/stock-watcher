@@ -19,7 +19,7 @@ import logging
 import re
 from decimal import Decimal
 from typing import Any, Callable, Iterator
-from urllib.parse import parse_qs, quote, urlencode, urlsplit
+from urllib.parse import parse_qs, quote, unquote, urlencode, urlsplit
 
 from bs4 import BeautifulSoup, Tag
 
@@ -395,26 +395,122 @@ def _woo_dom(html: str) -> tuple[str | None, str | None, str | None]:
     return None, None, None
 
 
+def _norm_path(path: str) -> str:
+    return unquote(path or "").rstrip("/").lower()
+
+
+def _woo_matches(item: Any, slug: str | None, paths: set[str]) -> bool:
+    """The Store API item really is the page's product. Old Store API versions ignore
+    ``?slug=`` and return the latest products, so ``data[0]`` alone proves nothing."""
+    if not isinstance(item, dict):
+        return False
+    if slug and isinstance(item.get("slug"), str) and unquote(item["slug"]).lower() == unquote(slug).lower():
+        return True
+    link = item.get("permalink")
+    if isinstance(link, str) and link:
+        try:
+            lp = _norm_path(urlsplit(link).path)
+        except ValueError:
+            return False
+        return bool(lp) and lp in paths
+    return False
+
+
+_WOO_ATTR_KEY_RE = re.compile(r"^attribute_(?:pa_)?", re.I)
+
+
+def _woo_norm(v: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", "", unquote(str(v or "")).lower())
+
+
+def _woo_variation_query(url: str) -> tuple[str | None, dict[str, str]]:
+    """(``variation_id``, {attribute: value}) from a product URL's query string."""
+    q = _query(url)
+    vid = next((v for v in q.get("variation_id") or [] if v.strip().isdigit()), None)
+    attrs = {k: vals[0] for k, vals in q.items() if k.lower().startswith("attribute_") and vals and vals[0].strip()}
+    return vid, attrs
+
+
+def _woo_pick_variation(item: dict, attrs: dict[str, str]) -> str | None:
+    """The id of the one variation of ``item`` matching the URL's ``attribute_*`` values.
+    Store API variations list ``{"id", "attributes": [{"name": <label>, "value": <slug>}]}``;
+    an empty value means "any"."""
+    variations = item.get("variations")
+    if not isinstance(variations, list) or not attrs:
+        return None
+    hits: list[str] = []
+    for var in variations:
+        if not isinstance(var, dict) or var.get("id") is None:
+            continue
+        vattrs = [a for a in var.get("attributes") or [] if isinstance(a, dict)]
+        ok = True
+        for key, want in attrs.items():
+            kname, wv = _woo_norm(_WOO_ATTR_KEY_RE.sub("", key)), _woo_norm(want)
+            named = [a for a in vattrs if _woo_norm(a.get("name")) == kname]
+            cands = named or vattrs  # labels may differ from the attribute slug
+            if not any(_woo_norm(a.get("value")) in ("", wv) for a in cands):
+                ok = False
+                break
+        if ok:
+            hits.append(str(var["id"]))
+    return hits[0] if len(hits) == 1 else None
+
+
 async def check_woocommerce(url: str, html: str, final_url: str, headers: dict, rcfg: RetailerConfig | None) -> CheckResult | None:
     m = _WOO_SLUG_RE.search(urlsplit(final_url).path) or _WOO_SLUG_RE.search(urlsplit(url).path)
     slug = m.group(1) if m else next((s for s in reversed(urlsplit(final_url).path.split("/")) if s), None)
     origin = _origin(final_url)
+    paths = {p for p in (_norm_path(urlsplit(final_url).path), _norm_path(urlsplit(url).path)) if p}
     item = None
+    api_path = None
     if slug:
         for path in ("/wp-json/wc/store/v1/products", "/wp-json/wc/store/products"):
             try:
                 data = await get_json(f"{origin}{path}?{urlencode({'slug': slug})}", headers={"Referer": final_url})
             except FetchError:
                 continue
-            if isinstance(data, list) and data and isinstance(data[0], dict):
-                item = data[0]
-                break
+            if isinstance(data, list):
+                item = next((d for d in data if _woo_matches(d, slug, paths)), None)
+                if item is not None:
+                    api_path = path
+                    break
+    # A variation picked in the URL (?attribute_pa_color=blue / ?variation_id=): the parent's
+    # is_in_stock only means "some variation is in stock". Use the variation's own record.
+    vid, vattrs = _woo_variation_query(final_url)
+    if vid is None and not vattrs:
+        vid, vattrs = _woo_variation_query(url)
+    # (older Store APIs have no "type": only a declared non-variable type trusts the parent)
+    is_variable = item is not None and (item.get("type") in (None, "variable") or bool(item.get("variations")))
+    if item is not None and (vid or vattrs) and is_variable:
+        if item.get("is_in_stock") is False:
+            pass  # no variation of the product is in stock: the parent's answer holds
+        else:
+            known = {str(v.get("id")) for v in item.get("variations") or [] if isinstance(v, dict)}
+            if vid is not None and known and vid not in known:
+                vid = None
+            if vid is None:
+                vid = _woo_pick_variation(item, vattrs)
+            var = None
+            if vid is not None:
+                try:
+                    var = await get_json(f"{origin}{api_path}/{vid}", headers={"Referer": final_url})
+                except FetchError:
+                    var = None
+            if (not isinstance(var, dict) or str(var.get("id")) != vid or var.get("is_in_stock") is None
+                    or (not known and str(var.get("parent")) != str(item.get("id")))):
+                return None  # unresolved variation: let the generic checker decide
+            if not var.get("name"):
+                var = dict(var, name=item.get("name"))
+            if not var.get("images"):
+                var = dict(var, images=item.get("images"))
+            item = var
     if item is not None and item.get("is_in_stock") is not None:
         in_stock = bool(item.get("is_in_stock"))
         backorder = bool(item.get("is_on_backorder"))
         purchasable = item.get("is_purchasable")
         txt = clean_text(dig(item, "stock_availability", "text"))
-        signals = [f"woocommerce: is_in_stock={in_stock}" + (f" '{txt}'" if txt else "")]
+        signals = [f"woocommerce: is_in_stock={in_stock}" + (f" '{txt}'" if txt else "")
+                   + (f" (variation {item.get('id')})" if item.get("type") == "variation" else "")]
         if in_stock and purchasable is not False:
             verdict, st = "in", "Backorder" if backorder else "In stock"
         elif not in_stock:

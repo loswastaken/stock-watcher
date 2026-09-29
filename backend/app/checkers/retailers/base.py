@@ -97,12 +97,15 @@ def result(
                        image_url=image_url, detail=detail)
 
 
-async def get_json(url: str, *, headers: dict[str, str] | None = None) -> Any:
-    """GET a JSON endpoint with API-style headers. Raises FetchError on HTTP errors / bad JSON."""
-    h = {"Accept": "application/json, text/plain, */*", "Sec-Fetch-Dest": "empty", "Sec-Fetch-Mode": "cors",
-         "Sec-Fetch-Site": "same-site", "Upgrade-Insecure-Requests": None}
+async def get_json(url: str, *, headers: dict[str, str | None] | None = None) -> Any:
+    """GET a JSON endpoint with XHR-style headers (the navigation-only ``Upgrade-Insecure-Requests``
+    and ``Sec-Fetch-User`` defaults are removed). Raises FetchError on HTTP errors / bad JSON."""
+    h: dict[str, str | None] = {
+        "Accept": "application/json, text/plain, */*", "Sec-Fetch-Dest": "empty", "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-site", "Upgrade-Insecure-Requests": None, "Sec-Fetch-User": None,
+    }
     h.update(headers or {})
-    resp = await http_get(url, headers={k: v for k, v in h.items() if v is not None})
+    resp = await http_get(url, headers=h)
     if resp.status_code >= 400:
         raise FetchError(f"HTTP {resp.status_code} from {host_of(url)}", status=resp.status_code)
     try:

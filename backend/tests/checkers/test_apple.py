@@ -446,3 +446,20 @@ async def test_block_reset_does_not_break_concurrent_check(monkeypatch):
     r_blocked, r_ok = await asyncio.gather(blocked, ok)
     assert r_ok.status != "error", r_ok.error
     assert r_blocked.status != "error", r_blocked.error
+
+
+@respx.mock
+async def test_apple_client_stays_on_http11(monkeypatch):
+    # The shared fetcher default is HTTP/2; the Apple checker keeps its HTTP/1.1 fingerprint.
+    seen: dict = {}
+    real = fetcher.make_client
+
+    def spy(**kw):
+        seen.update(kw)
+        return real(**kw)
+
+    monkeypatch.setattr(fetcher, "make_client", spy)
+    respx.get("https://www.apple.com/shop/buy-iphone").mock(return_value=httpx.Response(200, text="ok"))
+    client = await apple._client()
+    assert seen.get("http2") is False
+    assert client._transport._pool._http2 is False

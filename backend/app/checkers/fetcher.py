@@ -81,7 +81,12 @@ IMPERSONATE_HOSTS: frozenset[str] = frozenset({
     "samsclub.com",
 })
 IMPERSONATE_TARGET = "chrome"
-CURL_TIMEOUT = (8.0, 20.0)  # (connect, total) seconds
+# curl_cffi reads a (connect, read) tuple as CONNECTTIMEOUT=connect, TIMEOUT=connect+read, so
+# the second element is what's left of the total budget after connecting. Same budget as
+# ``TIMEOUT`` for httpx: connect 8 s, 15 s for the whole request.
+CURL_CONNECT_TIMEOUT = 8.0
+CURL_TOTAL_TIMEOUT = 15.0
+CURL_TIMEOUT = (CURL_CONNECT_TIMEOUT, CURL_TOTAL_TIMEOUT - CURL_CONNECT_TIMEOUT)
 # Recorded response bodies are capped at this many characters.
 RECORD_BODY_LIMIT = 2 * 1024 * 1024
 
@@ -120,14 +125,13 @@ _CHALLENGE_MARKERS = [
     re.compile(p, re.I)
     for p in (
         r"<title>\s*just a moment\.{0,3}\s*</title>",
-        r"cf-browser-verification|cf_chl_opt|challenge-platform/h/",
+        r"cf-browser-verification|cf_chl_opt|__cf_chl_(?:f_|rt_)?tk=",  # Cloudflare interstitial
         r"<title>\s*attention required!?\s*\|\s*cloudflare",
         r"incapsula incident id",
         r"captcha-delivery\.com|geo\.captcha-delivery",  # DataDome
         r"<title>\s*access denied\s*</title>[\s\S]{0,4000}reference\s*#",  # Akamai
         r"<title>\s*robot or human\?\s*</title>",  # Walmart / Sam's Club (PerimeterX)
         r"<title>\s*pardon our interruption",
-        r"/cdn-cgi/challenge-platform/",
         r"sec-if-cpt-container|_sec/cp_challenge",  # Akamai bot manager
         r"<title>\s*(amazon\.com|amazon)\s*</title>[\s\S]{0,5000}(captcha|characters you see)",
         r"opfcaptcha|/errors/validateCaptcha",  # Amazon captcha
@@ -152,6 +156,10 @@ _SMALL_PAGE_MARKERS = [
         r"enter the characters you see below",  # Amazon captcha
         r"/splashui/challenge",  # eBay
         r"/areyouahuman",  # Newegg
+        # Cloudflare challenge assets. Normal pages of CF sites load the passive bot-detection
+        # script ``/cdn-cgi/challenge-platform/[h/<x>/]scripts/jsd/main.js``: never a challenge.
+        r"/cdn-cgi/challenge-platform/(?!(?:h/\w+/)?scripts/jsd/)",
+        r"\bcf-chl-",
     )
 ]
 _CHALLENGE_PATH_RE = re.compile(
@@ -175,18 +183,36 @@ def looks_like_challenge(html: str, url: str | None = None) -> bool:
 
 QUEUE_STATUS_TEXT = "Waiting room active — drop may be live"
 _QUEUE_PAGE_MAX = 150_000
-_QUEUE_BUY_RE = re.compile(r"add[\s-]+to[\s-]+(?:cart|bag|basket)|\"@type\"\s*:\s*\"Product\"", re.I)
+# A waiting room is never a product page: any of these in the response means it isn't one.
+_QUEUE_BUY_RE = re.compile(
+    r"add[\s-]+to[\s-]+(?:cart|bag|basket)"
+    r"|[\"']@type[\"']\s*:\s*\[?\s*[\"'](?:Product|ProductGroup)[\"']"
+    r"|itemtype\s*=\s*[\"']?https?://schema\.org/Product\b",
+    re.I,
+)
+# Checked against the visible text only (i18n bundles in scripts mention these everywhere).
+_QUEUE_PRODUCT_TEXT_RE = re.compile(r"sold[\s-]*out|out\s+of\s+stock", re.I)
 _QUEUE_IT_RE = re.compile(r"static\.queue-it\.net/script|queue-it\.net|\bqueueit\b|queueit[._-]", re.I)
 _QUEUE_WORDING_RE = re.compile(
     r"\bqueue\b|\bin\s+line\b|waiting\s+room|wait\s+time|place\s+in\s+line|number\s+in\s+line", re.I
 )
-_QUEUE_STRONG_RE = re.compile(
-    r"you\s+are\s+(?:now\s+)?in\s+(?:the\s+)?(?:line|queue|waiting\s+room)"
-    r"|<title>[^<]{0,80}waiting\s+room"
-    r"|/throttle/queue"
-    r"|direct-queue\.playstation\.com",
-    re.I,
+# Waiting-room copy (matched against the visible text).
+_QUEUE_STRONG_TEXT_RE = re.compile(
+    r"you\s+are\s+(?:now\s+)?in\s+(?:the\s+)?(?:line|queue|waiting\s+room)", re.I
 )
+_QUEUE_TITLE_RE = re.compile(r"<title[^>]*>[^<]{0,80}waiting\s+room", re.I)
+# Waiting-room URLs (redirect targets / meta refresh / form actions anywhere in the markup).
+_QUEUE_STRONG_URL_RE = re.compile(r"/throttle/queue|direct-queue\.playstation\.com", re.I)
+_SCRIPT_STYLE_RE = re.compile(r"<(script|style|noscript|template)\b[^>]*>[\s\S]*?</\1\s*>", re.I)
+_COMMENT_RE = re.compile(r"<!--[\s\S]*?-->")
+_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _visible_text(html: str) -> str:
+    """Rough visible text: script/style bodies, comments and tags removed."""
+    text = _SCRIPT_STYLE_RE.sub(" ", html)
+    text = _COMMENT_RE.sub(" ", text)
+    return _TAG_RE.sub(" ", text)
 
 
 def looks_like_queue(html: str, final_url: str | None = None) -> bool:
@@ -206,12 +232,15 @@ def looks_like_queue(html: str, final_url: str | None = None) -> bool:
     html = html or ""
     if not html or len(html) > _QUEUE_PAGE_MAX or _QUEUE_BUY_RE.search(html):
         return False
-    if _QUEUE_STRONG_RE.search(html):
+    text = _visible_text(html)
+    if _QUEUE_PRODUCT_TEXT_RE.search(text):
+        return False
+    if _QUEUE_STRONG_URL_RE.search(html) or _QUEUE_TITLE_RE.search(html) or _QUEUE_STRONG_TEXT_RE.search(text):
         return True
     if _QUEUE_IT_RE.search(html):
-        # queue-it's script tag is also embedded on normal pages; require queue wording
-        # outside of the queue-it identifiers themselves.
-        rest = re.sub(r"queue-?it[\w.-]*", " ", html, flags=re.I)
+        # queue-it's connector script is also embedded on normal pages: require queue
+        # wording in the page's visible text (not in script bodies or queue-it identifiers).
+        rest = re.sub(r"queue-?it[\w.-]*", " ", text, flags=re.I)
         return bool(_QUEUE_WORDING_RE.search(rest))
     return False
 
@@ -312,8 +341,9 @@ _recording: contextvars.ContextVar[list | None] = contextvars.ContextVar("stockw
 
 
 @contextlib.contextmanager
-def recording() -> Iterator[list[dict]]:
+def recording(*, reuse: bool = False) -> Iterator[list[dict]]:
     """Record every fetch made inside the block (in this task and tasks it spawns).
+    With ``reuse=True`` an enclosing recording (if any) is shared instead of hidden.
 
     Yields a list that receives one dict per request::
 
@@ -322,12 +352,49 @@ def recording() -> Iterator[list[dict]]:
 
     Failed requests are recorded with ``status`` None and an ``error`` message.
     """
+    current = _recording.get()
+    if reuse and current is not None:
+        yield current
+        return
     entries: list[dict] = []
     token = _recording.set(entries)
     try:
         yield entries
     finally:
         _recording.reset(token)
+
+
+# --------------------------------------------------------------------------- time budget
+
+_deadline: contextvars.ContextVar[float | None] = contextvars.ContextVar("stockwatcher_fetch_deadline", default=None)
+
+
+@contextlib.contextmanager
+def deadline(seconds: float | None) -> Iterator[None]:
+    """Fetches inside the block (this task and tasks it spawns) shrink their timeouts so
+    they end within ``seconds``: a check/preview with an outer time cap gets a (possibly
+    shorter) browser attempt that returns a page instead of being cancelled mid-way.
+    Nested blocks keep the earlier deadline."""
+    if seconds is None:
+        yield
+        return
+    new = time.monotonic() + max(0.0, seconds)
+    cur = _deadline.get()
+    token = _deadline.set(new if cur is None else min(cur, new))
+    try:
+        yield
+    finally:
+        _deadline.reset(token)
+
+
+def time_left() -> float | None:
+    """Seconds until the current ``deadline`` (None when there is none)."""
+    d = _deadline.get()
+    return None if d is None else d - time.monotonic()
+
+
+_MIN_REQUEST_TIME = 1.0  # don't start a plain request with less time than this left
+_MIN_BROWSER_TIME = 6.0  # ...or a browser navigation
 
 
 def _record(url: str, *, via: str, t0: float, status: int | None = None, final_url: str | None = None,
@@ -404,18 +471,28 @@ _FP_HEADERS = {"user-agent", "sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platfor
 _DEFAULT_LOWER = {k.lower(): v for k, v in DOCUMENT_HEADERS.items()}
 
 
-def _curl_headers(extra: dict[str, str] | None) -> dict[str, str]:
-    merged: dict[str, str] = {}
+def _curl_headers(extra: dict[str, str | None] | None) -> dict[str, str | None]:
+    """Headers for curl_cffi. A None value in ``extra`` removes that header: it is sent to
+    curl as None ("Name:"), which also drops curl_cffi's own impersonation default."""
+    merged: dict[str, str | None] = {}
     lower_key: dict[str, str] = {}
     for src in (DOCUMENT_HEADERS, extra or {}):
         for k, v in src.items():
             lk = k.lower()
-            if v is None or lk == "accept-encoding":  # curl negotiates + decodes itself
+            if lk == "accept-encoding":  # curl negotiates + decodes itself
+                continue
+            if v is None:
+                if lk in lower_key:
+                    merged.pop(lower_key.pop(lk), None)
+                merged[k] = None
                 continue
             if lk in _FP_HEADERS and v == _DEFAULT_LOWER.get(lk):
                 continue
             if lk in lower_key:
                 merged.pop(lower_key[lk], None)
+            else:  # drop an earlier removal marker for the same header
+                for mk in [mk for mk in merged if mk.lower() == lk]:
+                    merged.pop(mk)
             lower_key[lk] = k
             merged[k] = v
     return merged
@@ -445,14 +522,19 @@ def _curl_to_httpx(r: Any, url: str) -> httpx.Response:
                           request=httpx.Request("GET", final))
 
 
-async def _curl_get(url: str, headers: dict[str, str] | None) -> httpx.Response:
+async def _curl_get(url: str, headers: dict[str, str | None] | None) -> httpx.Response:
     session = _get_curl_session()
     cr = _curl_requests()
     timeout_exc: tuple[type, ...] = tuple(
         t for t in (getattr(getattr(cr, "exceptions", None), "Timeout", None),) if isinstance(t, type)
     )
+    kwargs: dict[str, Any] = {}
+    left = time_left()
+    if left is not None and left < CURL_TOTAL_TIMEOUT:
+        connect = min(CURL_CONNECT_TIMEOUT, left)
+        kwargs["timeout"] = (connect, max(left - connect, 0.1))  # curl: total = connect + read
     try:
-        r = await session.get(url, headers=_curl_headers(headers))
+        r = await session.get(url, headers=_curl_headers(headers), **kwargs)
     except asyncio.CancelledError:
         raise
     except Exception as e:  # noqa: BLE001 - curl_cffi raises its own RequestException tree
@@ -466,19 +548,40 @@ async def _curl_get(url: str, headers: dict[str, str] | None) -> httpx.Response:
 # --------------------------------------------------------------------------- plain HTTP
 
 
-async def http_get(url: str, *, headers: dict[str, str] | None = None, client: httpx.AsyncClient | None = None) -> httpx.Response:
+def _httpx_request(client: httpx.AsyncClient, url: str, headers: dict[str, str | None] | None) -> httpx.Request:
+    """A GET request with the client's default headers merged with ``headers``; a None
+    value removes that header (httpx itself would re-add the client default)."""
+    headers = headers or {}
+    extra: dict[str, Any] = {}
+    left = time_left()
+    if left is not None and left < (TIMEOUT.read or 0):
+        extra["timeout"] = httpx.Timeout(left, connect=min(TIMEOUT.connect or left, left))
+    req = client.build_request("GET", url, headers={k: v for k, v in headers.items() if v is not None}, **extra)
+    for k, v in headers.items():
+        if v is None:
+            req.headers.pop(k, None)
+    return req
+
+
+async def http_get(url: str, *, headers: dict[str, str | None] | None = None,
+                   client: httpx.AsyncClient | None = None) -> httpx.Response:
     """GET ``url`` politely (per-host slot + gap). Hosts in ``IMPERSONATE_HOSTS`` go through
     curl_cffi impersonating Chrome (unless a ``client`` is given or impersonation is off);
-    the result is always an ``httpx.Response``. Raises FetchError on network failures."""
+    the result is always an ``httpx.Response``. Raises FetchError on network failures.
+    A None header value removes that default header (e.g. ``Upgrade-Insecure-Requests``)."""
     via = "curl" if client is None and wants_impersonation(url) else "http"
     t0 = time.monotonic()
     async with host_slot(url):
         try:
+            left = time_left()
+            if left is not None and left < _MIN_REQUEST_TIME:
+                raise FetchError(f"Timed out fetching {host_of(url)} (time budget used up)")
             if via == "curl":
                 resp = await _curl_get(url, headers)
             else:
                 try:
-                    resp = await (client or get_client()).get(url, headers=headers)
+                    cl = client or get_client()
+                    resp = await cl.send(_httpx_request(cl, url, headers))
                 except httpx.TimeoutException as e:
                     raise FetchError(f"Timed out fetching {host_of(url)}") from e
                 except httpx.HTTPError as e:
@@ -539,6 +642,9 @@ async def fetch_html(
     url = prepare_document_url(url)
     use_browser = browser_enabled()
     if use_browser and (render_js or _host_prefers_browser(url)):
+        # The browser already had its go: another attempt after the plain request would
+        # only double the worst case (~2 x 45 s) and blow the check's time budget.
+        use_browser = False
         try:
             bres = await browser_fetch(url)
             if bres.queued:
@@ -747,11 +853,31 @@ async def browser_page(block_resources: bool = True):
                 await context.close()
 
 
+def _clamp_ms(default_ms: int, reserve: float = 0.0) -> int:
+    """``default_ms`` shrunk to what's left of the current ``deadline`` minus ``reserve`` s."""
+    left = time_left()
+    if left is None:
+        return default_ms
+    return max(0, min(default_ms, int((left - reserve) * 1000)))
+
+
+def _nav_timeout_ms(url: str) -> int:
+    ms = _clamp_ms(BROWSER_NAV_TIMEOUT_MS, reserve=2.0)
+    if ms < _MIN_BROWSER_TIME * 1000:
+        raise FetchError(f"Timed out fetching {host_of(url)} (no time left for the browser)")
+    return ms
+
+
 async def _settle(page: Any) -> None:
-    with contextlib.suppress(Exception):
-        await page.wait_for_load_state("networkidle", timeout=BROWSER_IDLE_TIMEOUT_MS)
+    idle_ms = _clamp_ms(BROWSER_IDLE_TIMEOUT_MS, reserve=2.0)
+    if idle_ms > 0:
+        with contextlib.suppress(Exception):
+            await page.wait_for_load_state("networkidle", timeout=idle_ms)
     # Give JS challenges (Cloudflare etc.) a chance to resolve and redirect.
     for _ in range(4):
+        left = time_left()
+        if left is not None and left < 4.0:
+            return
         try:
             html = await page.content()
         except Exception:
@@ -771,7 +897,7 @@ async def browser_fetch(url: str) -> FetchResult:
     t0 = time.monotonic()
     try:
         async with browser_page() as page:
-            resp = await page.goto(url, wait_until="domcontentloaded", timeout=BROWSER_NAV_TIMEOUT_MS)
+            resp = await page.goto(url, wait_until="domcontentloaded", timeout=_nav_timeout_ms(url))
             await _settle(page)
             html = await page.content()
             status = resp.status if resp is not None else 200
@@ -809,7 +935,7 @@ async def browser_fetch_from_page(page_url: str, target_url: str, accept: str = 
     t0 = time.monotonic()
     try:
         async with browser_page() as page:
-            await page.goto(page_url, wait_until="domcontentloaded", timeout=BROWSER_NAV_TIMEOUT_MS)
+            await page.goto(page_url, wait_until="domcontentloaded", timeout=_nav_timeout_ms(page_url))
             await _settle(page)
             res = await page.evaluate(script, [target_url, accept])
             cookies = await page.context.cookies()
