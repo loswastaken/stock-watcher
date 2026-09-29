@@ -45,7 +45,7 @@ class RetailerConfig:
             zip=s("zip"),
             radius_miles=max(1, min(radius, 250)),
             store_id=s("store_id"),
-            official_only=bool(d.get("official_only", True)),
+            official_only=d.get("official_only") is not False,
             condition="any" if str(d.get("condition") or "").lower() == "any" else "new",
         )
 
