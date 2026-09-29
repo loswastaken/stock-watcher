@@ -34,7 +34,7 @@ show up as each check finishes. Click **Download bundle** when it's done.
 which shows up as STALE for stores that actually work. Refresh them first, then sweep:
 
 ```bash
-./run.sh discover --write       # finds real, current product URLs for every store and updates sites.json
+./run.sh discover --write       # finds real, current product URLs for every store and saves them to sites.local.json (git-ignored; sweep uses it from then on)
 ./run.sh sweep
 ```
 
@@ -48,7 +48,7 @@ which shows up as STALE for stores that actually work. Refresh them first, then 
 ./run.sh sweep                                  # every store in sites.json (concurrency 3)
 ./run.sh sweep --only target,bestbuy,walmart
 ./run.sh discover --only target,lego            # find current product URLs -> probe-output/discovered.json
-./run.sh discover --write --per-store 3         # ...and update sites.json in place
+./run.sh discover --write --per-store 3         # ...and save them to sites.local.json
 ./run.sh sweep --discover                       # discover (no write), then sweep what it found
 ./run.sh bundle                                 # -> probe-results-YYYY-MM-DD.zip
 ```
@@ -114,7 +114,7 @@ It goes easy on the stores: 2 stores at a time (`--discover-concurrency`), a gap
 and a time cap of 90 s per store (`--store-timeout`).
 
 Without `--write` the result goes to `probe-output/discovered.json` (same format as `sites.json`; try it with
-`sweep --sites probe-output/discovered.json`). With `--write`, `sites.json` is updated in place: entries with a
+`sweep --sites probe-output/discovered.json`). With `--write`, the result is saved to `sites.local.json` (git-ignored, so `git pull` never conflicts; `sweep` and `serve` use it whenever it exists — delete it to go back to the shipped `sites.json`): entries with a
 `retailer_config` (Target pickup near a ZIP, Micro Center store 151, ...) keep their config and note on a new
 URL, stores where nothing was found keep their old samples, and `_README` / `_comment` are kept.
 `sweep --discover` runs a discovery (without writing `sites.json`) and sweeps what it found.

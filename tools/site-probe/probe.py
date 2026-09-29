@@ -42,6 +42,15 @@ HERE = Path(__file__).resolve().parent
 BACKEND = Path(os.environ.get("STOCK_WATCHER_BACKEND") or HERE.parent.parent / "backend").resolve()
 DEFAULT_OUT = HERE / "probe-output"
 DEFAULT_SITES = HERE / "sites.json"
+# `discover --write` saves here (git-ignored) so `git pull` never conflicts with it; when it
+# exists, sweep/discover/serve read it instead of the shipped sites.json.
+LOCAL_SITES = HERE / "sites.local.json"
+
+
+def effective_sites(path: Path | None) -> Path:
+    if path is not None:
+        return Path(path)
+    return LOCAL_SITES if LOCAL_SITES.exists() else DEFAULT_SITES
 # The probe's own persistent browser profile (store cookies survive between runs).
 DEFAULT_PROFILE = HERE / ".browser-profile"
 LIVE_FIXTURES = BACKEND / "tests" / "checkers" / "fixtures" / "live"
@@ -2101,6 +2110,8 @@ def cmd_discover(a: argparse.Namespace) -> int:
     only = [k.strip() for k in (a.only or "").split(",") if k.strip()] or None
     if a.per_store < 1:
         raise ProbeError("--per-store must be at least 1")
+    a.sites_arg = getattr(a, "sites_arg", getattr(a, "sites", None))
+    a.sites = effective_sites(a.sites_arg)
     doc = read_sites_doc(a.sites)
     backend()
     print(f"Discovering up to {a.per_store} product URL(s) per store, {a.discover_concurrency} store(s) at a time "
@@ -2121,8 +2132,9 @@ def cmd_discover(a: argparse.Namespace) -> int:
     _print_discovery(results)
     merged = merge_sites(doc, results)
     if a.write:
-        Path(a.sites).write_text(dump_sites(merged), encoding="utf-8")
-        print(f"Updated {_rel(a.sites)}. Next: ./run.sh sweep")
+        dest = Path(a.sites_arg) if a.sites_arg is not None else LOCAL_SITES
+        dest.write_text(dump_sites(merged), encoding="utf-8")
+        print(f"Updated {_rel(dest)}. Next: ./run.sh sweep")
     else:
         Path(a.out).mkdir(parents=True, exist_ok=True)
         dest = Path(a.out) / "discovered.json"
@@ -2136,6 +2148,7 @@ def cmd_sweep(a: argparse.Namespace) -> int:
     apply_browser_options(a)
     rc = _cli_config(a)
     only = [k.strip() for k in (a.only or "").split(",") if k.strip()] or None
+    a.sites = effective_sites(a.sites)
     if a.discover:
         doc = read_sites_doc(a.sites)
         entries: list[dict] = []
@@ -2192,7 +2205,7 @@ def cmd_bundle(a: argparse.Namespace) -> int:
 def cmd_serve(a: argparse.Namespace) -> int:
     apply_browser_options(a)
     backend()
-    httpd, probe = start_server(a.port, a.out, a.sites, a.concurrency)
+    httpd, probe = start_server(a.port, a.out, effective_sites(a.sites), a.concurrency)
     url = f"http://127.0.0.1:{httpd.server_address[1]}/"
     print(f"Site probe UI: {url}  (only reachable from this computer; Ctrl+C to stop)")
     if a.open:
@@ -2230,7 +2243,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("sweep", help="check the sample URL(s) of every supported store and write a report")
     s.add_argument("--only", help="comma-separated store keys, e.g. target,bestbuy")
-    s.add_argument("--sites", type=Path, default=DEFAULT_SITES, help="sites file (default sites.json)")
+    s.add_argument("--sites", type=Path, default=None,
+                   help="sites file (default sites.local.json if discover --write made one, else sites.json)")
     s.add_argument("--concurrency", type=int, default=3)
     s.add_argument("--preview", action="store_true", help="also run the add-item preview for each URL")
     s.add_argument("--discover", action="store_true",
@@ -2241,9 +2255,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     d = sub.add_parser("discover", help="find real, current product URLs for each store (sitemaps / storefront)")
     d.add_argument("--only", help="comma-separated store keys, e.g. target,bestbuy")
-    d.add_argument("--sites", type=Path, default=DEFAULT_SITES, help="sites file to read / update (default sites.json)")
+    d.add_argument("--sites", type=Path, default=None, dest="sites_arg",
+                   help="sites file to read / update (default: sites.local.json if present, else sites.json)")
     d.add_argument("--write", action="store_true",
-                   help="update sites.json in place (default: write probe-output/discovered.json)")
+                   help="save the found URLs to sites.local.json (git-ignored; used by sweep from then on) "
+                        "or to --sites; default: write probe-output/discovered.json")
     _add_discover_opts(d)
     _add_check_opts(d)
     d.set_defaults(func=cmd_discover)
@@ -2256,7 +2272,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     v = sub.add_parser("serve", help="local web UI on 127.0.0.1")
     v.add_argument("--port", type=int, default=8765)
-    v.add_argument("--sites", type=Path, default=DEFAULT_SITES)
+    v.add_argument("--sites", type=Path, default=None)
     v.add_argument("--concurrency", type=int, default=3)
     v.add_argument("--out", type=Path, default=DEFAULT_OUT)
     v.add_argument("--browser", action=argparse.BooleanOptionalAction, default=None)

@@ -958,3 +958,15 @@ def test_discover_bases_and_locale_sitemaps():
     pool = {}
     assert _run(probe.collect_from_sitemaps(net, probe.Budget(), base, "asus", pool, [],
                                             extra_seeds=probe.locale_sitemaps(base, samples))) == 1
+
+
+def test_discover_write_goes_to_gitignored_local_file(tmp_path, monkeypatch):
+    local = tmp_path / "sites.local.json"
+    monkeypatch.setattr(probe, "LOCAL_SITES", local)
+    shipped = tmp_path / "sites.json"
+    monkeypatch.setattr(probe, "DEFAULT_SITES", shipped)
+    assert probe.effective_sites(None) == shipped  # no local file yet -> shipped samples
+    local.write_text("{}", encoding="utf-8")
+    assert probe.effective_sites(None) == local  # discover --write output wins once it exists
+    assert probe.effective_sites(tmp_path / "x.json") == tmp_path / "x.json"  # explicit --sites always wins
+    assert "sites.local.json" in (Path(probe.__file__).parent / ".gitignore").read_text()
