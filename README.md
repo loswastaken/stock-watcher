@@ -34,28 +34,29 @@ The container uses:
 
 Paths assume `/volume2/docker/stock-watcher`; adjust `docker-compose.yml` if yours differ.
 
-1. Create a GitHub classic PAT with only the `read:packages` scope
-   (GitHub → Settings → Developer settings → Personal access tokens (classic)).
-2. On the Synology, log Docker in to GHCR (the package is private):
-   ```bash
-   echo "ghp_yourtoken" | sudo docker login ghcr.io -u your-github-username --password-stdin
-   ```
-3. Put `docker-compose.yml` in `/volume2/docker/stock-watcher/` and start it:
+1. Put `docker-compose.yml` in `/volume2/docker/stock-watcher/` and start it (the image is public, no login needed):
    ```bash
    cd /volume2/docker/stock-watcher && sudo docker compose up -d
    ```
-4. Open the app through your HTTPS reverse-proxy address and create the admin account.
+2. Open the app through your HTTPS reverse-proxy address and create the admin account.
 
 ### Updating
 
-Updates are manual (no Watchtower). Every push to `main` builds a new image on GHCR; to install it:
+Every push to `main` builds a new image on GHCR (public, so no login is needed to pull it).
+
+**Automatic (Watchtower):** reuse the Watchtower you already run; don't start a second one, because a new
+instance stops the existing one. `docker-compose.yml` labels the container
+`com.centurylinklabs.watchtower.enable=true` and `com.centurylinklabs.watchtower.scope=homelab`. Set the scope to
+your Watchtower's `WATCHTOWER_SCOPE`, or delete that line if it has none. Updates arrive within Watchtower's
+`WATCHTOWER_POLL_INTERVAL`.
+
+**Manual:**
 
 ```bash
 cd /volume2/docker/stock-watcher && sudo docker compose pull && sudo docker compose up -d
 ```
 
-Data in `/volume2/docker/stock-watcher/data` is kept. The compose file labels the container
-`com.centurylinklabs.watchtower.enable=false`, so a Watchtower you run for other projects leaves it alone.
+Data in `/volume2/docker/stock-watcher/data` is kept.
 
 ### Reverse Proxy Setup
 
@@ -182,8 +183,8 @@ Frontend dev server runs on `http://localhost:5173` and proxies `/api` requests 
 
 ### `docker compose pull` says "unauthorized" or "denied"
 
-- Re-run the `sudo docker login ghcr.io ...` command from the Quick Start
-- Ensure the GitHub PAT has `read:packages` scope
+- The GHCR package must be public: GitHub → your profile → Packages → stock-watcher → Package settings →
+  Change visibility → Public (making the repo public doesn't change the package).
 
 ### Container won't start / Chromium crashes
 
