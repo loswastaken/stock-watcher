@@ -5,6 +5,11 @@ A self-hosted restock alert watcher with **ntfy** push notifications. Monitor pr
 ## Features
 
 - **Auto-detect availability**: Intelligent detection using JSON-LD, schema.org microdata, meta tags, and button/text heuristics
+- **59 supported stores**: dedicated checks for Target (delivery and in-store pickup), Best Buy, Amazon, Walmart,
+  Newegg, Micro Center, Nvidia, PlayStation Direct, Pokémon Center, LEGO and more (see [Supported stores](#supported-stores)),
+  plus Shopify / Salesforce Commerce / BigCommerce / Magento / WooCommerce / OpenCart shops auto-detected
+- **HotStock-style alerts**: price limits, official-seller-only, pickup near your ZIP, mute stores, track one product at
+  several stores, restock history, and an **Add to cart** button on alerts
 - **Custom rules**: Per-item CSS selectors or text patterns for complex product pages
 - **Apple specialist**: Track in-store pickup availability at stores near your ZIP code and 2-hour courier delivery
 - **Push notifications**: Instant alerts via **ntfy** (can be self-hosted)
@@ -88,6 +93,9 @@ If using a reverse proxy (e.g., Synology DSM reverse proxy):
 | `STATIC_DIR` | `/app/static` | Built SPA location (inside container) |
 | `TZ` | `UTC` | Timezone for scheduler and logs |
 | `ENABLE_BROWSER` | `true` | Allow Playwright Chromium fallback for JS pages |
+| `STOCKWATCHER_IMPERSONATE` | `true` | Use Chrome TLS impersonation (curl_cffi) for bot-protected stores such as Best Buy; `false` to use plain HTTP |
+| `BESTBUY_API_KEY` | – | Optional [Best Buy developer key](https://developer.bestbuy.com/): most reliable Best Buy checks, plus store pickup |
+| `KROGER_CLIENT_ID` / `KROGER_CLIENT_SECRET` | – | Optional [Kroger developer app](https://developer.kroger.com/): stock at your nearest Kroger-family store |
 
 ### ntfy Setup (Notifications)
 
@@ -122,8 +130,38 @@ If using a reverse proxy (e.g., Synology DSM reverse proxy):
 - **Check all** on the dashboard re-checks every active item immediately.
 - **Purchased:** hit **Bought it** on an in-stock card (or **Mark purchased** in any item's menu). The item stops
   being checked and moves to the **Purchased** page with the date and price; **Watch again** brings it back.
+- **Every restock** (Settings → Alert behaviour): alerts stay armed, so you're told about each new restock instead
+  of just the first one. An **alert sound** plays with browser notifications.
+- **Price limit** (per item): in stock above your limit doesn't alert; dropping under it does.
+- **Official seller only** (Amazon, Walmart, Target, Best Buy, Newegg, Sam's Club; on by default): marketplace-only
+  offers count as out of stock.
+- **Mute a store** on the **Stores** page to stop its alerts without deleting items.
 - **Browser notifications** (Settings → Notifications) pop up on your computer while Stock Watcher is open in a
   tab. They need the https address. Use ntfy for alerts when the app isn't open.
+
+## Supported stores
+
+The **Stores** page lists them all: AMD, ASUS, Ace Graphics Cards, Adorama, Amazon, Antonline, B&H Photo Video, BJ's,
+Bandai Namco, Best Buy, Canon, Consutronix, Costco, Dell, Disney, EVGA, Fujifilm, GameFly, GameStop, Gigabyte, Govee,
+Hallmark, Home Depot, Jazwares, Kohl's, Kroger (and its banners), LG, LEGO, Leica, Lenovo, MSI, Mattel, Meijer,
+Micro Center, Microsoft, Microsoft Xbox, NYXI, NeutronUSA, Newegg, NextWarehouse, Ninja Kitchen, Nintendo, Nvidia,
+Oculus / Meta Quest, Office Depot, POP MART, Play-Asia, PlayStation Direct, Pokémon Center, QVC, Roberts Camera,
+Sam's Club, StockX, Target (Delivery and Pickup), Toys"R"Us, Verizon, Walmart, Zotac and eBay. Any other store still
+works through the generic detection.
+
+- **Store options** appear on the item form when they apply: **Delivery / Pickup / Both** with a ZIP and distance
+  (Target, Best Buy with an API key, Kroger, Micro Center store), and **Official seller only**.
+- **Track at another store** on an item's page adds the same product at another retailer and shows a comparison
+  table (status, price, last in stock).
+- **Waiting rooms** (queue-it and similar) show as *Waiting room active — drop may be live* rather than an error.
+- Many stores fight bots. If one keeps failing, see **Verify stores from your computer** below.
+
+### Verify stores from your computer
+
+`tools/site-probe/` runs the exact checker code on your own machine and home connection, and records what each store
+returned. `./tools/site-probe/run.sh sweep` checks a sample product for every store and writes
+`probe-output/report.md`; `run.sh bundle` makes a zip you can attach to an issue so the checks can be fixed with real
+pages. See [tools/site-probe/README.md](tools/site-probe/README.md).
 
 ## Tracking Apple Availability
 
