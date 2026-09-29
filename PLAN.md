@@ -15,8 +15,8 @@ If you need to deviate from a contract here, note it in your final report.
 | Frontend | React 18 + TypeScript + Vite, Tailwind CSS, React Router, TanStack Query, lucide-react icons, sonner toasts. Dark-first modern UI with light toggle |
 | Storage | SQLite + images on the `/data` volume |
 | Container | Single image: FastAPI serves API (`/api/*`) and built SPA (everything else). Single uvicorn worker (scheduler lives in-process) |
-| Registry | GHCR (`ghcr.io/loswastaken/stock-watcher`), **private** repo → Watchtower needs a GitHub PAT (`read:packages`) |
-| Updates | GitHub Actions builds `linux/amd64,linux/arm64` on push to `main`; Watchtower polls every 300 s |
+| Registry | GHCR (`ghcr.io/loswastaken/stock-watcher`), **private** repo → the NAS needs `docker login ghcr.io` with a PAT (`read:packages`) |
+| Updates | GitHub Actions builds `linux/amd64,linux/arm64` on push to `main`; updates are applied manually (`docker compose pull && up -d`). No Watchtower, no Docker socket in the app |
 | Accounts | First visitor creates the admin (setup screen). After that, only admins create users. No open registration |
 | Detection | Auto (JSON-LD/schema.org `availability`, microdata, meta tags, button/text heuristics) + optional per-item CSS selector / text rules |
 
@@ -40,7 +40,7 @@ backend/
   requirements.txt
 frontend/              # Vite app, builds to frontend/dist
 Dockerfile
-docker-compose.yml     # Synology example: app + watchtower
+docker-compose.yml     # Synology example (app only)
 .github/workflows/docker.yml
 README.md
 ```
@@ -202,10 +202,10 @@ Checkers never raise for site problems — they return `status="error"` with `er
 
 ## Delivery / ops
 
-- `Dockerfile`: multi-stage (node:22 build SPA → python:3.12-slim runtime with Playwright Chromium). Healthcheck on `/api/health`. Exposes 8000. Label `com.centurylinklabs.watchtower.enable=true`.
+- `Dockerfile`: multi-stage (node:22 build SPA → python:3.12-slim runtime with Playwright Chromium). Healthcheck on `/api/health`. Exposes 8000.
 - `.github/workflows/docker.yml`: on push to `main` (+ manual), buildx multi-arch, push `latest` and `sha-<short>` to GHCR using `GITHUB_TOKEN`; run backend tests + frontend build first.
-- `docker-compose.yml`: `stock-watcher` + `watchtower` (`WATCHTOWER_POLL_INTERVAL=300`, `WATCHTOWER_LABEL_ENABLE=true`, `WATCHTOWER_CLEANUP=true`, mounts `/var/run/docker.sock` and a `config.json` with GHCR creds for the private package).
-- README: Synology setup (Container Manager project), GHCR PAT for Watchtower, reverse-proxy notes (WebSocket not needed), ntfy setup, first-run admin.
+- `docker-compose.yml`: `stock-watcher` only, labelled `com.centurylinklabs.watchtower.enable=false` so an unrelated Watchtower ignores it.
+- README: Synology setup over SSH (`docker login ghcr.io`), manual updates, reverse-proxy notes (WebSocket not needed), ntfy setup, first-run admin.
 
 ## Work split (agents)
 
