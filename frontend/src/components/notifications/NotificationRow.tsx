@@ -101,7 +101,7 @@ export function NotificationRow({
         )}
       </div>
       {!compact && (onDelete || onMarkRead) && (
-        <div className="relative z-[1] flex shrink-0 items-start gap-0.5 opacity-100 transition-opacity sm:opacity-0 sm:group-focus-within:opacity-100 sm:group-hover:opacity-100">
+        <div className="relative z-[1] flex w-[68px] shrink-0 items-start justify-end gap-0.5 opacity-100 transition-opacity sm:opacity-0 sm:group-focus-within:opacity-100 sm:group-hover:opacity-100">
           {onMarkRead && !n.read && (
             <Tooltip content="Mark as read">
               <button

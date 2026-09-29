@@ -50,10 +50,10 @@ export function ItemCard({ item }: { item: Item }) {
           className={cn('aspect-[4/3] w-full', paused && 'opacity-50 grayscale')}
           imgClassName="transition-transform duration-300 group-hover:scale-[1.03]"
         />
-        <div className="absolute left-3 top-3 flex items-center gap-1.5">
-          <StatusBadge status={item.status} paused={paused} size="sm" className="shadow-sm backdrop-blur" />
+        <div className="absolute left-2 top-2 flex items-center gap-1.5 sm:left-3 sm:top-3">
+          <StatusBadge status={item.status} paused={paused} size="sm" overlay />
         </div>
-        {item.kind === 'apple' && <AppleBadge className="absolute bottom-3 left-3" />}
+        {item.kind === 'apple' && <AppleBadge className="absolute bottom-2 left-2 sm:bottom-3 sm:left-3" />}
         {checking && (
           <div className="absolute inset-0 flex items-center justify-center bg-white/50 backdrop-blur-[1px] dark:bg-zinc-950/50">
             <span className="inline-flex items-center gap-2 rounded-full bg-white px-3 py-1 text-xs font-medium text-zinc-700 shadow ring-1 ring-zinc-200 dark:bg-zinc-900 dark:text-zinc-200 dark:ring-zinc-700">
@@ -68,7 +68,7 @@ export function ItemCard({ item }: { item: Item }) {
           className="bg-white/80 shadow-sm ring-1 ring-zinc-900/5 backdrop-blur hover:bg-white dark:bg-zinc-900/80 dark:ring-white/10 dark:hover:bg-zinc-800 sm:opacity-0 sm:group-hover:opacity-100 sm:focus-visible:opacity-100 sm:data-[state=open]:opacity-100"
         />
       </div>
-      <div className="pointer-events-none relative flex flex-1 flex-col gap-2 border-t border-zinc-100 p-4 dark:border-zinc-800/80">
+      <div className="pointer-events-none relative flex flex-1 flex-col gap-2 border-t border-zinc-100 p-3 sm:p-4 dark:border-zinc-800/80">
         <div className="min-w-0">
           <h3 className="line-clamp-2 text-sm font-semibold leading-snug text-zinc-900 dark:text-zinc-50">{item.name}</h3>
           <p className="mt-1 flex items-center gap-1.5 truncate text-xs text-zinc-500 dark:text-zinc-400">
@@ -80,7 +80,7 @@ export function ItemCard({ item }: { item: Item }) {
             )}
           </p>
         </div>
-        <div className="mt-auto flex items-end justify-between gap-2 pt-1">
+        <div className="mt-auto flex flex-col-reverse gap-1 pt-1 min-[480px]:flex-row min-[480px]:items-end min-[480px]:justify-between min-[480px]:gap-2">
           <div className="min-w-0">
             <p className={cn('truncate text-xs font-medium', paused ? 'text-zinc-500' : statusMeta[item.status]?.text)}>
               {statusLine(item)}

@@ -312,7 +312,7 @@ function ItemFormInner({ item, defaults }: { item: Item | null; defaults: typeof
         description={isEdit ? item!.name : 'Paste a product link — we’ll figure out the rest.'}
       />
 
-      <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_320px]">
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-[minmax(0,1fr)_320px]">
         <div className="space-y-6">
           {/* Product */}
           <Card>

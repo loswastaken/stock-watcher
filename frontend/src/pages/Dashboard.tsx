@@ -80,7 +80,7 @@ function StatCard({
       type={onClick ? 'button' : undefined}
       onClick={onClick}
       className={cn(
-        'group relative overflow-hidden rounded-xl border bg-white p-4 text-left shadow-soft transition-all sm:p-5 dark:bg-zinc-900/40',
+        'group relative w-full overflow-hidden rounded-xl border bg-white p-3.5 text-left shadow-soft transition-all sm:p-5 dark:bg-zinc-900/40',
         active ? 'border-indigo-400/60 ring-1 ring-indigo-400/40 dark:border-indigo-500/40' : 'border-zinc-200 dark:border-zinc-800/80',
         onClick && 'hover:border-zinc-300 hover:shadow-lifted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/60 dark:hover:border-zinc-700',
       )}
@@ -89,7 +89,7 @@ function StatCard({
         <span className="text-xs font-medium text-zinc-500 sm:text-sm dark:text-zinc-400">{label}</span>
         <span className={cn('flex size-7 items-center justify-center rounded-lg [&_svg]:size-4', tone)}>{icon}</span>
       </div>
-      <div className="mt-2 text-2xl font-semibold tabular-nums tracking-tight text-zinc-900 sm:text-3xl dark:text-zinc-50">
+      <div className="mt-1 text-2xl font-semibold sm:mt-2 tabular-nums tracking-tight text-zinc-900 sm:text-3xl dark:text-zinc-50">
         {loading || value === undefined ? <Skeleton className="h-8 w-12" /> : value}
       </div>
       {sub && <div className="mt-1 truncate text-xs text-zinc-500 dark:text-zinc-400">{sub}</div>}
@@ -248,7 +248,7 @@ export default function Dashboard() {
             <div className="min-w-0 flex-1 lg:w-64 lg:flex-none">
               <Input
                 type="search"
-                placeholder="Search items…"
+                placeholder="Search…"
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 leading={<Search />}
@@ -262,7 +262,7 @@ export default function Dashboard() {
                 aria-label="Search items"
               />
             </div>
-            <div className="relative w-36 shrink-0">
+            <div className="relative w-[7.5rem] shrink-0 sm:w-36">
               <ArrowDownUp className="pointer-events-none absolute left-3 top-1/2 z-[1] size-3.5 -translate-y-1/2 text-zinc-400" />
               <Select value={sort} onChange={(e) => setSort(e.target.value as Sort)} aria-label="Sort by" className="pl-8">
                 <option value="status">Status</option>
@@ -302,7 +302,7 @@ export default function Dashboard() {
           />
         ) : items.isLoading ? (
           view === 'grid' ? (
-            <div className="grid grid-cols-1 gap-4 min-[420px]:grid-cols-2 md:grid-cols-3 xl:grid-cols-4">
+            <div className="grid grid-cols-2 gap-3 sm:gap-4 md:grid-cols-3 xl:grid-cols-4">
               {Array.from({ length: 8 }).map((_, i) => (
                 <ItemCardSkeleton key={i} />
               ))}
@@ -342,7 +342,7 @@ export default function Dashboard() {
             }
           />
         ) : view === 'grid' ? (
-          <div className="grid grid-cols-1 gap-4 min-[420px]:grid-cols-2 md:grid-cols-3 xl:grid-cols-4">
+          <div className="grid grid-cols-2 gap-3 sm:gap-4 md:grid-cols-3 xl:grid-cols-4">
             {visible.map((it) => (
               <ItemCard key={it.id} item={it} />
             ))}

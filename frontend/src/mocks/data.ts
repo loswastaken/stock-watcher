@@ -21,7 +21,10 @@ export const settings: Settings & { ntfy_token?: string } = {
   default_zip: '95014',
   default_max_distance_miles: 25,
   notify_on_out_of_stock: false,
-  theme: 'dark',
+  theme: ((): Settings['theme'] => {
+    const t = localStorage.getItem('sw-theme');
+    return t === 'light' || t === 'system' ? t : 'dark';
+  })(),
 };
 
 const base = {

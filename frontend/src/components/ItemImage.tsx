@@ -26,7 +26,12 @@ export function ItemImage({
   return (
     <div
       className={cn(
-        'relative flex items-center justify-center overflow-hidden bg-gradient-to-b from-zinc-50 to-zinc-100 dark:from-zinc-800/40 dark:to-zinc-900/60',
+        'relative flex items-center justify-center overflow-hidden',
+        // Shop photos almost always sit on white; give them a light "stage" in both themes and
+        // multiply-blend so the white background melts into it.
+        showImg
+          ? 'bg-gradient-to-b from-white to-zinc-100 dark:from-zinc-200 dark:to-zinc-300'
+          : 'bg-gradient-to-b from-zinc-50 to-zinc-100 dark:from-zinc-800/40 dark:to-zinc-900/60',
         className,
       )}
     >
@@ -40,8 +45,7 @@ export function ItemImage({
           onError={() => setFailed(true)}
           className={cn(
             'h-full w-full object-contain p-[8%] transition-opacity duration-300',
-            // Product shots usually have white backgrounds; multiply blends them into the light tile.
-            'mix-blend-multiply dark:mix-blend-normal',
+            'mix-blend-multiply',
             loaded ? 'opacity-100' : 'opacity-0',
             imgClassName,
           )}

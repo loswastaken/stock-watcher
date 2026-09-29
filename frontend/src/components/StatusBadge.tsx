@@ -59,12 +59,30 @@ export function StatusBadge({
   paused,
   className,
   size = 'md',
+  overlay,
 }: {
   status: ItemStatus;
   paused?: boolean;
   className?: string;
   size?: 'sm' | 'md';
+  /** Solid style for placing on top of photos. */
+  overlay?: boolean;
 }) {
+  if (overlay) {
+    const m = statusMeta[status] ?? statusMeta.unknown;
+    return (
+      <span
+        className={cn(
+          'inline-flex items-center gap-1.5 whitespace-nowrap rounded-full bg-white/95 font-medium text-zinc-800 shadow-sm ring-1 ring-zinc-900/10 backdrop-blur dark:bg-zinc-900/90 dark:text-zinc-100 dark:ring-white/10',
+          size === 'sm' ? 'px-2 py-0.5 text-[11px]' : 'px-2.5 py-0.5 text-xs',
+          className,
+        )}
+      >
+        <span className={cn('size-1.5 rounded-full', paused ? 'bg-zinc-400' : m.dot)} />
+        {paused ? 'Paused' : m.label}
+      </span>
+    );
+  }
   if (paused) {
     return (
       <span

@@ -1,15 +1,18 @@
+import { useId } from 'react';
 import { cn } from '@/lib/utils';
 
 export function Logo({ className }: { className?: string }) {
+  // Unique gradient id per instance: a shared id breaks when the first instance is display:none.
+  const gid = `sw-logo-${useId().replace(/:/g, '')}`;
   return (
     <svg viewBox="0 0 64 64" className={cn('size-8 shrink-0', className)} aria-hidden="true">
       <defs>
-        <linearGradient id="sw-logo-g" x1="0" y1="0" x2="1" y2="1">
+        <linearGradient id={gid} x1="0" y1="0" x2="1" y2="1">
           <stop offset="0" stopColor="#818cf8" />
           <stop offset="1" stopColor="#6d28d9" />
         </linearGradient>
       </defs>
-      <rect width="64" height="64" rx="15" fill="url(#sw-logo-g)" />
+      <rect width="64" height="64" rx="15" fill={`url(#${gid})`} />
       <path d="M18 24l14-7 14 7v16l-14 7-14-7z" fill="none" stroke="#fff" strokeWidth="3.5" strokeLinejoin="round" />
       <path d="M18 24l14 7 14-7M32 31v16" fill="none" stroke="#fff" strokeWidth="3.5" strokeLinejoin="round" />
       <circle cx="47" cy="17" r="7" fill="#34d399" stroke="#fff" strokeWidth="3" />
