@@ -1,4 +1,4 @@
-import { Bell, BellOff, ExternalLink, ImageDown, MoreHorizontal, Pause, Pencil, Play, RefreshCw, Trash2 } from 'lucide-react';
+import { Bell, BellOff, ExternalLink, ImageDown, MoreHorizontal, Pause, Pencil, Play, RefreshCw, ShoppingBag, Trash2, Undo2 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { useIsChecking, useItemActions } from '@/hooks/useItemActions';
 import type { Item } from '@/lib/types';
@@ -43,6 +43,18 @@ export function ItemActionsMenu({
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent onClick={(e) => e.stopPropagation()}>
+        {item.purchased_at ? (
+          <DropdownMenuItem onSelect={() => a.unpurchase.mutate(item)}>
+            <Undo2 /> Move back to watching
+          </DropdownMenuItem>
+        ) : (
+          <DropdownMenuItem onSelect={() => a.purchase.mutate(item)}>
+            <ShoppingBag /> Mark purchased
+          </DropdownMenuItem>
+        )}
+        <DropdownMenuSeparator />
+        {!item.purchased_at && (
+        <>
         <DropdownMenuItem disabled={checking} onSelect={() => a.check.mutate(item)}>
           <RefreshCw className={cn(checking && 'animate-spin')} /> {checking ? 'Checking…' : 'Check now'}
         </DropdownMenuItem>
@@ -68,6 +80,8 @@ export function ItemActionsMenu({
             </>
           )}
         </DropdownMenuItem>
+        </>
+        )}
         <DropdownMenuItem onSelect={() => navigate(`/items/${item.id}/edit`)}>
           <Pencil /> Edit
         </DropdownMenuItem>

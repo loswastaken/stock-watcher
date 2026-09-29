@@ -182,7 +182,7 @@ def _apply_result(item_id: int, result: CheckResult, duration_ms: int) -> _Outco
 
         notif: Notification | None = None
         tags = ("apple",) if item.kind == "apple" else ("shopping_cart",)
-        alerts_on = bool(item.notify_enabled)
+        alerts_on = bool(item.notify_enabled) and item.purchased_at is None
         if new_labels and alerts_on:
             notif = Notification(
                 user_id=item.user_id,
@@ -313,7 +313,9 @@ def select_due_items() -> list[int]:
     floor = get_settings().min_interval_seconds
     with SessionLocal() as db:
         rows = db.execute(
-            select(Item.id, Item.last_checked_at, Item.interval_minutes).where(Item.enabled.is_(True))
+            select(Item.id, Item.last_checked_at, Item.interval_minutes).where(
+                Item.enabled.is_(True), Item.purchased_at.is_(None)
+            )
         ).all()
     due: list[int] = []
     for item_id, last, interval in rows:

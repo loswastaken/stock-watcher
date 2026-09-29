@@ -256,6 +256,8 @@ class ItemOut(BaseModel):
     generic_config: dict[str, Any]
     apple_config: dict[str, Any] | None
     last_result: dict[str, Any]
+    purchased_at: UTCDateTime | None = None
+    purchased_price: str | None = None
     created_at: UTCDateTime
     updated_at: UTCDateTime
 
@@ -350,6 +352,7 @@ class StatsOut(BaseModel):
     unread_notifications: int
     checks_24h: int
     alerts_24h: int
+    purchased: int = 0
 
 
 class HealthOut(BaseModel):

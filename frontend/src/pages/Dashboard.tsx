@@ -182,7 +182,7 @@ export default function Dashboard() {
   });
   useEffect(() => {
     if (checkAllSince === null) return;
-    const active = (items.data ?? []).filter((it) => it.enabled);
+    const active = (items.data ?? []).filter((it) => it.enabled && !it.purchased_at);
     const done = active.every((it) => (parseDate(it.last_checked_at)?.getTime() ?? 0) >= checkAllSince - 1_000);
     if (done && active.length) setCheckAllSince(null);
     const t = setTimeout(() => setCheckAllSince(null), Math.max(0, checkAllSince + 60_000 - Date.now()));
@@ -200,15 +200,17 @@ export default function Dashboard() {
   const [sort, setSort] = useLocalStorage<Sort>('sw-sort', 'status');
   const [view, setView] = useLocalStorage<'grid' | 'list'>('sw-view', 'grid');
 
+  const watching = useMemo(() => (items.data ?? []).filter((it) => !it.purchased_at), [items.data]);
+
   const counts = useMemo(() => {
     const c: Record<Filter, number> = { all: 0, in_stock: 0, out_of_stock: 0, error: 0, paused: 0 };
-    for (const it of items.data ?? []) for (const f of FILTERS) if (matches(it, f.id)) c[f.id]++;
+    for (const it of watching) for (const f of FILTERS) if (matches(it, f.id)) c[f.id]++;
     return c;
-  }, [items.data]);
+  }, [watching]);
 
   const visible = useMemo(() => {
     const q = search.trim().toLowerCase();
-    const list = (items.data ?? []).filter(
+    const list = watching.filter(
       (it) =>
         matches(it, filter) &&
         (!q || it.name.toLowerCase().includes(q) || hostOf(it.url).includes(q) || (it.status_text ?? '').toLowerCase().includes(q)),
@@ -222,9 +224,9 @@ export default function Dashboard() {
       const pb = b.enabled ? STATUS_ORDER[b.status] ?? 9 : 10;
       return pa - pb || byName(a, b);
     });
-  }, [items.data, filter, search, sort]);
+  }, [watching, filter, search, sort]);
 
-  const hasItems = (items.data?.length ?? 0) > 0;
+  const hasItems = watching.length > 0;
 
   return (
     <div className="space-y-6 sm:space-y-8">

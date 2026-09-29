@@ -103,6 +103,7 @@ Items (scoped to current user)
 - `PATCH /items/{id}` `ItemUpdate` (partial) → `Item`
 - `DELETE /items/{id}` → 204
 - `POST /items/{id}/check` → `Item` (runs a check now, awaits it, returns updated item)
+- `POST /items/{id}/purchase` / `POST /items/{id}/unpurchase` → `Item` (purchased items: `purchased_at`, `purchased_price`; never checked or alerted, excluded from dashboard/stats counts; `stats.purchased` counts them)
 - `POST /items/check-all` → 202 `{queued, total}` (checks all the user's active items now, in the background)
 - `POST /items/{id}/image` multipart `file` → `Item` (jpg/png/webp/gif ≤ 8 MB)
 - `POST /items/{id}/image/refresh` → `Item` (re-fetch image from page)

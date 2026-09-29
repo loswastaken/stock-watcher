@@ -2,9 +2,9 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   AlertTriangle,
   ArrowLeft,
-  CalendarClock,
   Bell,
   BellOff,
+  CalendarClock,
   CheckCircle2,
   Clock,
   ExternalLink,
@@ -16,9 +16,11 @@ import {
   Pencil,
   Play,
   RefreshCw,
+  ShoppingBag,
   Store,
   Timer,
   Truck,
+  Undo2,
   XCircle,
 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
@@ -39,7 +41,7 @@ import { useIsChecking, useItemActions } from '@/hooks/useItemActions';
 import { api, ApiError, errorMessage } from '@/lib/api';
 import { qk } from '@/lib/queryClient';
 import type { AppleDelivery, AppleStore, CheckEvent, Item } from '@/lib/types';
-import { absoluteTime, cn, formatDuration, formatInterval, hostOf, parseDate } from '@/lib/utils';
+import { absoluteTime, cn, formatDuration, formatInterval, hostOf, parseDate, relativeTime } from '@/lib/utils';
 
 function isFresh(item: Item | undefined) {
   if (!item) return false;
@@ -221,8 +223,25 @@ function Hero({ item, onDeleted }: { item: Item; onDeleted: () => void }) {
             </Meta>
           </dl>
 
+          {item.purchased_at && (
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl bg-emerald-50 px-4 py-3 text-sm text-emerald-800 ring-1 ring-emerald-300/60 dark:bg-emerald-500/10 dark:text-emerald-300 dark:ring-emerald-500/30">
+              <span className="flex items-center gap-2">
+                <ShoppingBag className="size-4" /> Purchased {relativeTime(item.purchased_at)}
+                {item.purchased_price ? ` for ${item.purchased_price}` : ''}. No longer checked.
+              </span>
+              <Button size="sm" onClick={() => a.unpurchase.mutate(item)} loading={a.unpurchase.isPending}>
+                <Undo2 /> Watch again
+              </Button>
+            </div>
+          )}
+
           <div className="mt-auto flex flex-wrap gap-2">
-            <Button variant="primary" loading={checking} onClick={() => a.check.mutate(item)}>
+            {!item.purchased_at && (
+              <Button variant="primary" onClick={() => a.purchase.mutate(item)} loading={a.purchase.isPending}>
+                <ShoppingBag /> Mark purchased
+              </Button>
+            )}
+            <Button variant={item.purchased_at ? 'primary' : 'outline'} loading={checking} onClick={() => a.check.mutate(item)}>
               {!checking && <RefreshCw />} {checking ? 'Checking…' : 'Check now'}
             </Button>
             <Link to={`/items/${item.id}/edit`} className={buttonClasses()}>

@@ -120,6 +120,8 @@ If using a reverse proxy (e.g., Synology DSM reverse proxy):
 - After an alert, that item's alerts **pause** (it keeps being checked). Click **Alerts paused · Re-arm** on the
   item's card or page to get the next one.
 - **Check all** on the dashboard re-checks every active item immediately.
+- **Purchased:** hit **Bought it** on an in-stock card (or **Mark purchased** in any item's menu). The item stops
+  being checked and moves to the **Purchased** page with the date and price; **Watch again** brings it back.
 - **Browser notifications** (Settings → Notifications) pop up on your computer while Stock Watcher is open in a
   tab. They need the https address. Use ntfy for alerts when the app isn't open.
 

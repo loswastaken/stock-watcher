@@ -128,6 +128,9 @@ export interface Item {
   generic_config: GenericConfig | null;
   apple_config: AppleConfig | null;
   last_result: LastResult;
+  /** Set when the item was marked purchased: it's then on the Purchased page and no longer checked. */
+  purchased_at?: string | null;
+  purchased_price?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -220,6 +223,7 @@ export interface Stats {
   unread_notifications: number;
   checks_24h: number;
   alerts_24h: number;
+  purchased?: number;
 }
 
 export interface UpdateStatus {

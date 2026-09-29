@@ -20,12 +20,18 @@ def stats(user: User = Depends(current_user), db: Session = Depends(get_db)):
     since = utcnow() - timedelta(hours=24)
     by_status = dict(
         db.execute(
-            select(Item.status, func.count()).where(Item.user_id == user.id).group_by(Item.status)
+            select(Item.status, func.count())
+            .where(Item.user_id == user.id, Item.purchased_at.is_(None))
+            .group_by(Item.status)
         ).all()
     )
     total = sum(by_status.values())
     paused = db.scalar(
-        select(func.count()).select_from(Item).where(Item.user_id == user.id, Item.enabled.is_(False))
+        select(func.count()).select_from(Item).where(
+            Item.user_id == user.id, Item.enabled.is_(False), Item.purchased_at.is_(None))
+    ) or 0
+    purchased = db.scalar(
+        select(func.count()).select_from(Item).where(Item.user_id == user.id, Item.purchased_at.is_not(None))
     ) or 0
     unread = db.scalar(
         select(func.count())
@@ -53,4 +59,5 @@ def stats(user: User = Depends(current_user), db: Session = Depends(get_db)):
         unread_notifications=unread,
         checks_24h=checks,
         alerts_24h=alerts,
+        purchased=purchased,
     )
