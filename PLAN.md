@@ -118,7 +118,7 @@ Items (scoped to current user)
   "price": "$1,099.00",
   "last_checked_at": "...Z", "last_change_at": "...Z", "last_error": null,
   "generic_config": {"mode":"auto|selector|text", "selector": null, "in_stock_text": null, "out_of_stock_text": null, "render_js": false},
-  "apple_config": {"parts":[{"part_number":"MG8H4LL/A","label":"256GB Cosmic Orange"}], "zip":"95014", "max_distance_miles":25, "watch_pickup":true, "watch_delivery":true},
+  "apple_config": {"parts":[{"part_number":"MG8H4LL/A","label":"256GB Cosmic Orange"}], "zip":"95014", "max_distance_miles":25, "watch_pickup":true, "pickup_today_only":true, "watch_delivery":true},
   "last_result": { },
   "created_at": "...Z", "updated_at": "...Z"
 }
@@ -128,7 +128,7 @@ Items (scoped to current user)
 `last_result` for Apple items:
 ```json
 {"stores":[{"store_number":"R014","name":"Valley Fair","city":"Santa Clara","distance_miles":3.2,
-            "parts":[{"part_number":"MG8H4LL/A","label":"...","available":true,"quote":"Available Today"}]}],
+            "parts":[{"part_number":"MG8H4LL/A","label":"...","available":true,"today":true,"quote":"Available Today"}]}],
  "delivery":[{"part_number":"MG8H4LL/A","label":"...","two_hour":true,"quote":"Delivers in 2 hours"}]}
 ```
 `last_result` for generic items: `{"signals":["json-ld: InStock", ...], "matched": "..."}` (free-form detail for the UI's "why" line).
@@ -187,11 +187,15 @@ Checkers never raise for site problems — they return `status="error"` with `er
 - After a check: record `CheckEvent`; update item. On `status=error`, **keep previous `available_keys`** (no flapping alerts) and increment `consecutive_errors`.
 - **Alert** = keys in new `available` that were not in previous `available_keys`. One notification per check summarizing all newly available keys (e.g. "iPhone 17 Pro: pickup available at Valley Fair, Stanford; 2-hour delivery available"). Created in the notification center and sent to ntfy (if topic configured and `notify_enabled`).
 - Optional "back out of stock" notification when `notify_on_out_of_stock` and item went from in_stock → out_of_stock.
-- ntfy: POST to `{server}/{topic}` with headers `Title`, `Priority`, `Tags` (`shopping_cart` / `apple`), `Click` (item url), `Attach`/`Icon` omitted unless public; `Authorization: Bearer {token}` if set. Record `delivered`/`delivery_error`.
+- ntfy: JSON publish — POST `{server}/` with `{topic,title,message,priority,tags,click}` (avoids header-encoding issues); `Authorization: Bearer {token}` if set. Record `delivered`/`delivery_error`.
+- `unknown` results (inconclusive page) keep previous `available_keys`, like errors.
+- Apple pickup alerts only for same-day pickup unless `apple_config.pickup_today_only=false`; later-dated pickup is still shown in `last_result`.
+- `notify_enabled=false` only suppresses the ntfy push; in-app notifications are always recorded.
 
 ## Security
 
-- argon2id hashes; session tokens 32 random bytes, stored as SHA-256; cookie `sw_session`.
+- argon2id hashes; session tokens 32 random bytes, stored as HMAC-SHA256 (keyed by SECRET_KEY); cookie `sw_session`.
+- Login rate limit per (IP, username) plus a 3x looser per-username cap (X-Forwarded-For is spoofable).
 - CSRF: mutating requests require `Content-Type: application/json` or multipart **and** same-origin `Origin`/`Referer` when present; SameSite=Lax cookie.
 - Uvicorn runs with `--proxy-headers --forwarded-allow-ips="*"` for reverse proxy.
 - Every item/notification query filtered by `user_id`.

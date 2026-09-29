@@ -1,0 +1,7 @@
+{
+  "auths": {
+    "ghcr.io": {
+      "auth": "<base64_of_GITHUB_USERNAME:PAT>"
+    }
+  }
+}

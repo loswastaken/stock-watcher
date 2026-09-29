@@ -1,0 +1,20 @@
+services:
+  stock-watcher:
+    image: ghcr.io/loswastaken/stock-watcher:latest
+    container_name: stock-watcher
+    restart: unless-stopped
+    ports:
+      - "8095:8000"  # host:container — change the left side if 8095 is taken
+    volumes:
+      - /volume2/stock-watcher/data:/data
+    environment:
+      TZ: America/New_York  # Change to your timezone
+      COOKIE_SECURE: "true"  # Set to false only for plain HTTP on LAN
+      # SECRET_KEY: ""  # Optional; otherwise generated and stored in /data/secret.key
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
+    shm_size: 1gb  # Required for Chromium in Playwright
+
+# Auto-updates use your existing Watchtower container (see README → Auto-Updates).
+# Only one Watchtower should run per Docker host: a second instance stops the first.
+# If you don't have one yet, deploy deploy/watchtower-compose.yml.
