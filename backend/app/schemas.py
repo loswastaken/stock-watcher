@@ -303,6 +303,7 @@ class AppleResolveOut(BaseModel):
     product_name: str | None = None
     image_url: str | None = None
     variants: list[AppleVariant] = Field(default_factory=list)
+    selected_part_number: str | None = None  # the model the pasted URL points to
     error: str | None = None
 
 

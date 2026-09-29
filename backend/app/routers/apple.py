@@ -27,4 +27,5 @@ async def resolve(body: UrlRequest, user: User = Depends(current_user)):
         product_name=data.get("product_name"),
         image_url=data.get("image_url"),
         variants=data.get("variants") or [],
+        selected_part_number=data.get("selected_part_number"),
     )
