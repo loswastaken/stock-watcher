@@ -13,7 +13,7 @@ log = logging.getLogger("stockwatcher.checkers")
 
 # Internal caps (the scheduler/routers add their own outer timeouts too).
 CHECK_TIMEOUT = 100.0
-PREVIEW_TIMEOUT = 40.0
+PREVIEW_TIMEOUT = 60.0  # plain fetch (<=15 s) + browser retry (<=~40 s)
 
 
 def _error(e: BaseException | str) -> CheckResult:

@@ -23,7 +23,7 @@ import {
 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { AppleBadge } from '@/components/items/ItemCard';
+import { AppleBadge, RearmAlertsButton } from '@/components/items/ItemCard';
 import { ItemActionsMenu } from '@/components/items/ItemActionsMenu';
 import { ItemImage } from '@/components/ItemImage';
 import { RelativeTime } from '@/components/RelativeTime';
@@ -167,11 +167,7 @@ function Hero({ item, onDeleted }: { item: Item; onDeleted: () => void }) {
                 <StatusBadge status={item.status} paused={paused} />
                 {paused && <StatusBadge status={item.status} />}
                 {item.kind === 'apple' && <AppleBadge className="shadow-none ring-zinc-200 dark:ring-zinc-700" />}
-                {!item.notify_enabled && (
-                  <Badge>
-                    <BellOff /> Muted
-                  </Badge>
-                )}
+                <RearmAlertsButton item={item} />
               </div>
               <h1 className="text-xl font-semibold leading-tight tracking-tight text-zinc-900 sm:text-2xl dark:text-zinc-50">{item.name}</h1>
               <a
@@ -217,10 +213,10 @@ function Hero({ item, onDeleted }: { item: Item; onDeleted: () => void }) {
                 <Switch
                   checked={item.notify_enabled}
                   onCheckedChange={() => a.toggleNotify.mutate(item)}
-                  aria-label="Push notifications"
+                  aria-label="Alerts"
                   className="scale-90"
                 />
-                {item.notify_enabled ? 'On' : 'Muted'}
+                {item.notify_enabled ? 'On' : 'Paused'}
               </span>
             </Meta>
           </dl>

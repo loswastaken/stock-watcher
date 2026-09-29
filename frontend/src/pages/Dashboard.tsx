@@ -1,4 +1,4 @@
-import { useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery } from '@tanstack/react-query';
 import {
   AlertTriangle,
   ArrowDownUp,
@@ -10,10 +10,12 @@ import {
   List,
   PackageSearch,
   Plus,
+  RefreshCw,
   Search,
   X,
 } from 'lucide-react';
-import { useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { toast } from 'sonner';
 import { Link, useSearchParams } from 'react-router-dom';
 import { ItemCard, ItemRow } from '@/components/items/ItemCard';
 import { ItemCardSkeleton, ItemRowSkeleton } from '@/components/items/ItemSkeletons';
@@ -159,8 +161,33 @@ function StatsRow({ stats, loading, filter, setFilter }: { stats?: Stats; loadin
 }
 
 export default function Dashboard() {
-  const items = useQuery({ queryKey: qk.items, queryFn: api.items, refetchInterval: 15_000 });
-  const stats = useQuery({ queryKey: qk.stats, queryFn: api.stats, refetchInterval: 15_000 });
+  // After "Check all", poll quickly until every active item has a fresh result (max 60 s).
+  const [checkAllSince, setCheckAllSince] = useState<number | null>(null);
+  const fastPoll = checkAllSince !== null;
+  const items = useQuery({ queryKey: qk.items, queryFn: api.items, refetchInterval: fastPoll ? 2_000 : 15_000 });
+  const stats = useQuery({ queryKey: qk.stats, queryFn: api.stats, refetchInterval: fastPoll ? 2_000 : 15_000 });
+  const checkAll = useMutation({
+    mutationFn: api.checkAll,
+    onMutate: () => setCheckAllSince(Date.now()),
+    onSuccess: (r) => {
+      if (r.total === 0) {
+        setCheckAllSince(null);
+        toast('Nothing to check', { description: 'All items are paused.' });
+      } else toast.success(`Checking ${r.total} item${r.total === 1 ? '' : 's'}…`);
+    },
+    onError: (e) => {
+      setCheckAllSince(null);
+      toast.error(errorMessage(e));
+    },
+  });
+  useEffect(() => {
+    if (checkAllSince === null) return;
+    const active = (items.data ?? []).filter((it) => it.enabled);
+    const done = active.every((it) => (parseDate(it.last_checked_at)?.getTime() ?? 0) >= checkAllSince - 1_000);
+    if (done && active.length) setCheckAllSince(null);
+    const t = setTimeout(() => setCheckAllSince(null), Math.max(0, checkAllSince + 60_000 - Date.now()));
+    return () => clearTimeout(t);
+  }, [items.data, checkAllSince]);
   const [params, setParams] = useSearchParams();
   const filter = (params.get('filter') as Filter) || 'all';
   const setFilter = (f: Filter) => {
@@ -206,9 +233,19 @@ export default function Dashboard() {
         description="Everything you're watching, refreshed automatically."
         className="mb-0"
         actions={
-          <Link to="/items/new" className={buttonClasses({ variant: 'primary', className: 'hidden sm:inline-flex' })}>
-            <Plus /> Add item
-          </Link>
+          <div className="flex items-center gap-2">
+            <Button
+              variant="secondary"
+              onClick={() => checkAll.mutate()}
+              disabled={fastPoll || !hasItems}
+              aria-label="Check all items now"
+            >
+              <RefreshCw className={cn(fastPoll && 'animate-spin')} /> {fastPoll ? 'Checking…' : 'Check all'}
+            </Button>
+            <Link to="/items/new" className={buttonClasses({ variant: 'primary', className: 'hidden sm:inline-flex' })}>
+              <Plus /> Add item
+            </Link>
+          </div>
         }
       />
 

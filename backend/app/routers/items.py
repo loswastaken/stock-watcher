@@ -29,7 +29,7 @@ from .settings import get_or_create_settings
 log = logging.getLogger("stockwatcher.items")
 router = APIRouter(prefix="/items", tags=["items"])
 
-PREVIEW_TIMEOUT = 45
+PREVIEW_TIMEOUT = 65  # just above checkers.PREVIEW_TIMEOUT, which returns its own error
 
 
 def _host(url: str) -> str:
@@ -221,6 +221,14 @@ def delete_item(item_id: int, user: User = Depends(current_user), db: Session = 
     db.commit()
     images.delete_image_file(image)
     return Response(status_code=204)
+
+
+@router.post("/check-all", status_code=202)
+async def check_all(user: User = Depends(current_user)):
+    """Check every active item of this user now (in the background)."""
+    with SessionLocal() as db:
+        ids = list(db.scalars(select(Item.id).where(Item.user_id == user.id, Item.enabled.is_(True))))
+    return {"queued": scheduler.queue_checks(ids), "total": len(ids)}
 
 
 @router.post("/{item_id}/check", response_model=ItemOut)

@@ -57,7 +57,7 @@ DOCUMENT_HEADERS: dict[str, str] = {
     "Upgrade-Insecure-Requests": "1",
 }
 
-TIMEOUT = httpx.Timeout(20.0, connect=10.0)
+TIMEOUT = httpx.Timeout(15.0, connect=8.0)
 PER_HOST_CONCURRENCY = 2
 # Minimum gap between request *starts* to the same host (seconds). Tests set this to 0.
 HOST_MIN_GAP = 0.4
@@ -257,7 +257,24 @@ async def fetch_html(
                 raise
         # host preference was only a hint; try plain HTTP below
 
-    resp = await http_get(url)
+    try:
+        resp = await http_get(url)
+    except FetchError as e:
+        # Bot protection often stalls or drops plain clients instead of answering 403
+        # (Best Buy and other Akamai sites): let the real browser try before giving up.
+        if not use_browser:
+            raise
+        log.info("fetch %s: %s -> retrying with browser", url, e)
+        try:
+            bres = await browser_fetch(url)
+        except FetchError as be:
+            raise FetchError(f"{e} (browser retry also failed: {be})", status=be.status) from be
+        if bres.status < 400 and not looks_like_challenge(bres.text):
+            _mark_browser_host(url)
+            return bres
+        if looks_like_challenge(bres.text):
+            raise FetchError(f"Blocked by bot protection on {host_of(url)}", status=bres.status) from e
+        raise FetchError(f"HTTP {bres.status} from {host_of(url)}", status=bres.status) from e
     text = resp.text if resp.content else ""
     result = FetchResult(url=str(resp.url), status=resp.status_code, text=text, headers=dict(resp.headers))
 

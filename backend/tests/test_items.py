@@ -266,3 +266,23 @@ async def test_create_downloads_image_in_background(db_ready, respx_mock, monkey
         it = s.get(Item, iid)
         assert it.image_path and it.image_path.endswith(".webp")
         assert it.status == "out_of_stock" and it.last_checked_at is not None
+
+
+def test_check_all_queues_only_own_active_items(admin, preview_mock):
+    from app import scheduler
+
+    a = create(admin)
+    b = create(admin, url="https://shop.example.com/p/2")
+    admin.patch(f"/api/items/{b['id']}", json={"enabled": False})  # paused: skipped
+    other = make_client()
+    other.post("/api/auth/setup", json={"username": "x", "password": "x" * 8})  # no-op: setup already done
+    scheduler._queued.clear()
+    try:
+        r = admin.post("/api/items/check-all")
+        assert r.status_code == 202 and r.json() == {"queued": 1, "total": 1}
+        assert scheduler._queued == {a["id"]}
+        # already queued -> not started twice
+        assert admin.post("/api/items/check-all").json() == {"queued": 0, "total": 1}
+    finally:
+        scheduler._queued.clear()
+    assert make_client().post("/api/items/check-all").status_code == 401

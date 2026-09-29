@@ -111,7 +111,6 @@ def _apply_result(item_id: int, result: CheckResult, duration_ms: int) -> _Outco
 
         item.last_checked_at = now
         new_labels: list[str] = []
-        went_out_of_stock = False
 
         if result.status == "unknown":
             # Inconclusive page (e.g. a bot challenge): record it, but keep the previous
@@ -142,13 +141,13 @@ def _apply_result(item_id: int, result: CheckResult, duration_ms: int) -> _Outco
                 if a.key not in seen:
                     seen.add(a.key)
                     keys.append(a.key)
-            prev_set = set(prev_keys)
-            new_labels = [a.label for a in result.available if a.key not in prev_set]
-            # dedupe labels for repeated keys
+            # Alert only on the transition from nothing available -> something available.
+            # More stores/options opening up while already available is not a new alert.
+            if keys and not prev_keys:
+                seen_labels: set[str] = set()
+                new_labels = [a.label for a in result.available
+                              if not (a.label in seen_labels or seen_labels.add(a.label))]
             item.available_keys = keys
-            went_out_of_stock = result.status == "out_of_stock" and (
-                prev_status == "in_stock" or bool(prev_keys)
-            )
             if not item.image_path and result.image_url and images.should_auto_fetch(item.id):
                 outcome.fetch_image_url = result.image_url
 
@@ -180,31 +179,22 @@ def _apply_result(item_id: int, result: CheckResult, duration_ms: int) -> _Outco
             db.execute(delete(CheckEvent).where(CheckEvent.item_id == item.id, CheckEvent.id <= cutoff))
 
         settings = db.execute(select(UserSettings).where(UserSettings.user_id == item.user_id)).scalar_one_or_none()
-        notify_oos = bool(settings and settings.notify_on_out_of_stock)
 
         notif: Notification | None = None
         tags = ("apple",) if item.kind == "apple" else ("shopping_cart",)
-        if new_labels:
+        alerts_on = bool(item.notify_enabled)
+        if new_labels and alerts_on:
             notif = Notification(
                 user_id=item.user_id,
                 item_id=item.id,
-                title=f"Restock alert: {item.name}"[:300],
+                title=f"Back in stock: {item.name}"[:300],
                 message=_summarize(new_labels),
                 url=item.url,
                 image_url=item.image_url,
                 created_at=now,
             )
-        elif went_out_of_stock and notify_oos:
-            notif = Notification(
-                user_id=item.user_id,
-                item_id=item.id,
-                title=f"Out of stock: {item.name}"[:300],
-                message=item.status_text or "No longer available",
-                url=item.url,
-                image_url=item.image_url,
-                created_at=now,
-            )
-            tags = ("x",)
+            # One alert per restock: mute the item until the user turns alerts back on.
+            item.notify_enabled = False
 
         if notif is not None:
             db.add(notif)
@@ -214,7 +204,7 @@ def _apply_result(item_id: int, result: CheckResult, duration_ms: int) -> _Outco
             outcome.message = notif.message
             outcome.click_url = item.url
             outcome.tags = tags
-            if item.notify_enabled and settings and (settings.ntfy_topic or "").strip():
+            if settings and (settings.ntfy_topic or "").strip():
                 outcome.send = True
                 outcome.target = _NtfyTarget(
                     settings.ntfy_server, settings.ntfy_topic, settings.ntfy_token, settings.ntfy_priority
@@ -347,6 +337,24 @@ async def _run_limited(item_id: int) -> None:
         log.exception("check for item %s failed", item_id)
     finally:
         _queued.discard(item_id)
+
+
+def queue_checks(item_ids: list[int]) -> int:
+    """Start checks now for the given items (shares the concurrency limit with the loop).
+
+    Items already queued or running are skipped. Returns how many were started.
+    """
+    global _semaphore
+    if _semaphore is None:
+        _semaphore = asyncio.Semaphore(max(1, get_settings().check_concurrency))
+    started = 0
+    for item_id in item_ids:
+        if item_id in _queued or item_id in _inflight:
+            continue
+        _queued.add(item_id)
+        spawn(_run_limited(item_id))
+        started += 1
+    return started
 
 
 async def tick() -> int:

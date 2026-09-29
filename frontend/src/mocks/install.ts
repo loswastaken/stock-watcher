@@ -160,6 +160,13 @@ async function handle(path: string, method: string, body: unknown): Promise<Resp
     }, 4000);
     return json(it, 201);
   }
+  if (p === '/items/check-all' && method === 'POST') {
+    const active = items.filter((x) => x.enabled);
+    setTimeout(() => {
+      for (const x of active) x.last_checked_at = new Date().toISOString();
+    }, 3000);
+    return json({ queued: active.length, total: active.length }, 202);
+  }
   mm = p.match(/^\/items\/(\d+)(\/.*)?$/);
   if (mm) {
     const it = items.find((x) => x.id === Number(mm![1]));

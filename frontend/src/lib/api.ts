@@ -155,6 +155,7 @@ export const api = {
   updateItem: (id: number, body: ItemUpdate) => request<Item>(`/items/${id}`, { method: 'PATCH', body }),
   deleteItem: (id: number) => request<void>(`/items/${id}`, { method: 'DELETE' }),
   checkItem: (id: number) => request<Item>(`/items/${id}/check`, { method: 'POST' }),
+  checkAll: () => request<{ queued: number; total: number }>('/items/check-all', { method: 'POST' }),
   uploadImage: (id: number, file: File) => {
     const form = new FormData();
     form.append('file', file);
