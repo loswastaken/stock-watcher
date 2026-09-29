@@ -1,6 +1,6 @@
 import { Bell, BellOff, ExternalLink, ImageDown, MoreHorizontal, Pause, Pencil, Play, RefreshCw, Trash2 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
-import { useItemActions } from '@/hooks/useItemActions';
+import { useIsChecking, useItemActions } from '@/hooks/useItemActions';
 import type { Item } from '@/lib/types';
 import { cn } from '@/lib/utils';
 import {
@@ -24,7 +24,7 @@ export function ItemActionsMenu({
 }) {
   const navigate = useNavigate();
   const a = useItemActions();
-  const checking = a.check.isPending && a.check.variables?.id === item.id;
+  const checking = useIsChecking(item.id);
 
   return (
     <DropdownMenu>

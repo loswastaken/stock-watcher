@@ -625,8 +625,10 @@ def clean_title(title: str | None, url: str, site_name: str | None = None) -> st
     t = clean_text(title)
     if not t:
         return None
-    t = re.sub(r"^amazon\.com\s*:\s*", "", t, flags=re.I)
     host = host_of(url)
+    if "amazon." in host or t.lower().startswith("amazon."):
+        t = re.sub(r"^amazon\.[a-z.]+\s*:\s*", "", t, flags=re.I)
+        t = re.sub(r"\s+:\s+[A-Za-z &,'-]{2,40}$", "", t)  # trailing " : Electronics"
     host_core = _norm(host.removeprefix("www.").rsplit(".", 1)[0]) if host else ""
     site = _norm(site_name or "")
 

@@ -1,4 +1,4 @@
-import { useMutation, useQueryClient, type QueryClient } from '@tanstack/react-query';
+import { useIsMutating, useMutation, useQueryClient, type QueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import { useConfirm } from '@/components/ui/confirm';
 import { statusMeta } from '@/components/StatusBadge';
@@ -18,6 +18,18 @@ export function upsertItem(qc: QueryClient, item: Item) {
   });
 }
 
+const CHECK_KEY = ['check-item'];
+
+/** True while a "Check now" for this item is in flight (from any component). */
+export function useIsChecking(id: number): boolean {
+  return (
+    useIsMutating({
+      mutationKey: CHECK_KEY,
+      predicate: (m) => (m.state.variables as Item | undefined)?.id === id,
+    }) > 0
+  );
+}
+
 export function useItemActions() {
   const qc = useQueryClient();
   const confirm = useConfirm();
@@ -28,6 +40,7 @@ export function useItemActions() {
   };
 
   const check = useMutation({
+    mutationKey: CHECK_KEY,
     mutationFn: (item: Item) => api.checkItem(item.id),
     onSuccess: (item) => {
       after(item);
