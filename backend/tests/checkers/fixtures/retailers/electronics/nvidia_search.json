@@ -1,0 +1,45 @@
+{
+  "categoryFilterList": [],
+  "searchedProducts": {
+    "totalProducts": 3,
+    "featuredProduct": {
+      "displayName": "NVIDIA GeForce RTX 5090",
+      "productTitle": "NVIDIA GeForce RTX 5090",
+      "productSKU": "NVGFT590",
+      "productUPC": "NVGFT590_US",
+      "gpu": "RTX 5090",
+      "manufacturer": "NVIDIA",
+      "isFounderEdition": true,
+      "productPrice": "$1,999.00",
+      "prdStatus": "out_of_stock",
+      "imageURL": "https://assets.nvidia.partners/images/png/RTX5090-3QTR-Back-Left.png",
+      "retailers": [
+        {"retailerName": "https://www.bestbuy.com", "isAvailable": false, "purchaseLink": "https://www.bestbuy.com/site/6614151.p?skuId=6614151", "salePrice": "1999.00"}
+      ]
+    },
+    "productDetails": [
+      {
+        "displayName": "ASUS ROG Astral RTX 5090",
+        "productTitle": "ASUS ROG Astral GeForce RTX 5090 32GB",
+        "productSKU": "90YV0LV0-M0NA00",
+        "gpu": "RTX 5090",
+        "manufacturer": "ASUS",
+        "isFounderEdition": false,
+        "productPrice": "$2,799.99",
+        "prdStatus": "check_availability",
+        "retailers": []
+      },
+      {
+        "displayName": "NVIDIA GeForce RTX 5080",
+        "productTitle": "NVIDIA GeForce RTX 5080",
+        "productSKU": "NVGFT580",
+        "gpu": "RTX 5080",
+        "manufacturer": "NVIDIA",
+        "isFounderEdition": true,
+        "productPrice": "$999.00",
+        "prdStatus": "buy_now",
+        "retailers": []
+      }
+    ]
+  }
+}

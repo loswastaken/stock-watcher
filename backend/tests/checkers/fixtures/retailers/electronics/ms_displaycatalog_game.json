@@ -1,0 +1,14 @@
+{
+  "Products": [
+    {
+      "ProductId": "9PP5G1F0C2B6",
+      "ProductKind": "Game",
+      "LocalizedProperties": [{"ProductTitle": "Halo Infinite (Campaign)", "Images": [{"ImagePurpose": "BoxArt", "Uri": "https://store-images.s-microsoft.com/image/apps.halo"}]}],
+      "DisplaySkuAvailabilities": [
+        {"Sku": {"SkuId": "0010", "Properties": {"IsPreOrder": false}},
+         "Availabilities": [{"AvailabilityId": "9NX2P3B2VQ3K", "Actions": ["Details", "Purchase", "Fulfill"],
+                             "OrderManagementData": {"Price": {"ListPrice": 59.99, "CurrencyCode": "USD"}}}]}
+      ]
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "MainItem": {
+    "Item": "N82E16814932744",
+    "Description": {"Title": "GIGABYTE AORUS GeForce RTX 5090 MASTER 32G Graphics Card, 32GB GDDR7"},
+    "UnitCost": 2699.99,
+    "FinalPrice": 2599.99,
+    "Instock": false,
+    "Stock": 0,
+    "SellerId": "",
+    "SellerName": "Newegg"
+  }
+}

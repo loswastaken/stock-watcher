@@ -1,0 +1,12 @@
+{
+  "productId": "8WJ714N3RBTL",
+  "skuId": "0002",
+  "availabilityId": "9X3DG4F5LCRW",
+  "distributorId": "9000000013",
+  "availableLots": {
+    "0001-01-01T00:00:00.0000000Z": {
+      "9000000013": {"inStock": "True", "outOfStockTime": null, "maxQuantity": 2}
+    }
+  },
+  "futureLots": {}
+}
