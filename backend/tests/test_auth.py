@@ -1,4 +1,5 @@
 from __future__ import annotations
+import pytest
 
 from tests.conftest import PW, make_client
 
@@ -147,3 +148,17 @@ def test_spa_serving(client, tmp_path, monkeypatch):
     assert "top secret" not in client.get("/..%2fsecret.txt").text
     assert "top secret" not in client.get("/%2e%2e/secret.txt").text
     assert client.get("/api/nope").json() == {"detail": "Not found"}
+
+
+def test_login_rate_limit_per_username_across_ips():
+    from app.security import LoginLimiter
+    from fastapi import HTTPException
+
+    lim = LoginLimiter()
+    for i in range(30):  # spoofed/rotating IPs, 3x the per-IP limit
+        lim.check(f"10.0.0.{i}", "admin")
+        lim.fail(f"10.0.0.{i}", "admin")
+    with pytest.raises(HTTPException) as e:
+        lim.check("10.0.0.99", "admin")
+    assert e.value.status_code == 429
+    lim.check("10.0.0.99", "someone-else")  # other usernames unaffected

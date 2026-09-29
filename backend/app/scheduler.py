@@ -113,7 +113,16 @@ def _apply_result(item_id: int, result: CheckResult, duration_ms: int) -> _Outco
         new_labels: list[str] = []
         went_out_of_stock = False
 
-        if result.status == "error":
+        if result.status == "unknown":
+            # Inconclusive page (e.g. a bot challenge): record it, but keep the previous
+            # available_keys so a later in_stock result doesn't re-alert on the same keys.
+            item.consecutive_errors = 0
+            item.last_error = None
+            item.status = "unknown"
+            item.status_text = (result.status_text or "Unknown")[:500]
+            if result.detail:
+                item.last_result = result.detail
+        elif result.status == "error":
             # keep available_keys / last_result (no flapping alerts)
             item.consecutive_errors = (item.consecutive_errors or 0) + 1
             item.last_error = (result.error or result.status_text or "Unknown error")[:2000]

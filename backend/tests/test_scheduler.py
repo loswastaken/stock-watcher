@@ -272,7 +272,8 @@ async def test_tick_runs_due_items_with_concurrency_limit(world, monkeypatch):
     from app import config
 
     config.reload_settings()
-    scheduler.start()
+    # Only the semaphore is needed; start() would also launch the loop, which ticks concurrently.
+    monkeypatch.setattr(scheduler, "_semaphore", asyncio.Semaphore(config.get_settings().check_concurrency))
     try:
         assert await scheduler.tick() == 5
         assert await scheduler.tick() == 0  # all queued/in flight, not started twice
@@ -296,3 +297,21 @@ async def test_auto_image_fetch_from_result(world, monkeypatch, respx_mock):
     set_checker(monkeypatch, fake_result("out_of_stock", (), image_url="https://cdn.test/a.png"))
     await scheduler.check_item(iid)
     assert item(iid).image_path.endswith(".webp")
+
+
+async def test_unknown_keeps_previous_keys(world, monkeypatch, respx_mock):
+    uid, iid = world
+    route = respx_mock.post(NTFY).respond(200)
+    set_checker(
+        monkeypatch,
+        fake_result("in_stock", ("stock",)),
+        CheckResult(status="unknown", status_text="Unknown"),
+        fake_result("in_stock", ("stock",)),
+    )
+    await scheduler.check_item(iid)
+    await scheduler.check_item(iid)
+    it = item(iid)
+    assert it.status == "unknown" and it.available_keys == ["stock"]
+    await scheduler.check_item(iid)  # back to in_stock with the same key: no second alert
+    assert item(iid).status == "in_stock"
+    assert len(notifs(uid)) == 1 and route.call_count == 1

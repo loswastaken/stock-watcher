@@ -156,24 +156,35 @@ class LoginLimiter:
         return lst
 
     def check(self, ip: str, username: str) -> None:
+        """Enforce a per-(ip, username) limit plus a looser per-username cap.
+
+        The per-username cap matters behind a reverse proxy, where X-Forwarded-For
+        can be spoofed to rotate the apparent client IP.
+        """
         s = get_settings()
         now = time.monotonic()
         with self._lock:
             if len(self._fails) > 5000:
                 for k in list(self._fails):
                     self._prune(k, now, s.login_window_seconds)
-            lst = self._prune((ip, username), now, s.login_window_seconds)
-            if len(lst) >= s.login_max_failures:
-                retry = max(1, int(s.login_window_seconds - (now - lst[0])))
-                raise HTTPException(
-                    status_code=429,
-                    detail="Too many failed login attempts. Try again later.",
-                    headers={"Retry-After": str(retry)},
-                )
+            for key, limit in (
+                ((ip, username), s.login_max_failures),
+                (("*", username), s.login_max_failures * 3),
+            ):
+                lst = self._prune(key, now, s.login_window_seconds)
+                if len(lst) >= limit:
+                    retry = max(1, int(s.login_window_seconds - (now - lst[0])))
+                    raise HTTPException(
+                        status_code=429,
+                        detail="Too many failed login attempts. Try again later.",
+                        headers={"Retry-After": str(retry)},
+                    )
 
     def fail(self, ip: str, username: str) -> None:
+        now = time.monotonic()
         with self._lock:
-            self._fails.setdefault((ip, username), []).append(time.monotonic())
+            self._fails.setdefault((ip, username), []).append(now)
+            self._fails.setdefault(("*", username), []).append(now)
 
     def reset(self, ip: str, username: str) -> None:
         with self._lock:
