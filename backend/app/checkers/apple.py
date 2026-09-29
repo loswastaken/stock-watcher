@@ -451,6 +451,7 @@ class _AppleSession:
         self.warmed = False
         self.client_lock: asyncio.Lock | None = None
         self.key_locks: dict[tuple, asyncio.Lock] = {}
+        self.retiring: set[asyncio.Task] = set()
 
 
 _sess = _AppleSession()
@@ -481,13 +482,31 @@ _XHR_HEADERS = {
 }
 
 
+# Retired clients stay open this long so requests that already hold them can finish.
+CLIENT_RETIRE_GRACE = 120.0
+
+
+async def _close_later(client: httpx.AsyncClient) -> None:
+    await asyncio.sleep(CLIENT_RETIRE_GRACE)
+    with contextlib.suppress(Exception):
+        await client.aclose()
+
+
+def _drop_client(s: _AppleSession) -> None:
+    """Start a fresh session. Never close the old client right away: concurrent checks
+    ('Check all') may hold it and be waiting to send."""
+    old, s.client, s.warmed = s.client, None, False
+    if old is not None and not old.is_closed:
+        task = asyncio.get_running_loop().create_task(_close_later(old))
+        s.retiring.add(task)
+        task.add_done_callback(s.retiring.discard)
+
+
 async def _reset_client() -> None:
     s = _session()
-    if s.client is not None:
-        with contextlib.suppress(Exception):
-            await s.client.aclose()
-    s.client = None
-    s.warmed = False
+    assert s.client_lock is not None
+    async with s.client_lock:
+        _drop_client(s)
 
 
 async def _client() -> httpx.AsyncClient:
@@ -495,7 +514,7 @@ async def _client() -> httpx.AsyncClient:
     assert s.client_lock is not None
     async with s.client_lock:
         if s.client is not None and (s.client.is_closed or time.monotonic() - s.created > JAR_TTL):
-            await _reset_client()
+            _drop_client(s)
         if s.client is None:
             s.client = fetcher.make_client(headers=_BASE_HEADERS)
             s.created = time.monotonic()
@@ -1074,9 +1093,12 @@ async def shutdown() -> None:
     same = False
     with contextlib.suppress(RuntimeError):
         same = s.loop is asyncio.get_running_loop()
-    if same and s.client is not None:
-        with contextlib.suppress(Exception):
-            await s.client.aclose()
+    if same:
+        for t in list(s.retiring):
+            t.cancel()
+        if s.client is not None:
+            with contextlib.suppress(Exception):
+                await s.client.aclose()
     _sess = _AppleSession()
     _cache.clear()
     _prefer_browser_until = 0.0

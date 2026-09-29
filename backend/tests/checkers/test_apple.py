@@ -1,6 +1,7 @@
 """Apple Store: fulfillment parsing, 2-hour delivery detection, HTTP/caching/fallback, resolve."""
 from __future__ import annotations
 
+import json
 from urllib.parse import parse_qs, urlsplit
 
 import httpx
@@ -415,3 +416,33 @@ def test_price_keys_are_not_prices():
     assert apple._price_text("mjw64ll_a_att_iphone18pro") is None
     assert apple._price_text("1299") == "$1,299.00"
     assert apple._price_text({"amountBeforeTradeIn": 1499.0, "fullPrice": None}) == "$1,499.00"
+
+
+@respx.mock
+async def test_block_reset_does_not_break_concurrent_check(monkeypatch):
+    """'Check all' runs Apple checks concurrently: one getting blocked (session reset) must not
+    close the shared client under another check that is waiting to send ('client has been closed')."""
+    import asyncio
+
+    monkeypatch.setenv("ENABLE_BROWSER", "true")
+    monkeypatch.setattr(fetcher, "HOST_MIN_GAP", 0.1)  # requests to apple.com queue up, like in production
+    _mock_warmup()
+
+    def responder(request):
+        part = parse_qs(request.url.query.decode())["parts.0"][0]
+        if part == B:
+            return httpx.Response(403, text="denied")
+        return httpx.Response(200, json=load_json("apple_fulfillment_mixed.json"))
+
+    respx.route(**FULFILL).mock(side_effect=responder)
+
+    async def fake_from_page(page_url, target_url, accept="application/json"):
+        return 200, json.dumps(load_json("apple_fulfillment_mixed.json")), []
+
+    monkeypatch.setattr(fetcher, "browser_fetch_from_page", fake_from_page)
+    blocked = asyncio.create_task(check_apple(PRODUCT_URL, {"parts": [B], "zip": "95014"}))
+    await asyncio.sleep(0)
+    ok = asyncio.create_task(check_apple(PRODUCT_URL, {"parts": [A], "zip": "95014"}))
+    r_blocked, r_ok = await asyncio.gather(blocked, ok)
+    assert r_ok.status != "error", r_ok.error
+    assert r_blocked.status != "error", r_blocked.error
