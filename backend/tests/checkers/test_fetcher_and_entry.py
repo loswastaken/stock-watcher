@@ -219,7 +219,10 @@ async def test_preview_generic():
     p = await checkers.preview_url(URL)
     assert p == {"name": "Aurora X1 Espresso Machine",
                  "image_url": "https://cdn.brewco.example/products/aurora-x1_1200x.jpg?v=1712",
-                 "price": "$1,099.00", "status": "in_stock", "is_apple": False, "retailer": None}
+                 "price": "$1,099.00", "status": "in_stock", "is_apple": False, "retailer": None,
+                 "status_text": "In stock", "seller": None, "third_party": None, "adapter": "generic",
+                 "fetched_via": "http", "cart_url": None, "signals": p["signals"], "queued": False, "blocked": False}
+    assert p["signals"] and all(isinstance(x, str) for x in p["signals"]) and len(p["signals"]) <= 8
 
 
 @respx.mock

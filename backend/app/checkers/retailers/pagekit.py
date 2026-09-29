@@ -261,6 +261,7 @@ def analyze_page(
 
     def mine(h: Hit) -> CheckResult:
         d = {"signals": list(dict.fromkeys([h.signal] + signals))[:15], "matched": h.signal}
+        d.update({k: g.detail[k] for k in ("canonical", "final_url") if g.detail.get(k)})
         d.update(extra)
         d.update(h.detail or {})
         res = result(h.verdict, h.text, available=h.available if h.verdict == "in" else None,
@@ -329,15 +330,14 @@ def js_assignment(html: str, name: str) -> Any:
         i = m.end()
         while i < len(html) and html[i] in " \t\r\n":
             i += 1
-        if i < len(html) and html[i] in "'\"":  # JSON.parse("...") string form
-            q = html[i]
-            j = i + 1
-            while j < len(html) and not (html[j] == q and html[j - 1] != "\\"):
-                j += 1
+        if i < len(html) and html[i] in "'\"":  # JSON.parse("...") / JSON.parse('...') string form
+            text = js_string(html, i)
+            if text is None:
+                continue
             try:
                 import json
 
-                return json.loads(json.loads(html[i:j + 1])) if q == '"' else None
+                return json.loads(text)
             except ValueError:
                 continue
         lit = extract_balanced(html, i)
@@ -345,6 +345,41 @@ def js_assignment(html: str, name: str) -> Any:
             data = loads_lenient(lit)
             if data is not None:
                 return data
+    return None
+
+
+_JS_ESCAPES = {"n": "\n", "r": "\r", "t": "\t", "b": "\b", "f": "\f", "v": "\v", "0": "\0"}
+
+
+def js_string(src: str, i: int) -> str | None:
+    """Decode the JavaScript string literal starting at ``src[i]`` (a quote), or None if unterminated.
+    Kroger ships its state as ``JSON.parse('...')`` with ``\\'`` / ``\\\\`` / ``\\uXXXX`` escapes."""
+    q = src[i]
+    out: list[str] = []
+    j = i + 1
+    n = len(src)
+    while j < n:
+        c = src[j]
+        if c == q:
+            return "".join(out)
+        if c == "\\" and j + 1 < n:
+            e = src[j + 1]
+            if e == "u" and re.match(r"[0-9a-fA-F]{4}", src[j + 2:j + 6]):
+                out.append(chr(int(src[j + 2:j + 6], 16)))
+                j += 6
+                continue
+            if e == "x" and re.match(r"[0-9a-fA-F]{2}", src[j + 2:j + 4]):
+                out.append(chr(int(src[j + 2:j + 4], 16)))
+                j += 4
+                continue
+            if e in "\r\n":  # line continuation
+                j += 2
+                continue
+            out.append(_JS_ESCAPES.get(e, e))
+            j += 2
+            continue
+        out.append(c)
+        j += 1
     return None
 
 

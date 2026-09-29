@@ -30,10 +30,11 @@ which ("Pre-order", "Backorder", ...). OutOfStock, SoldOut, Discontinued → out
 from __future__ import annotations
 
 import logging
+import unicodedata
 import re
 from dataclasses import dataclass, field
 from typing import Any, Callable
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, unquote, urljoin, urlsplit
 
 from bs4 import BeautifulSoup, Tag
 
@@ -284,6 +285,30 @@ def _entry_matches_hint(e: _Entry, hints: set[str]) -> bool:
     return False
 
 
+_CODE_KEYS = ("sku", "mpn", "productID", "model")
+
+
+def _entry_code(e: _Entry) -> str | None:
+    for obj in (e.offer, e.product):
+        for k in _CODE_KEYS:
+            v = obj.get(k)
+            if isinstance(v, (str, int)) and len(str(v).strip()) >= 5:
+                return str(v).strip()
+    return None
+
+
+def _entry_in_path(e: _Entry, page_url: str) -> bool:
+    """One of the entry's model / SKU codes is a whole token of the URL path."""
+    path = unquote(urlsplit(page_url or "").path).lower()
+    for obj in (e.offer, e.product):
+        for k in _CODE_KEYS:
+            v = obj.get(k)
+            code = str(v).strip().lower() if isinstance(v, (str, int)) else ""
+            if len(code) >= 5 and re.search(rf"(?:^|[^a-z0-9]){re.escape(code)}(?:$|[^a-z0-9])", path):
+                return True
+    return False
+
+
 def _offer_price(offer: dict, product: dict) -> str | None:
     cur = offer.get("priceCurrency") or product.get("priceCurrency")
     amount = offer.get("price")
@@ -352,6 +377,12 @@ def analyze_structured(roots: list, source: str, page_url: str) -> StructuredRes
 
     hints = _variant_hints(page_url)
     pinned = [e for e in entries if _entry_matches_hint(e, hints)] if hints else []
+    if not pinned and len(entries) > 1:
+        # the URL path names one variant's model / SKU (LG ".../lg-oled65c5pua-oled-4k-tv": the ProductGroup
+        # lists 42"–83" and only the 77" was InStock on 2026-09-29 — the 65" was OutOfStock)
+        path_hits = [e for e in entries if _entry_in_path(e, page_url)]
+        if path_hits and len(path_hits) < len(entries):
+            pinned, hints = path_hits, {_entry_code(path_hits[0]) or "path"}
     considered = pinned or entries
 
     ins = [e for e in considered if e.verdict == "in"]
@@ -697,6 +728,22 @@ class PageMeta:
     price: str | None = None
 
 
+_SHOWN_PRICE_SEL = (".product-price-sales_productDetail, .product-info-price .product-sales-price, "
+                    "[data-e2e=product-price], .product__price--sale, .price__sale .price-item--sale")
+_SHOWN_PRICE_RE = re.compile(r"([$£€])\s*(\d{1,3}(?:[,\s]\d{3})*|\d+)(?:\s*[.,]\s*|\s+)(\d{2})\b")
+
+
+def displayed_price(soup: BeautifulSoup) -> str | None:
+    """The product's own rendered sale price ("$ 119 16" with the cents in their own element), or None."""
+    el = soup.select_one(_SHOWN_PRICE_SEL)
+    m = _SHOWN_PRICE_RE.search(clean_text(el.get_text(" ", strip=True))) if el is not None else None
+    if not m:
+        return None
+    whole = re.sub(r"[,\s]", "", m.group(2))
+    cur = {"$": "USD", "£": "GBP", "€": "EUR"}[m.group(1)]
+    return format_price(parse_amount(f"{whole}.{m.group(3)}"), cur)
+
+
 def extract_page_meta(soup: BeautifulSoup, url: str, structured: list[StructuredResult]) -> PageMeta:
     site = _meta(soup, "og:site_name", "application-name")
     sd_name = next((s.name for s in structured if s.name), None)
@@ -762,6 +809,8 @@ _NF_HEADING_RE = re.compile(
     r"(?:does\s*n[o']t|does\s+not|could\s+not|can\s*n[o']t))|^\W*(?:product|item)\s+not\s+found\W*$|^\W*404\b",
     re.I,
 )
+_NO_RESULTS_RE = re.compile(r"^\W*(?:no\s+results?(?:\s+found)?|0\s+results?|no\s+products?\s+found)\W*$", re.I)
+_SEARCH_URL_RE = re.compile(r"search|[?&](?:q|query|keyword|keywords|st|term|text)=", re.I)
 _TITLE_TAG_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.I | re.S)
 _H1_RE = re.compile(r"<h1\b[^>]*>(.*?)</h1>", re.I | re.S)
 _TAGS_RE = re.compile(r"<[^>]+>")
@@ -808,7 +857,11 @@ def missing_page(url: str, final_url: str | None, html: str | None, status: int 
     m = _TITLE_TAG_RE.search(head)
     if m:
         title = clean_text(_TAGS_RE.sub(" ", m.group(1)))
-        if title and any(_NF_TITLE_SEG_RE.match(seg) for seg in [title] + _TITLE_SEPS.split(title)):
+        segs = [title] + _TITLE_SEPS.split(title) if title else []
+        if any(_NF_TITLE_SEG_RE.match(seg) for seg in segs):
+            return NOT_FOUND_TEXT
+        # a product link answered with the site's empty search page (Antonline: "No Results - antonline.com")
+        if any(_NO_RESULTS_RE.match(seg) for seg in segs) and not _SEARCH_URL_RE.search(url):
             return NOT_FOUND_TEXT
     for hm in _H1_RE.finditer(html or ""):
         h1 = clean_text(_TAGS_RE.sub(" ", hm.group(1)))
@@ -894,6 +947,17 @@ def analyze(html: str, url: str, config: dict | GenericConfig | None = None, *, 
         structured.append(analyze_structured(rdfa, "rdfa", url))
     meta = extract_page_meta(soup, base, structured)
     detail: dict[str, Any] = {"mode": cfg.mode, "signals": []}
+    shown = displayed_price(soup)
+    if shown and meta.price and shown[:1] != meta.price[:1]:
+        # structured data in the store's base currency, the page shows the visitor's (NYXI, a Shopline
+        # store, 2026-09-29: JSON-LD "GBP 90" from a GB session cookie, rendered "$119.16" to the US viewer)
+        detail["structured_price"] = meta.price
+        meta.price = shown
+    canon = soup.select_one("link[rel=canonical][href], meta[property='og:url'][content]")
+    if canon is not None:
+        detail["canonical"] = urljoin(base, str(canon.get("href") or canon.get("content") or "").strip()) or None
+    if base_url and base_url.split("#")[0] != url.split("#")[0]:
+        detail["final_url"] = base_url
 
     if cfg.mode == "selector":
         if not cfg.selector:
@@ -1015,3 +1079,89 @@ async def check_generic(url: str, config: dict | None) -> CheckResult:
     result.detail["fetched_via"] = via
     result.detail.setdefault("adapter", "generic")
     return result
+
+
+# --------------------------------------------------------------------------- "the link shows another product"
+#
+# Stores reuse product ids, and several ignore the slug: the 2026-09-29 run found B&H 1809440-REG
+# (fujifilm_..._x100vi_...) redirecting to an open-box iPod touch, Pokémon Center 10-10185-101
+# (prismatic-evolutions-elite-trainer-box) now a Phantasmal Flames Build & Battle Box, Kohl's
+# prd-6589434 (lego-icons-orchid) a toddler hoodie, Play-Asia 70gk5t (mario-kart-world) Earth Defense
+# Force, GameFly 5022850 (mario-kart-world) a screen protector and a Newegg RTX 5070 Ti link an RTX 5090.
+# Their stock and price are another product's, so the check says the link is stale instead.
+
+OTHER_PRODUCT_TEXT = "This link now shows a different product"
+_SLUG_STOP = {"the", "and", "for", "with", "of", "in", "on", "to", "an", "by", "at", "from", "into", "or", "new",
+              "buy", "shop", "product", "products", "ip", "dp", "item", "site", "game", "en", "us", "html", "htm",
+              "jsp", "aspx", "php", "reg", "pdp", "sku", "com", "www"}
+_MARKS_RE = re.compile(r"[™®©℠]")
+
+
+def _stem(w: str) -> str:
+    return w[:-1] if len(w) > 3 and w.endswith("s") and not w.endswith("ss") else w
+
+
+def _name_words(s: str) -> set[str]:
+    s = unicodedata.normalize("NFKD", _MARKS_RE.sub(" ", s or "")).encode("ascii", "ignore").decode().lower()
+    return {_stem(w) for w in re.findall(r"[a-z0-9]+", s)
+            if len(w) >= 2 and w not in _SLUG_STOP and not re.fullmatch(r"\d{6,}", w)}
+
+
+def slug_words(url: str) -> tuple[str | None, set[str]]:
+    """(the path segment that names the product, its words): the richest ``word-word-word`` segment."""
+    path = unquote(urlsplit(url or "").path)
+    best: tuple[str | None, set[str]] = (None, set())
+    for seg in path.split("/"):
+        base = re.sub(r"\.(?:html?|jsp|aspx?|php|p)$", "", seg, flags=re.I)
+        parts = [x for x in re.split(r"[-_+\s]+", base) if x]
+        if len(parts) < 2:
+            continue
+        w = _name_words(" ".join(parts))
+        if sum(1 for x in w if re.search(r"[a-z]", x)) >= 2 and len(w) > len(best[1]):
+            best = (seg, w)
+    return best
+
+
+def _model_tokens(words: set[str]) -> set[str]:
+    return {w for w in words if re.search(r"\d", w) and (re.search(r"[a-z]", w) or len(w) >= 3)}
+
+
+def other_product(url: str, res: CheckResult) -> str | None:
+    """The name of the product the page actually shows when it isn't the one the URL's slug names, else None."""
+    seg, want = slug_words(url)
+    if not seg or len(want) < 3:
+        return None
+    d = res.detail or {}
+    # 1) the store's own URL for the page (redirect target / canonical) keeps the id but names another product
+    for other in (d.get("final_url"), d.get("canonical")):
+        if not other or _site(host_of(other)) != _site(host_of(url)):
+            continue
+        oseg, have = slug_words(other)
+        if not oseg or oseg == seg or len(have) < 2:
+            continue
+        if len(want & have) / len(want) < 0.5:
+            return res.title or oseg
+        break
+    # 2) the product title shares nothing with the slug, or names other model numbers
+    title_words = _name_words(res.title or "")
+    if len(title_words) < 2:
+        return None
+    common = want & title_words
+    if not common:
+        return res.title
+    mine, theirs = _model_tokens(want), _model_tokens(title_words)
+    # part numbers are spelled differently in slugs ("GV-N5090GAMING-OC-32GD" vs "RTX 5090 GAMING OC 32G"):
+    # a slug model token is matched when it contains a title token or the other way round
+    matched = any(a in b or b in a for a in mine for b in theirs | title_words if len(b) >= 3 or b in theirs)
+    if len(common) / len(want) < 0.5 and mine and theirs and not matched:
+        return res.title
+    return None
+
+
+def other_product_result(url: str, res: CheckResult, other: str) -> CheckResult:
+    text = f"{OTHER_PRODUCT_TEXT} ({clean_text(other)[:80]}) — update the link"
+    detail = dict(res.detail or {})
+    detail.update(dead_link=True, other_product=clean_text(other), matched="URL names another product")
+    return CheckResult(status="error", status_text=text, available=[], title=res.title, image_url=res.image_url,
+                       error=text, detail=detail)
+

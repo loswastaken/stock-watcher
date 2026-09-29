@@ -52,13 +52,26 @@ def test_upc():
     assert kroger.upc_from_url("https://www.kroger.com/search?query=switch") is None
 
 
-async def test_without_credentials_falls_through(monkeypatch):
+def _page_path(monkeypatch) -> list:
+    calls: list = []
+
+    async def page(url, upc, c):
+        calls.append(upc)
+        return "page"
+
+    monkeypatch.setattr(kroger, "check_page", page)
+    return calls
+
+
+async def test_without_credentials_reads_the_page(monkeypatch):
     monkeypatch.delenv("KROGER_CLIENT_ID")
-    assert await kroger.check(URL, ctx(fulfillment="pickup", zip="45209")) is None
+    calls = _page_path(monkeypatch)
+    assert await kroger.check(URL, ctx(fulfillment="pickup", zip="45209")) == "page" and calls
 
 
-async def test_without_location_delivery_falls_through_pickup_errors():
-    assert await kroger.check(URL, ctx()) is None
+async def test_without_location_delivery_reads_the_page_pickup_errors(monkeypatch):
+    calls = _page_path(monkeypatch)
+    assert await kroger.check(URL, ctx()) == "page" and calls
     res = await kroger.check(URL, ctx(fulfillment="pickup"))
     assert res.status == "error" and res.status_text == "Set a ZIP code for pickup"
 

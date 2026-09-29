@@ -11,6 +11,13 @@ Signals, first that answers wins:
 
 Both URL styles are handled: ``/site/{slug}/{sku}.p?skuId={sku}`` and ``/product/{slug}/{BSIN}/sku/{sku}``
 (a ``/product/`` URL without ``/sku/`` is resolved by reading the SKU from the page).
+
+Best Buy Marketplace: third-party listings ("Sold & shipped by Abe's Electronics Center") keep an
+"Add to cart" button state even when the cart then answers "This item is currently unavailable for
+online purchase". With official sellers only (the default) a marketplace seller is "Third-party
+sellers only (<seller>)"; either way "currently unavailable for online purchase" is out. Marketplace
+SKUs are 8 digits (12357608) where Best Buy's own are 7: an 8-digit SKU whose seller can't be seen
+is never reported in stock as if Best Buy sold it — the page is read for the seller first.
 """
 from __future__ import annotations
 
@@ -79,8 +86,25 @@ def map_button(state: str | None) -> tuple[str | None, str]:
     return None, f"Unrecognised button state {s}" if s else "Unknown"
 
 
+_SELLER_NAME_KEYS = {"sellername", "sellerdisplayname", "marketplacesellername", "soldby", "soldbyname",
+                     "sellerdisplay", "merchantname", "vendorname"}
+_MARKETPLACE_BOOL_KEYS = {"marketplace", "ismarketplace", "ismarketplaceitem", "marketplaceitem", "ismarketplaceseller",
+                          "marketplaceseller", "isthirdparty", "thirdparty", "isthirdpartyseller", "ismarketplacesku"}
+_MARKETPLACE_TYPE_KEYS = {"sellertype", "fulfillmenttype", "offertype", "listingtype", "sellingchannel", "channel"}
+_MARKETPLACE_TYPE_RE = re.compile(r"^(?:marketplace|3p|third[_\s-]?party|mkp)$", re.IGNORECASE)
+# other offers of the same SKU (open box, other sellers): never the featured offer's seller
+_OTHER_OFFER_KEYS = {"productoptions", "multiplesellers", "openbox", "alternateoffers", "otheroffers"}
+
+
+def _is_best_buy(name: str) -> bool:
+    return bool(re.match(r"^\s*best\s*buy\b", name or "", re.IGNORECASE))
+
+
 def _seller_info(obj: Any) -> tuple[str | None, bool | None]:
-    """Best-effort marketplace detection in Best Buy JSON (field names unverified)."""
+    """Marketplace detection in Best Buy JSON (priceBlocks / button-state): seller name fields
+    (``sellerName``, ``seller: {name}`` ...), marketplace flags (``isMarketplace`` ...) and seller/offer
+    type strings ("MARKETPLACE", "3P"). Other offers of the SKU (``productOptions.multipleSellers``)
+    are skipped. Field names beyond the recorded first-party answers are best-effort."""
     seller, third = None, None
     stack = [obj]
     while stack:
@@ -88,20 +112,44 @@ def _seller_info(obj: Any) -> tuple[str | None, bool | None]:
         if isinstance(cur, dict):
             for k, v in cur.items():
                 kl = k.lower()
-                if kl in ("sellername", "sellerdisplayname", "marketplacesellername") and isinstance(v, str) and v:
-                    seller = seller or v
-                elif kl in ("marketplace", "ismarketplace", "ismarketplaceitem", "marketplaceitem") \
-                        and isinstance(v, bool):
+                if kl in _OTHER_OFFER_KEYS:
+                    continue
+                if kl in _SELLER_NAME_KEYS and isinstance(v, str) and clean_text(v):
+                    seller = seller or clean_text(v)
+                elif kl == "seller" and isinstance(v, dict):
+                    name = next((clean_text(v[x]) for x in ("displayName", "name", "sellerName")
+                                 if isinstance(v.get(x), str) and clean_text(v[x])), None)
+                    seller = seller or name
+                    stack.append(v)
+                elif kl == "seller" and isinstance(v, str) and clean_text(v):
+                    seller = seller or clean_text(v)
+                elif kl in _MARKETPLACE_BOOL_KEYS and isinstance(v, bool):
                     third = v if third is None else (third or v)
+                elif kl in _MARKETPLACE_TYPE_KEYS and isinstance(v, str) and _MARKETPLACE_TYPE_RE.match(v.strip()):
+                    third = True
                 elif isinstance(v, (dict, list)):
                     stack.append(v)
         elif isinstance(cur, list):
             stack.extend(cur)
     if seller and third is None:
-        third = not re.match(r"^\s*best\s*buy\b", seller, re.IGNORECASE)
+        third = not _is_best_buy(seller)
     if third is False and not seller:
         seller = "Best Buy"
     return seller, third
+
+
+def marketplace_sku(sku: str | None) -> bool:
+    """Best Buy's own SKUs are 7 digits; Marketplace listings got 8-digit ones (12357608)."""
+    return bool(sku) and len(sku) >= 8
+
+
+def third_party_text(seller: str | None) -> str:
+    return f"{THIRD_PARTY_TEXT} ({seller[:60]})" if seller and not _is_best_buy(seller) else THIRD_PARTY_TEXT
+
+
+UNAVAILABLE_ONLINE = "Unavailable online"
+HIGH_DEMAND_TEXT = "High-demand item (reservation flow) — stock not confirmed"
+SELLER_UNCONFIRMED = "Couldn't confirm the seller (Best Buy Marketplace listing?)"
 
 
 def _build(ctx: AdapterContext, sku: str, verdict: str | None, text: str, *, source: str,
@@ -112,7 +160,7 @@ def _build(ctx: AdapterContext, sku: str, verdict: str | None, text: str, *, sou
                          cart_url=cart_url(sku), button_state=button_state)
     detail.update({k: v for k, v in extra.items() if v is not None})
     if verdict == "in" and third_party and ctx.retailer_config.official_only:
-        return result("out", THIRD_PARTY_TEXT, price=price, title=title, image_url=image, detail=detail)
+        return result("out", third_party_text(seller), price=price, title=title, image_url=image, detail=detail)
     return result(verdict, text, available=available, price=price, title=title, image_url=image, detail=detail)
 
 
@@ -240,6 +288,36 @@ def _page_needs(html: str) -> bool:
     return bool(BUTTON_STATE_RE.search(html) or BUTTON_STATE_JSON_RE.search(html))
 
 
+BSIN_URL_RE = re.compile(r"/product/[^/?#]+/([A-Z0-9]{10})(?:[/?#]|$)", re.IGNORECASE)
+_CANON_RE = re.compile(r'<(?:link|meta)\b[^>]*(?:rel=["\']canonical["\']|property=["\']og:url["\'])[^>]*>', re.I)
+_HREF_RE = re.compile(r'(?:href|content)=["\']([^"\']+)["\']', re.I)
+_SKU_LABEL_RE = re.compile(r">\s*SKU\s*:?\s*(?:<[^>]*>\s*)*(\d{7,8})\b")
+
+
+def sku_from_page(html: str, url: str) -> str | None:
+    """The SKU of a ``/product/{slug}/{BSIN}`` page: canonical / og:url, the "SKU: 12357608" label, the
+    skuId next to the page's BSIN, then the first SKU attribute/JSON on the page."""
+    for tag in _CANON_RE.findall(html or ""):
+        m = _HREF_RE.search(tag)
+        sku = sku_from_url(m.group(1)) if m else None
+        if sku:
+            return sku
+    m = _SKU_LABEL_RE.search(html or "")
+    if m:
+        return m.group(1)
+    b = BSIN_URL_RE.search(urlsplit(url).path)
+    if b:
+        spots = [x.start() for x in re.finditer(re.escape(b.group(1)), html or "")]
+        best = None
+        for m in _SKU_JSON_RE.finditer(html or ""):
+            d = min((abs(m.start() - x) for x in spots), default=None)
+            if d is not None and d <= 1500 and (best is None or d < best[0]):
+                best = (d, m.group(1))
+        if best:
+            return best[1]
+    return next((m.group(1) for rx in SKU_PAGE_RES for m in [rx.search(html or "")] if m), None)
+
+
 async def check(url: str, ctx: AdapterContext) -> CheckResult | None:
     rc = ctx.retailer_config
     sku = sku_from_url(url)
@@ -248,18 +326,21 @@ async def check(url: str, ctx: AdapterContext) -> CheckResult | None:
     if not sku:
         if "/product/" not in urlsplit(url).path:
             return None
+        # /product/{slug}/{BSIN}: only the page knows the SKU. A failure here propagates (the check
+        # reports it, e.g. "Best Buy refused the connection (bot protection) — retrying later").
         fetched = await fetcher.fetch_html(purl, needs=_page_needs)
         if is_queued(fetched):
             return queued_result(ctx)
-        sku = next((m.group(1) for rx in SKU_PAGE_RES for m in [rx.search(fetched.text)] if m), None)
+        sku = sku_from_page(fetched.text, url)
         if not sku:
-            return generic_result(fetched, url, ctx)
+            res = generic_result(fetched, url, ctx, source="page-generic")
+            return apply_page_signals(res, page_signals(fetched.text, None), ctx)
 
     key = os.environ.get("BESTBUY_API_KEY", "").strip()
     api_error: FetchError | None = None
     if key:
         try:
-            return await _api_check(sku, key, ctx)
+            return await _confirm(await _api_check(sku, key, ctx), sku, purl, fetched, ctx)
         except FetchError as e:
             api_error = e
             log.warning("bestbuy API failed for %s (%s); falling back to the website", sku, e)
@@ -291,8 +372,9 @@ async def check(url: str, ctx: AdapterContext) -> CheckResult | None:
             seller, third = _seller_info(block)
             price = dig(s, "price", "currentPrice")
             title = dig(s, "names", "short") or dig(s, "names", "title")
-            return _build(ctx, sku, verdict, _pickup_note(text, ctx), source="priceBlocks", price=price, title=title,
-                          seller=seller, third_party=third, button_state=state)
+            res = _build(ctx, sku, verdict, _pickup_note(text, ctx), source="priceBlocks", price=price, title=title,
+                         seller=seller, third_party=third, button_state=state)
+            return await _confirm(res, sku, purl, fetched, ctx, api_text=dig(s, "buttonState", "displayText"))
     if not network_down:
         try:
             info = await _button_state(sku, purl)
@@ -304,8 +386,9 @@ async def check(url: str, ctx: AdapterContext) -> CheckResult | None:
             verdict, text = map_button(state)
             if verdict is not None:
                 seller, third = _seller_info(info)
-                return _build(ctx, sku, verdict, _pickup_note(text, ctx), source="button-state", seller=seller,
-                              third_party=third, button_state=state)
+                res = _build(ctx, sku, verdict, _pickup_note(text, ctx), source="button-state", seller=seller,
+                             third_party=third, button_state=state)
+                return await _confirm(res, sku, purl, fetched, ctx, api_text=info.get("displayText"))
 
     # ---- the page itself
     if fetched is None:
@@ -322,16 +405,124 @@ async def check(url: str, ctx: AdapterContext) -> CheckResult | None:
             override(res, verdict, text, matched=f"data-button-state={state}")
     else:
         res.detail["source"] = "page-generic"
-    seller, third = _seller_info_from_page(fetched.text)
-    res.detail.update(seller=seller, third_party=third)
-    if res.status == "in_stock" and third and rc.official_only:
-        override(res, "out", THIRD_PARTY_TEXT)
+    res.detail.update(seller=None, third_party=None)
+    apply_page_signals(res, page_signals(fetched.text, sku), ctx)
+    if res.status == "in_stock" and rc.official_only and res.detail.get("third_party") is None \
+            and marketplace_sku(sku):
+        override(res, None, SELLER_UNCONFIRMED, matched="marketplace-range SKU, no seller on the page")
     if rc.wants_pickup:
         res.status_text = _pickup_note(res.status_text, ctx)
     return res
 
 
-_SOLD_BY_RE = re.compile(r"\bSold\s+(?:and\s+shipped\s+)?by\s+([A-Z0-9][\w&.'-]*(?:\s+[A-Z0-9][\w&.'-]*){0,4})")
+_UNAVAILABLE_ONLINE_RE = re.compile(r"(?:currently\s+)?unavailable\s+for\s+online\s+purchase", re.IGNORECASE)
+_HIGH_DEMAND_RE = re.compile(r"\bhigh[\s-]+demand\s+(?:product|item)\b", re.IGNORECASE)
+
+
+def page_signals(html: str, sku: str | None) -> dict:
+    """What the product page says beyond the button: the featured seller ("Sold & shipped by X"),
+    "currently unavailable for online purchase", and the "High Demand Product" reservation notice."""
+    text = _visible(html)
+    seller = _seller_from_text(text) or _seller_from_json(html, sku)
+    return {"seller": seller, "third_party": (not _is_best_buy(seller)) if seller else None,
+            "unavailable_online": bool(_UNAVAILABLE_ONLINE_RE.search(text)),
+            "high_demand": bool(_HIGH_DEMAND_RE.search(text))}
+
+
+def apply_page_signals(res: CheckResult, sig: dict, ctx: AdapterContext) -> CheckResult:
+    """Page facts win over an optimistic verdict (an API "Add to cart" or the page's JSON-LD InStock):
+    a marketplace seller with official sellers only, or "unavailable for online purchase", is out."""
+    if sig.get("seller") and res.detail.get("third_party") is None:
+        res.detail.update(seller=sig["seller"], third_party=sig["third_party"], seller_source="page")
+    if sig.get("high_demand"):
+        res.detail["high_demand"] = True
+    if res.status != "in_stock":
+        return res
+    if sig.get("unavailable_online"):
+        return override(res, "out", UNAVAILABLE_ONLINE, matched="page: currently unavailable for online purchase")
+    if res.detail.get("third_party") and ctx.retailer_config.official_only:
+        return override(res, "out", third_party_text(res.detail.get("seller")),
+                        matched=f"seller: {res.detail.get('seller')}")
+    if sig.get("high_demand") and (res.detail.get("source") == "page-generic" or res.detail.get("third_party")):
+        # the reservation flow decides at add-to-cart time (a marketplace listing's cart then said "currently
+        # unavailable for online purchase"): structured data or a marketplace button can't confirm stock
+        return override(res, None, HIGH_DEMAND_TEXT, matched="page: High Demand Product")
+    if sig.get("high_demand") and res.status_text == "In stock":
+        res.status_text = "In stock (high-demand: reservation queue)"
+        res.available = [Availability(key=STOCK_KEY, label=res.status_text)]
+    return res
+
+
+async def _confirm(res: CheckResult, sku: str, purl: str, fetched: FetchResult | None, ctx: AdapterContext,
+                   *, api_text: Any = None) -> CheckResult:
+    """An "in stock" from the APIs is only as good as its seller: check the page when it's at hand or
+    when the SKU is a marketplace-range one whose seller the API didn't name."""
+    if res.status != "in_stock":
+        return res
+    if isinstance(api_text, str) and _UNAVAILABLE_ONLINE_RE.search(api_text):
+        return override(res, "out", UNAVAILABLE_ONLINE, matched=f"button displayText: {api_text[:80]}")
+    if fetched is None and res.detail.get("third_party") is None and marketplace_sku(sku):
+        try:
+            fetched = await fetcher.fetch_html(purl, needs=_page_needs)
+        except FetchError as e:
+            log.info("bestbuy page for seller check failed for %s: %s", sku, e)
+            fetched = None
+        if fetched is not None and is_queued(fetched):
+            fetched = None
+    if fetched is not None:
+        apply_page_signals(res, page_signals(fetched.text, sku), ctx)
+    if res.status == "in_stock" and ctx.retailer_config.official_only and res.detail.get("third_party") is None \
+            and marketplace_sku(sku):
+        override(res, None, SELLER_UNCONFIRMED, matched="marketplace-range SKU, seller not shown")
+    return res
+
+
+_SOLD_BY_RE = re.compile(
+    r"\b(?:Sold\s*(?:&|and)\s*shipped\s+by|Ships\s+from\s+and\s+sold\s+by|Sold\s+by)\s*:?\s+"
+    r"([A-Z0-9][^\s]*(?:\s+[^\s]+){0,7})")
+_SELLER_STOP = {"seller", "rating", "ratings", "ships", "shipped", "sold", "learn", "see", "view", "visit", "get",
+                "free", "pickup", "add", "return", "returns", "reviews", "review", "more", "details", "opens",
+                "contact", "sku", "model", "delivery", "shipping", "about", "|", "·", "-", "–", "—", "(", "."}
+
+
+def _seller_from_text(text: str) -> str | None:
+    m = _SOLD_BY_RE.search(text or "")
+    if not m:
+        return None
+    words: list[str] = []
+    for w in m.group(1).split():
+        bare = w.strip(".,;:()").lower()
+        if words and (bare in _SELLER_STOP or re.match(r"^[\d.,()/]+$", w) or not (w[:1].isupper() or w[:1].isdigit()
+                                                                              or bare in {"of", "and", "the", "&"})):
+            break
+        words.append(w)
+        if w.endswith((".", ",", ";")) and not re.search(r"\b(?:inc|llc|co|ltd)\.$", w, re.I):
+            break
+    name = " ".join(words).rstrip(".,;: ")
+    return name[:80] or None
+
+
+_SELLER_JSON_RE = re.compile(r'\\?"(?:sellerName|sellerDisplayName|marketplaceSellerName)\\?"\s*:\s*\\?"([^"\\]{2,80})')
+
+
+def _seller_from_json(html: str, sku: str | None) -> str | None:
+    """A seller name in the page's embedded JSON, only when it sits next to this SKU (carousels list
+    other products' sellers)."""
+    if not sku:
+        return None
+    skus = [(m.start(), m.group(1)) for m in _SKU_JSON_RE.finditer(html or "")]
+    for m in _SELLER_JSON_RE.finditer(html or ""):
+        near = min(skus, key=lambda p: abs(p[0] - m.start()), default=None)
+        if near is not None and abs(near[0] - m.start()) <= 1500 and near[1] == sku:
+            return clean_text(m.group(1))
+    return None
+
+
+def _visible(html: str) -> str:
+    soup = soup_of(html)
+    for t in soup(["script", "style", "noscript", "template"]):
+        t.decompose()
+    return clean_text(soup.get_text(" ", strip=True))
 
 
 _SKU_JSON_RE = re.compile(r'\\?"sku(?:Id|ID|_id)?\\?"\s*:\s*\\?"?(\d{5,9})')
@@ -354,14 +545,3 @@ def page_button_state(html: str, sku: str) -> str | None:
         if near is not None and abs(near[0] - m.start()) <= 800 and near[1] == sku:
             return m.group(1)
     return None
-
-
-def _seller_info_from_page(html: str) -> tuple[str | None, bool | None]:
-    soup = soup_of(html)
-    for t in soup(["script", "style", "noscript", "template"]):
-        t.decompose()
-    m = _SOLD_BY_RE.search(clean_text(soup.get_text(" ", strip=True)))
-    if not m:
-        return None, None
-    seller = m.group(1).strip()
-    return seller, not re.match(r"^best\s*buy\b", seller, re.IGNORECASE)

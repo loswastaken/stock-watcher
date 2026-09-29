@@ -335,6 +335,10 @@ COSTCO_RULES = [
 ]
 
 HOMEDEPOT_RULES = [
+    # the recorded 2026-09-29 page for item 315143462 (headed Chrome, HTTP 200): no product markup, only
+    # "The product you are trying to view is not currently available."
+    _t(r"\bthe\s+product\s+you\s+are\s+trying\s+to\s+view\s+is\s+not\s+currently\s+available\b", "out",
+       "Not currently available on homedepot.com"),
     _t(r"\bthis\s+item\s+(?:has\s+been\s+)?discontinued\b|\bdiscontinued\s+item\b", "out", "Discontinued"),
     _t(r"\bthis\s+item\s+is\s+(?:currently\s+)?unavailable\b|\bout\s+of\s+stock\s+online\b", "out",
        "Out of stock online"),
@@ -424,8 +428,36 @@ async def kohls(url: str, ctx: AdapterContext) -> CheckResult | None:
     return await dom_check(url, ctx, KOHLS_RULES)
 
 
+_MEIJER_ITEM_RE = re.compile(r"/shopping/product/[^/?#]+/(\d+)\.html", re.IGNORECASE)
+MEIJER_EMPTY_TEXT = "Meijer's page loaded without the product (item details didn't load)"
+
+
+def meijer_empty_shell(html: str) -> bool:
+    """The React app rendered (header, footer, sign-in popup) but ``<main>`` is empty: no product name,
+    price or button — both recorded runs (2026-09-29 headless and headed Chrome) of item 4549659 looked
+    like this, with the generic title "Product Details"."""
+    soup = soup_of(html)
+    title = clean_text(soup.title.get_text(" ", strip=True)) if soup.title else ""
+    main = soup.select_one("main")
+    if main is None or title.lower() not in ("product details", "meijer", "") or "ld+json" in html:
+        return False
+    for t in main(["script", "style", "noscript", "template"]):
+        t.decompose()
+    return len(clean_text(main.get_text(" ", strip=True))) < 40 and main.find("h1") is None
+
+
 async def meijer(url: str, ctx: AdapterContext) -> CheckResult | None:
-    return await dom_check(url, ctx, MEIJER_RULES)
+    fetched = await fetch_page(url, ctx)
+    if not is_queued(fetched) and not looks_blocked(fetched.text) and meijer_empty_shell(fetched.text):
+        m = _MEIJER_ITEM_RE.search(urlsplit(url).path)
+        if m and len(m.group(1)) < 10:
+            # Meijer item numbers are UPC-based (10+ digits, e.g. 7457044400.html): a short one that renders
+            # nothing is not a Meijer product.
+            return generic.missing_result(generic.NOT_FOUND_TEXT, url, fetched.url, item=m.group(1),
+                                          why="empty product page; not a Meijer UPC item number")
+        res = generic_result(fetched, url, ctx)
+        return override(res, None, MEIJER_EMPTY_TEXT, matched="empty product shell")
+    return await dom_check(url, ctx, MEIJER_RULES, fetched=fetched)
 
 
 async def officedepot(url: str, ctx: AdapterContext) -> CheckResult | None:
@@ -602,8 +634,16 @@ async def stockx(url: str, ctx: AdapterContext) -> CheckResult | None:
     fetched = await fetch_page(url, ctx, needs=lambda h: "__NEXT_DATA__" in h or fetcher.has_product_signals(h))
     if is_queued(fetched):
         return queued_result(ctx)
-    res = generic_result(fetched, url, ctx, third_party=True)
     found, ask = stockx_lowest_ask(fetched.text, fetched.url or url)
+    if not found:
+        # an unknown slug renders StockX's catch-all 404 page (HTTP 200, homepage title, <h1>404</h1>,
+        # data-testid="NotFound") — recorded 2026-09-29 for /nintendo-switch-2-console-us-version
+        dead = dead_link(fetched, url, ctx)
+        if dead is None and 'data-testid="NotFound"' in fetched.text:
+            dead = generic.missing_result(generic.NOT_FOUND_TEXT, url, fetched.url)
+        if dead is not None:
+            return dead
+    res = generic_result(fetched, url, ctx, third_party=True)
     if ask is not None:
         text = f"Lowest ask ${ask:,.2f}"
         override(res, "in", text, matched="__NEXT_DATA__ lowestAsk")
@@ -650,6 +690,22 @@ def _ebay_quantity(soup: BeautifulSoup) -> str | None:
     return None
 
 
+EBAY_NOT_FOUND = "Listing not found"
+_EBAY_MISSING_TITLE_RE = re.compile(r"<title[^>]*>\s*(?:discover\s+error|error\s+page)\s*\|\s*ebay\s*</title>", re.I)
+_EBAY_MISSING_TEXT_RE = re.compile(r"we\s+looked\s+everywhere!?\s*(?:</[^>]+>\s*(?:<[^>]+>\s*)*)?\s*looks\s+like\s+"
+                                   r"this\s+page\s+is\s+missing", re.I)
+
+
+def ebay_missing(html: str) -> bool:
+    """eBay's page for an item id that doesn't exist: "Discover error | eBay" / "We looked everywhere!
+    Looks like this page is missing." (recorded 2026-09-29 for /itm/387123456789 in headed Chrome; the
+    plain request got a 403 "Error Page | eBay")."""
+    head = (html or "")[:400_000]
+    if 'itemprop="price"' in head or "x-bin-price" in head or "vi-VR-cvipPrice" in head:
+        return False
+    return bool(_EBAY_MISSING_TITLE_RE.search(head) and _EBAY_MISSING_TEXT_RE.search(html or ""))
+
+
 async def ebay(url: str, ctx: AdapterContext) -> CheckResult | None:
     fetched = await fetch_page(url, ctx)
     if "/splashui/challenge" in fetched.url or (len(fetched.text) < 200_000 and "/splashui/challenge" in fetched.text):
@@ -657,6 +713,9 @@ async def ebay(url: str, ctx: AdapterContext) -> CheckResult | None:
     if is_queued(fetched):
         return queued_result(ctx)
     m = EBAY_ITEM_RE.search(url) or EBAY_ITEM_RE.search(fetched.url)
+    if ebay_missing(fetched.text):
+        return generic.missing_result(EBAY_NOT_FOUND, url, fetched.url, item_id=m.group(1) if m else None,
+                                      **base_detail(ctx))
     soup = soup_of(fetched.text)
     condition = _ebay_condition(soup, fetched.text)
     quantity = _ebay_quantity(soup)

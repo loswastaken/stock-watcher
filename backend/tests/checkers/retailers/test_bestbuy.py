@@ -226,3 +226,114 @@ async def test_pickup_only_with_failing_api_is_unknown(monkeypatch):
         return_value=httpx.Response(200, json=fj("bestbuy_priceblocks_in.json")))
     res = await bestbuy.check(OLD, ctx(fulfillment="pickup", zip="55423"))
     assert res.status == "unknown" and res.available == []
+
+
+# ------------------------------------------------------------------ Best Buy Marketplace (2026-09-29 report)
+
+MKT = "https://www.bestbuy.com/product/canon-powershot-g7-x-mark-iii-20-1-megapixel-digital-camera-black/J7C86S93T6"
+MKT_SKU = "https://www.bestbuy.com/product/canon-powershot-g7-x-mark-iii-20-1-megapixel-digital-camera-black/J7C86S93T6/sku/12357608"
+# priceBlocks for the marketplace SKU as the false "In stock" implies: ADD_TO_CART and no seller fields
+MKT_BLOCK = [{"sku": {"skuId": "12357608", "buttonState": {"buttonState": "ADD_TO_CART", "displayText": "Add to Cart",
+                                                         "skuId": "12357608"},
+                      "names": {"short": "Canon - PowerShot G7 X Mark III 20.1-Megapixel Digital Camera - Black"},
+                      "price": {"currentPrice": 1395.99}, "condition": "new"}}]
+
+
+def test_marketplace_page_signals():
+    sig = bestbuy.page_signals(fx("bestbuy_page_marketplace.html"), "12357608")
+    assert sig == {"seller": "Abe's Electronics Center", "third_party": True, "unavailable_online": False,
+                   "high_demand": True}
+    assert bestbuy.sku_from_page(fx("bestbuy_page_marketplace.html"), MKT) == "12357608"
+
+
+@pytest.mark.parametrize("text,seller", [
+    ("Sold & shipped by Abe's Electronics Center 4.71 (2,118 ratings)", "Abe's Electronics Center"),
+    ("Sold and shipped by Abe’s Electronics Center Seller rating 4.71", "Abe’s Electronics Center"),
+    ("Ships from and sold by Best Buy. Free returns", "Best Buy"),
+    ("Sold by: Camera Land LLC. See all offers", "Camera Land LLC"),
+])
+def test_seller_from_text(text, seller):
+    assert bestbuy._seller_from_text(text) == seller
+
+
+@respx.mock
+async def test_marketplace_bsin_url_is_third_party_not_in_stock():
+    respx.get(url__startswith=MKT).mock(return_value=httpx.Response(200, text=fx("bestbuy_page_marketplace.html")))
+    route = respx.get(url__startswith=PRICE_BLOCKS).mock(return_value=httpx.Response(200, json=MKT_BLOCK))
+    res = await bestbuy.check(MKT, ctx())
+    assert "skus=12357608" in str(route.calls.last.request.url)
+    assert res.status == "out_of_stock" and res.status_text == "Third-party sellers only (Abe's Electronics Center)"
+    assert res.detail["seller"] == "Abe's Electronics Center" and res.detail["third_party"] is True
+    assert res.price == "$1,395.99"
+    # official sellers off: a marketplace listing in Best Buy's reservation flow still isn't "In stock"
+    res = await bestbuy.check(MKT, ctx(official_only=False))
+    assert res.status == "unknown" and res.status_text == bestbuy.HIGH_DEMAND_TEXT
+
+
+@respx.mock
+async def test_marketplace_sku_url_reads_the_page_for_the_seller():
+    page = respx.get(url__startswith=MKT_SKU).mock(
+        return_value=httpx.Response(200, text=fx("bestbuy_page_marketplace.html")))
+    respx.get(url__startswith=PRICE_BLOCKS).mock(return_value=httpx.Response(200, json=MKT_BLOCK))
+    res = await bestbuy.check(MKT_SKU, ctx())
+    assert page.called and res.status == "out_of_stock" and "Abe's Electronics Center" in res.status_text
+    # page unreachable: an 8-digit (marketplace-range) SKU with no named seller is not "In stock"
+    page.mock(side_effect=httpx.ConnectError("reset"))
+    res = await bestbuy.check(MKT_SKU, ctx())
+    assert res.status == "unknown" and res.status_text == bestbuy.SELLER_UNCONFIRMED
+
+
+@respx.mock
+async def test_marketplace_fields_in_price_blocks_need_no_page():
+    block = json.loads(json.dumps(MKT_BLOCK))
+    block[0]["sku"]["seller"] = {"id": "abes-1", "displayName": "Abe's Electronics Center"}
+    block[0]["sku"]["productOptions"] = {"multipleSellers": [{"sellerName": "Best Buy", "condition": "openBox"}]}
+    page = respx.get(url__startswith=MKT_SKU)
+    respx.get(url__startswith=PRICE_BLOCKS).mock(return_value=httpx.Response(200, json=block))
+    res = await bestbuy.check(MKT_SKU, ctx())
+    assert not page.called
+    assert res.status == "out_of_stock" and res.status_text == "Third-party sellers only (Abe's Electronics Center)"
+    block[0]["sku"].pop("seller")
+    block[0]["sku"]["isMarketplace"] = True
+    res = await bestbuy.check(MKT_SKU, ctx())
+    assert res.status == "out_of_stock" and res.detail["third_party"] is True
+
+
+@respx.mock
+async def test_unavailable_for_online_purchase_is_out():
+    respx.get(url__startswith=PRICE_BLOCKS).mock(return_value=httpx.Response(403))
+    respx.get(url__startswith=BUTTON_STATE).mock(return_value=httpx.Response(200, json={
+        "buttonStateResponseInfos": [{"skuId": "6624827", "buttonState": "ADD_TO_CART",
+                                      "displayText": "This item is currently unavailable for online purchase"}]}))
+    res = await bestbuy.check(OLD, ctx())
+    assert res.status == "out_of_stock" and res.status_text == bestbuy.UNAVAILABLE_ONLINE
+
+
+@respx.mock
+async def test_page_json_ld_in_stock_cannot_override_marketplace_seller():
+    # both APIs down: the page's JSON-LD says InStock, but its seller is a marketplace one
+    html = fx("bestbuy_page_marketplace.html").replace('data-button-state="ADD_TO_CART"', "")
+    respx.get(url__startswith=MKT_SKU).mock(return_value=httpx.Response(200, text=html))
+    respx.get(url__startswith=PRICE_BLOCKS).mock(return_value=httpx.Response(500))
+    respx.get(url__startswith=BUTTON_STATE).mock(return_value=httpx.Response(500))
+    res = await bestbuy.check(MKT_SKU, ctx())
+    assert res.status == "out_of_stock" and res.detail["third_party"] is True
+    res = await bestbuy.check(MKT_SKU, ctx(official_only=False))
+    assert res.status == "unknown"  # high-demand reservation flow, not a confirmed "In stock"
+    html2 = html.replace("Pickup not available for this item",
+                         "This item is currently unavailable for online purchase")
+    respx.get(url__startswith=MKT_SKU).mock(return_value=httpx.Response(200, text=html2))
+    res = await bestbuy.check(MKT_SKU, ctx(official_only=False))
+    assert res.status == "out_of_stock" and res.status_text == bestbuy.UNAVAILABLE_ONLINE
+
+
+@respx.mock
+async def test_preview_uses_official_seller_default_and_reports_seller():
+    from app import checkers
+
+    respx.get(url__startswith=MKT).mock(return_value=httpx.Response(200, text=fx("bestbuy_page_marketplace.html")))
+    respx.get(url__startswith=PRICE_BLOCKS).mock(return_value=httpx.Response(200, json=MKT_BLOCK))
+    p = await checkers.preview_url(MKT)
+    assert p["status"] == "out_of_stock" and p["status_text"].startswith("Third-party sellers only")
+    assert p["seller"] == "Abe's Electronics Center" and p["third_party"] is True
+    assert p["name"].startswith("Canon")

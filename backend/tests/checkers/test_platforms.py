@@ -432,4 +432,6 @@ async def test_preview_adapter_fetch_error(monkeypatch):
 
     monkeypatch.setattr(retailers_pkg, "run_adapter", fail)
     p = await checkers.preview_url("https://www.bestbuy.com/site/x/6614313.p")
-    assert p["status"] == "error" and "Timed out" in p["error"] and p["retailer"]["key"] == "bestbuy"
+    assert p["status"] == "error" and p["retailer"]["key"] == "bestbuy"
+    assert p["error"] == "Best Buy didn't respond in time — retrying later"  # raw text kept for debugging
+    assert p["error_detail"] == "Timed out fetching www.bestbuy.com"

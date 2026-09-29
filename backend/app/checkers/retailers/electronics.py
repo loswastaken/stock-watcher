@@ -6,6 +6,8 @@ Every adapter returns a ``CheckResult`` or None (platform recipes + generic chec
 """
 from __future__ import annotations
 
+import json
+import logging
 import re
 import time
 from typing import Any
@@ -13,10 +15,10 @@ from urllib.parse import parse_qs, parse_qsl, quote, urlencode, urlsplit, urluns
 
 from .. import fetcher, generic
 from ..base import Availability, CheckResult
-from ..fetcher import FetchError
+from ..fetcher import FetchError, FetchResult
 from ..util import clean_text
 from . import base as rbase
-from .base import AdapterContext, dig, result
+from .base import STOCK_KEY, AdapterContext, dig, result
 from .pagekit import (
     Hit,
     PageView,
@@ -32,12 +34,34 @@ from .pagekit import (
     soup_text,
 )
 
+log = logging.getLogger("stockwatcher.checkers.retailers.electronics")
+
 _PX_BLOCK_RE = re.compile(r"access to this page has been denied|press\s*&(?:amp;)?\s*hold|px-captcha", re.I)
+
+
+_BOT_TAG_RE = re.compile(r"datadome|ddjskey|captcha-delivery|_pxAppId|px-cloud\.net|/_sec/cp_challenge", re.I)
+_BODY_RE = re.compile(r"<body\b[^>]*>([\s\S]*?)(?:</body>|$)", re.I)
+
+
+def blocked_shell(html: str) -> bool:
+    """A page with the bot manager's tag but no body at all: the recorded 2026-09-29 Adorama answer
+    (headed Chrome, HTTP 200, 20 KB) was ``<head>`` only — title, meta, DataDome's ``ddjskey`` — and no
+    product markup. That is a bot-protection non-answer, not a product without stock info."""
+    html = html or ""
+    if len(html) > 150_000 or not _BOT_TAG_RE.search(html) or fetcher.has_product_signals(html):
+        return False
+    m = _BODY_RE.search(html)
+    body = re.sub(r"<(script|style|noscript)\b[^>]*>[\s\S]*?</\1\s*>|<[^>]+>", " ", m.group(1)) if m else ""
+    return len(re.sub(r"\s+", "", body)) < 40
 
 
 def _raise_if_px_blocked(html: str, host: str) -> None:
     if _PX_BLOCK_RE.search((html or "")[:60_000]) and not fetcher.has_product_signals(html or ""):
         raise FetchError(f"Blocked by bot protection on {host} (PerimeterX)", status=403)
+    if blocked_shell(html):
+        vendor = "DataDome" if re.search(r"datadome|ddjskey|captcha-delivery", html, re.I) else "empty page"
+        raise FetchError(f"Blocked by bot protection on {host} ({vendor}: the page came back without a body)",
+                         status=403)
 
 
 # =========================================================================== Newegg
@@ -225,24 +249,92 @@ def _nv_guess_fe_sku(gpu: str | None) -> str | None:
     return f"NVGFT{m.group(1)}{m.group(2)}" if m else None
 
 
+def _nv_info_from_html(html: str, url: str, final_url: str | None = None) -> dict:
+    info: dict[str, Any] = {}
+    m = _NV_MPN_RE.search(html) or _NV_FE_SKU_RE.search(html)
+    if m:
+        info["sku"] = (m.group(1) if m.re is _NV_MPN_RE else m.group(0)).upper()
+    g = generic.analyze(html, url, None, base_url=final_url or url)
+    info.update(title=g.title, image=g.image_url, price=g.price)
+    if not info["price"]:
+        el = rbase.soup_of(html).select_one("span.main-price")
+        info["price"] = soup_text(el) or None
+    return info
+
+
 async def _nv_page_info(url: str) -> dict:
     """{"sku", "title", "image", "price"} from a marketplace product page's JSON-LD (cached)."""
     hit = _nv_page_cache.get(url)
     if hit and hit[0] > time.monotonic():
         return hit[1]
-    info: dict[str, Any] = {}
     try:
         fetched = await fetcher.fetch_html(url, needs=None)
     except FetchError:
-        return info
-    html = fetched.text or ""
-    m = _NV_MPN_RE.search(html) or _NV_FE_SKU_RE.search(html)
-    if m:
-        info["sku"] = (m.group(1) if m.re is _NV_MPN_RE else m.group(0)).upper()
-    g = generic.analyze(html, url, None, base_url=fetched.url)
-    info.update(title=g.title, image=g.image_url, price=g.price)
+        return {}
+    info = _nv_info_from_html(fetched.text or "", url, fetched.url)
     _nv_page_cache[url] = (time.monotonic() + NV_PAGE_TTL, info)
     return info
+
+
+def _nv_capture(u: str) -> bool:
+    """The marketplace page's own inventory / product XHRs (read from the browser — plain requests to
+    api.store.nvidia.com get Akamai's 403)."""
+    return "feinventory" in u or "api.nvidia.partners/edge/product" in u
+
+
+async def _nv_browser_page(url: str) -> FetchResult | None:
+    """The marketplace page loaded in the real browser, with its feinventory answer captured. The recorded
+    2026-09-29 run: a plain GET of the page and of api.store.nvidia.com both got Akamai "Access Denied"
+    (403), the browser-loaded page (539 KB) rendered fine."""
+    if not fetcher.browser_enabled():
+        return None
+    try:
+        fetched = await fetcher.browser_fetch(url, capture=_nv_capture)
+    except FetchError as e:
+        log.info("nvidia marketplace page in the browser failed for %s: %s", url, e)
+        return None
+    if fetched.status >= 400 or fetcher.looks_like_challenge(fetched.text, fetched.url):
+        return None
+    return fetched
+
+
+def _nv_captured_inventory(fetched: FetchResult | None) -> list[dict] | None:
+    """listMap rows from the captured feinventory responses (None: nothing captured / unreadable)."""
+    rows: list[dict] | None = None
+    for c in (fetched.captured if fetched is not None else []) or []:
+        if "feinventory" not in str(c.get("url")) or int(c.get("status") or 0) >= 400:
+            continue
+        try:
+            data = json.loads(c.get("body") or "")
+        except (ValueError, TypeError):
+            continue
+        lm = dig(data, "listMap")
+        if isinstance(lm, list):
+            rows = (rows or []) + [r for r in lm if isinstance(r, dict)]
+    return rows
+
+
+_NV_SHOWN_RE = re.compile(r"display\s*:\s*(?:block|inline|flex)", re.I)
+
+
+def nv_dom_state(html: str) -> tuple[str | None, str] | None:
+    """What the rendered marketplace page shows after its own inventory call: the page's script shows
+    ``#form-action-addToCart`` only when feinventory says ``is_active == "true"``; otherwise the
+    "Out of Stock" button (``.productView__button--oos``) or the retailer list is displayed."""
+    soup = rbase.soup_of(html)
+
+    def shown(el: Any) -> bool:
+        return el is not None and bool(_NV_SHOWN_RE.search(str(el.get("style") or "")))
+
+    atc = soup.select_one("#form-action-addToCart")
+    if shown(atc):
+        return "in", "#form-action-addToCart shown (feinventory is_active)"
+    if shown(soup.select_one(".productView__button--oos")):
+        return "out", "'Out of Stock' button shown"
+    ret = soup.select_one("#form-action-retailer")
+    if shown(ret) and soup_text(ret):
+        return "retailers", "retailer list shown"
+    return None
 
 
 async def nvidia(url: str, ctx: AdapterContext) -> CheckResult | None:
@@ -265,8 +357,14 @@ async def nvidia(url: str, ctx: AdapterContext) -> CheckResult | None:
         if product and not sku:
             sku = str(product.get("productSKU") or "").strip().upper() or None
     page: dict = {}
+    browser: FetchResult | None = None
+    if not info_page:
+        browser = await _nv_browser_page(url)
+        if browser is not None:
+            page = _nv_info_from_html(browser.text, url, browser.url)
+            _nv_page_cache[url] = (time.monotonic() + NV_PAGE_TTL, page)
     if not sku and not info_page:
-        page = await _nv_page_info(url)
+        page = page or await _nv_page_info(url)
         sku = page.get("sku")
     if not sku and gpu:
         sku, guessed = _nv_guess_fe_sku(gpu), True
@@ -281,10 +379,15 @@ async def nvidia(url: str, ctx: AdapterContext) -> CheckResult | None:
     detail: dict[str, Any] = {"sku": sku, "gpu": gpu}
     if guessed:
         detail["sku_guessed"] = True
-    try:
-        inv = await rbase.get_json(NV_INVENTORY.format(sku=quote(sku), locale=locale), headers=_NV_HEADERS)
-    except FetchError:
-        inv = None
+    captured = _nv_captured_inventory(browser)
+    if captured is not None:
+        inv: Any = {"listMap": captured}
+        detail["inventory_via"] = "browser"
+    else:
+        try:
+            inv = await rbase.get_json(NV_INVENTORY.format(sku=quote(sku), locale=locale), headers=_NV_HEADERS)
+        except FetchError:
+            inv = None
     rows = [r for r in (dig(inv, "listMap") or []) if isinstance(r, dict)
             and str(r.get("fe_sku") or sku).upper().startswith(sku)]  # never another SKU's row
     if rows:
@@ -320,6 +423,18 @@ async def nvidia(url: str, ctx: AdapterContext) -> CheckResult | None:
     if info_page:
         detail["info_only"] = True
         return finish(result(None, NV_INFO_TEXT, title=title, image_url=image, detail=detail), ctx)
+    dom = nv_dom_state(browser.text) if browser is not None else None
+    if dom is not None:
+        state, why = dom
+        detail.update(matched=f"rendered page: {why}", seller="NVIDIA", third_party=False, source="page")
+        if state == "in":
+            res = result("in", "In stock", price=price, title=title, image_url=image, detail=detail)
+        elif state == "out":
+            res = result("out", "Out of stock", price=price, title=title, image_url=image, detail=detail)
+        else:
+            res = result("out", "Retailers only (check availability)", price=price, title=title, image_url=image,
+                         detail=detail)
+        return finish(res, ctx, product_url=url)
     if guessed:
         return None
     # a known FE SKU (pinned, or the marketplace page's own) whose inventory didn't answer
@@ -359,6 +474,7 @@ _MC_PAGE_STORE_RES = (
     re.compile(r"""['"]store(?:Num|Number|Id|ID)['"]\s*:\s*['"]?(\d{2,4})""", re.I),
     re.compile(r"""\bstoreSelected\s*[=:]\s*['"]?(\d{2,4})""", re.I),
 )
+_MC_SHIPPABLE_RE = re.compile(r"\bshippable\b|\bship(?:ping)?\s+to\s+home\b|\bweb\s*store\b|\bonline\b", re.I)
 _MC_OTHER_CONDITION_RE = re.compile(r"\b(?:open\s*-?\s*box|refurb\w*|used|pre-?owned)\b", re.I)
 
 
@@ -446,12 +562,22 @@ async def microcenter(url: str, ctx: AdapterContext) -> CheckResult | None:
         if verdict is None:
             return None
         name = _mc_store_name(view, html)
-        where = f"Micro Center {name or page_store or ''}".strip()
-        suffix = "" if store else " · default store (set a store ID to pick yours)"
         pm = _MC_JS_PRICE_RE.search(html)
         nm = _MC_JS_NAME_RE.search(html)
         detail = {"store_id": page_store, "store_name": name, "stock_qty": count, "seller": "Micro Center",
                   "third_party": False, "store_configured": bool(store)}
+        common = dict(price=pm.group(1) if pm else None, title=clean_text(nm.group(1)) if nm else None)
+        if not store and name and _MC_SHIPPABLE_RE.search(name):
+            # No store chosen: the site's selector sits on "Shippable Items" (its online/ship-to-home stock),
+            # not a store — so this is online stock, not "In stock at Micro Center Shippable Items".
+            detail.update(store_id=None, online=True)
+            if verdict == "in":
+                label = "In stock online (ships)" + (f" ({count})" if count else "")
+                return Hit("in", label, f"inventory: '{raw}'", detail=detail,
+                           available=[Availability(key=STOCK_KEY, label=label)], **common)
+            return Hit("out", "Sold out online (ships)", f"inventory: '{raw}'", detail=detail, **common)
+        where = f"Micro Center {name or page_store or ''}".strip()
+        suffix = "" if store else " · default store (set a store ID to pick yours)"
         if verdict == "in":
             label = f"In stock at {where}" + (f" ({count})" if count else "")
             # only a store the user chose is a pickup location; the site's default store is just "stock"

@@ -36,6 +36,46 @@ def _error(e: BaseException | str) -> CheckResult:
 _HTTP_ERROR_RE = re.compile(r"^HTTP (\d{3}) from (\S+)")
 
 
+# Raw transport failures (curl / Chrome / httpx wording) → a short message people can act on.
+# The raw text stays in ``detail.raw_error`` for debugging.
+_REFUSED_RE = re.compile(
+    r"curl:\s*\((?:92|16|35|52|55|56)\)|HTTP/2 stream|INTERNAL_ERROR|ERR_HTTP2_|StreamReset|RemoteProtocolError"
+    r"|ERR_CONNECTION_(?:RESET|CLOSED)|ERR_EMPTY_RESPONSE|connection reset|server disconnected|empty reply",
+    re.I)
+_TIMEOUT_RE = re.compile(r"^Timed out fetching|ERR_TIMED_OUT|ERR_CONNECTION_TIMED_OUT|Timeout \d+ms exceeded", re.I)
+_DNS_RE = re.compile(r"ERR_NAME_NOT_RESOLVED|could not resolve host|curl:\s*\(6\)|name or service not known"
+                     r"|getaddrinfo|nodename nor servname|temporary failure in name resolution", re.I)
+_CONN_REFUSED_RE = re.compile(r"ERR_CONNECTION_REFUSED|connection refused|curl:\s*\(7\)|couldn't connect", re.I)
+_TLS_RE = re.compile(r"ERR_CERT_|certificate verify|CERTIFICATE_VERIFY_FAILED|curl:\s*\(60\)", re.I)
+
+
+def _store_name(url: str) -> str:
+    try:
+        r = _retailers.match_retailer(url or "")
+    except Exception:  # noqa: BLE001
+        r = None
+    return r.name if r is not None else (_fetcher.host_of(url) or "The site")
+
+
+def friendly_error(message: str, url: str) -> str | None:
+    """A short user-facing message for a raw transport error, or None to keep ``message``."""
+    msg = message or ""
+    if not re.search(r"^(?:Network error|Timed out|Browser fetch failed)|browser retry also failed", msg):
+        return None  # our own wording already (HTTP 403 from ..., Blocked by bot protection, ...)
+    name = _store_name(url)
+    if _DNS_RE.search(msg):
+        return f"Couldn't find {_fetcher.host_of(url)} (DNS lookup failed) — check the link"
+    if _TLS_RE.search(msg):
+        return f"Secure connection to {name} failed — retrying later"
+    if _REFUSED_RE.search(msg):
+        return f"{name} refused the connection (bot protection) — retrying later"
+    if _CONN_REFUSED_RE.search(msg):
+        return f"Couldn't connect to {name} — retrying later"
+    if _TIMEOUT_RE.search(msg):
+        return f"{name} didn't respond in time — retrying later"
+    return None
+
+
 def _fetch_error(e: _fetcher.FetchError, url: str) -> CheckResult:
     """A 404/410 from the product's own site means a dead link: say so, so users update it."""
     m = _HTTP_ERROR_RE.match(str(e))
@@ -45,6 +85,12 @@ def _fetch_error(e: _fetcher.FetchError, url: str) -> CheckResult:
         text = f"{_generic.NOT_FOUND_TEXT} (HTTP {e.status})"
         return CheckResult(status="error", status_text=text, available=[], error=f"{text} — update the link",
                            detail={"dead_link": True})
+    if str(e).startswith("Blocked by bot protection"):
+        return CheckResult(status="error", status_text="Blocked by bot protection", available=[], error=str(e)[:500])
+    short = friendly_error(str(e), url)
+    if short:
+        return CheckResult(status="error", status_text=short, available=[], error=short,
+                           detail={"raw_error": str(e)[:1000]})
     return _error(str(e))
 
 
@@ -60,7 +106,20 @@ async def _check_site(url: str, generic_config: dict | None, retailer_config: di
     retailer = _retailers.match_retailer(url)
     if retailer is not None:
         result.detail.setdefault("retailer", retailer.key)
-    return result
+    return _guard_other_product(url, result, generic_config)
+
+
+def _guard_other_product(url: str, result: CheckResult, generic_config: dict | None) -> CheckResult:
+    """A page that shows another product than the URL names (reused ids, ignored slugs) is a stale link:
+    its stock and price aren't the watched product's. Custom selector/text rules are left alone."""
+    if str((generic_config or {}).get("mode") or "auto").lower() != "auto":
+        return result
+    if result.status == "error" or result.detail.get("queue") or result.detail.get("dead_link"):
+        return result
+    if str(result.status_text or "").lower().startswith(("not available", "no longer available")):
+        return result  # the page already says the watched item is gone
+    other = _generic.other_product(url, result)
+    return _generic.other_product_result(url, result, other) if other else result
 
 
 async def run_check(kind: str, url: str, generic_config: dict | None, apple_config: dict | None,
@@ -99,7 +158,7 @@ def _preview_base(url: str) -> dict:
             "is_apple": _apple.is_apple_url(url or ""), "retailer": _retailer_info(url)}
 
 
-async def _preview(url: str, out: dict) -> dict:
+async def _preview(url: str, out: dict, entries: list[dict] | None = None) -> dict:
     """Fills ``out`` in place, so a timed-out preview still has what was found so far."""
     is_apple = out["is_apple"]
     if is_apple:
@@ -127,19 +186,64 @@ async def _preview(url: str, out: dict) -> dict:
         res = _generic.analyze(fetched.text, url, None, base_url=fetched.url)
         out.update(name=res.title, image_url=res.image_url, price=out["price"] or res.price)
         return out
-    # Same path as a check: site adapter first, then platform recipes / generic analysis.
+    # Same path as a check: site adapter first, then platform recipes / generic analysis. No retailer
+    # config here means the defaults a new item gets (official sellers only, new condition, delivery).
     try:
         res = await _retailers.run_adapter(url, None, None)
         if res is None:
             res = await _generic.check_generic(url, None)
+        res = _guard_other_product(url, res, None)
     except _fetcher.FetchError as e:
         out["status"] = "error"
-        out["error"] = str(e)
+        out["error"] = friendly_error(str(e), url) or str(e)
+        if out["error"] != str(e):
+            out["error_detail"] = str(e)[:1000]
+        out.update(status_text=out["error"], blocked=str(e).startswith("Blocked by bot protection"),
+                   queued=False, fetched_via=_preview_via(url, None, entries), signals=[])
         return out
-    out.update(name=res.title, image_url=res.image_url, price=res.price, status=res.status)
+    d = res.detail or {}
+    signals = [str(x) for x in (d.get("signals") or []) if x][:8]
+    if not signals and d.get("matched"):
+        signals = [str(d["matched"])]
+    out.update(name=res.title, image_url=res.image_url, price=res.price, status=res.status,
+               status_text=res.status_text, seller=d.get("seller"), third_party=d.get("third_party"),
+               adapter=_preview_adapter(url, d), fetched_via=_preview_via(url, d.get("fetched_via"), entries),
+               cart_url=d.get("cart_url"), signals=signals, queued=bool(d.get("queue")),
+               blocked=bool(d.get("blocked")) or str(res.error or "").startswith("Blocked by bot protection"))
     if res.status == "error":
         out["error"] = res.error or res.status_text
     return out
+
+
+_ADAPTER_MODULES = {"bigbox", "electronics", "games", "platforms", "pagekit", "microsoft", "kroger", "target",
+                    "walmart", "amazon", "bestbuy"}
+
+
+def _preview_adapter(url: str, detail: dict) -> str | None:
+    """The adapter that answered: a platform recipe ("shopify", "sfcc", ...) or "generic" as reported, a
+    site adapter as its store key ("meijer" rather than its module "bigbox")."""
+    a = detail.get("adapter")
+    if a in _ADAPTER_MODULES or (a is None and detail.get("retailer")):
+        try:
+            r = _retailers.match_retailer(url)
+        except Exception:  # noqa: BLE001
+            r = None
+        return r.key if r is not None else a
+    return a
+
+
+def _preview_via(url: str, via: str | None, entries: list[dict] | None) -> str | None:
+    """"http" | "curl" | "browser" for the page itself: the result's own ``fetched_via``, refined by the
+    request log (a plain request that went through curl_cffi is "curl")."""
+    host = _fetcher.host_of(url)
+    page = [e for e in entries or [] if _fetcher.host_of(str(e.get("final_url") or e.get("url") or "")) == host
+            and isinstance(e.get("status"), int) and e["status"] < 400]
+    if via == "browser":
+        return "browser"
+    if page:
+        last = str(page[-1].get("via") or "") or None
+        return last if last in ("http", "curl", "browser") else via
+    return via
 
 
 def _fill_from_recorded_page(out: dict, url: str, entries: list[dict]) -> None:
@@ -181,7 +285,8 @@ async def preview_url(url: str) -> dict:
                 "retailer": None, "error": str(e) or type(e).__name__}
     with _fetcher.recording(reuse=True) as entries:
         try:
-            return await asyncio.wait_for(_with_deadline(_preview(url, out), PREVIEW_TIMEOUT - _DEADLINE_MARGIN),
+            return await asyncio.wait_for(_with_deadline(_preview(url, out, entries),
+                                                         PREVIEW_TIMEOUT - _DEADLINE_MARGIN),
                                           PREVIEW_TIMEOUT)
         except asyncio.CancelledError:
             raise

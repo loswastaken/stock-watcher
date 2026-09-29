@@ -103,7 +103,7 @@ async def test_only_see_all_buying_options_third_party_offers(monkeypatch):
     serve(monkeypatch, fx("amazon_see_all_buying.html"))
     serve_aod(monkeypatch, fx("amazon_aod_3p.html"))
     res = await amazon.check(URL, ctx())
-    assert res.status == "out_of_stock" and res.status_text == "Third-party sellers only"
+    assert res.status == "out_of_stock" and res.status_text == "Not sold by Amazon — 1 other seller from $899.00"
     assert res.detail["seller"] == "Console Kings" and res.detail["third_party"] is True
     serve_aod(monkeypatch, "<div id='aod-container'><div id='aod-offer-list'></div></div>")
     res = await amazon.check(URL, ctx())

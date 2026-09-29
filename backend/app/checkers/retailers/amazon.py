@@ -6,9 +6,10 @@ with "Third-party sellers only".
 
 With no buy box at all ("No featured offers available" — only a "See All Buying Options" button, as
 on the PS5 Pro / AirPods Pro 2 pages recorded 2026-09) the page names no seller, so the offer list
-(``aodAjaxMain``, what that button opens) is read: an Amazon.com offer there is in stock, only other
-sellers is "Third-party sellers only"; if the list can't be read the text says what is known —
-"No featured offer" — instead of claiming the sellers are third parties.
+(``aodAjaxMain``, what that button opens) is read: an Amazon.com offer there is in stock; only other
+sellers is "Not sold by Amazon — N other sellers from $X" (the recorded 2026-09-29 lists: AirPods Pro 2 →
+Woot only; PS5 Pro → 9 marketplace offers, none by Amazon); if the list can't be read the text says what
+is known — "No featured offer" — instead of claiming the sellers are third parties.
 """
 from __future__ import annotations
 
@@ -19,7 +20,7 @@ from bs4 import BeautifulSoup
 from .. import fetcher
 from ..base import CheckResult
 from ..fetcher import FetchError
-from ..util import clean_text
+from ..util import clean_text, parse_amount
 from .base import AdapterContext, result, soup_of
 from .bigbox import THIRD_PARTY_TEXT, generic_result, is_queued, override, queued_result
 
@@ -165,10 +166,14 @@ async def check(url: str, ctx: AdapterContext) -> CheckResult | None:
         return override(res, "out", "Currently unavailable", matched="#outOfStock")
     if soup.select_one("#buybox-see-all-buying-choices, #buybox-see-all-buying-choices-announce") is not None:
         # No featured offer: the page itself doesn't say who sells it — ask the offer list.
-        offers = await all_offers(asin, page)
-        if ctx.retailer_config.condition == "new":
-            offers = [o for o in offers or [] if o["new"]] if offers is not None else None
+        listing = await all_offers(asin, page)
+        offers = listing["offers"] if listing is not None else None
+        every = offers
+        if ctx.retailer_config.condition == "new" and offers is not None:
+            offers = [o for o in offers if o["new"]]
         res.detail["offers"] = len(offers) if offers is not None else None
+        if listing is not None:
+            res.detail["offers_total"] = listing["total"]
         amazon_offer = next((o for o in offers or [] if o["amazon"]), None)
         if amazon_offer is not None:
             res.detail.update(seller="Amazon.com", third_party=False)
@@ -179,11 +184,19 @@ async def check(url: str, ctx: AdapterContext) -> CheckResult | None:
             return override(res, "in", "In stock (Amazon offer, no buy box)", matched="aod: sold by Amazon.com")
         if offers:
             res.detail.update(seller=offers[0]["seller"], third_party=True)
+            low = _lowest(offers)
+            res.detail["lowest_offer_price"] = low
             if official:
-                return override(res, "out", THIRD_PARTY_TEXT, matched=f"aod: {len(offers)} offer(s), none by Amazon")
+                n = len(offers)
+                text = (f"Not sold by Amazon — {n} other seller{'s' if n != 1 else ''}"
+                        f"{f' from {low}' if low else ''}")
+                return override(res, "out", text, matched=_aod_matched(listing, offers))
             return override(res, "in", "Available from other sellers", matched="aod: third-party offers")
         res.detail.update(seller=None, third_party=None)
-        if offers is not None:  # the offer list is empty
+        if offers is not None:  # the offer list is empty (for the wanted condition)
+            if every:
+                return override(res, "out", "Not sold by Amazon — only used offers from other sellers",
+                                matched=_aod_matched(listing, offers))
             return override(res, "out", "No offers", matched="aod: no offers")
         if official:
             return override(res, "out", NO_FEATURED_TEXT, matched="only 'See all buying options'")
@@ -197,9 +210,10 @@ _AOD_BLOCK_SEL = "#aod-pinned-offer, #aod-offer, [id^='aod-offer-'][class*='aod-
 _SELLER_ID_RE = re.compile(r"[?&]seller=([A-Z0-9]{10,16})")
 
 
-async def all_offers(asin: str, referer: str) -> list[dict] | None:
-    """Offers from Amazon's "See All Buying Options" list: [{"seller", "amazon", "new", "price"}], [] when
-    it lists none, None when it couldn't be read (blocked, network, unknown markup)."""
+async def all_offers(asin: str, referer: str) -> dict | None:
+    """Amazon's "See All Buying Options" list: {"offers": [{"seller", "amazon", "new", "price"}], "total"}
+    (``total`` = the list's own offer count, when it states one). ``offers`` is [] when it lists none;
+    None when it couldn't be read (blocked, network, unknown markup)."""
     try:
         resp = await fetcher.http_get(AOD_URL.format(asin=asin), headers={
             "Referer": referer, "Accept": "text/html,*/*", "X-Requested-With": "XMLHttpRequest",
@@ -209,7 +223,28 @@ async def all_offers(asin: str, referer: str) -> list[dict] | None:
     html = resp.text or ""
     if resp.status_code >= 400 or _CAPTCHA_RE.search(html[:60_000]) or "aod-" not in html:
         return None
-    return parse_offers(html)
+    m = _AOD_TOTAL_RE.search(html)
+    return {"offers": parse_offers(html), "total": int(m.group(1) or m.group(2)) if m else None}
+
+
+_AOD_TOTAL_RE = re.compile(r'<input[^>]*value="(\d+)"[^>]*id="aod-total-offer-count"'
+                           r'|<input[^>]*id="aod-total-offer-count"[^>]*value="(\d+)"')
+
+
+def _aod_matched(listing: dict | None, offers: list[dict]) -> str:
+    total = (listing or {}).get("total")
+    seen = len((listing or {}).get("offers") or [])
+    part = f", list shows {seen} of {total}" if total and seen < total else ""
+    return f"aod: {len(offers)} matching offer(s), none sold by Amazon.com{part}"
+
+
+def _lowest(offers: list[dict]) -> str | None:
+    best = None
+    for o in offers:
+        amount = parse_amount(o.get("price")) if o.get("price") else None
+        if amount is not None and (best is None or amount < best[0]):
+            best = (amount, o["price"])
+    return best[1] if best else None
 
 
 def parse_offers(html: str) -> list[dict]:
@@ -228,9 +263,11 @@ def parse_offers(html: str) -> list[dict]:
                           or re.sub(r"^\s*sold\s+by\s*", "", sold.get_text(" ", strip=True), flags=re.I))
         sid = _SELLER_ID_RE.search(str(link.get("href") or "")) if link is not None else None
         is_amazon = (sid is not None and sid.group(1) == AMAZON_MERCHANT_ID) or bool(
-            _AMAZON_SELLER_RE.match(name) or re.match(r"^amazon(?:\.com)?\b", name, re.I))
+            _AMAZON_SELLER_RE.match(name) or re.match(r"^amazon\.com\b", name, re.I))
         heading = clean_text(_text(block, "[id='aod-offer-heading']")) or ""
-        price = _text(block, ".a-price .a-offscreen")
+        # the recorded lists leave .a-offscreen empty and put the price in the accessibility label
+        price = _text(block, ".a-price .a-offscreen", ".apex-pricetopay-accessibility-label",
+                      "[id^='aod-price-'] .aok-offscreen")
         offers.append({"seller": name or None, "amazon": is_amazon,
                        "new": not heading or bool(re.match(r"^\s*new\b", heading, re.I)), "price": price or None})
     return offers

@@ -9,7 +9,7 @@ import re
 from typing import Any
 from urllib.parse import urlsplit
 
-from .. import fetcher
+from .. import fetcher, generic
 from ..base import CheckResult
 from ..fetcher import FetchError
 from ..util import clean_text
@@ -95,6 +95,12 @@ async def check(url: str, ctx: AdapterContext) -> CheckResult | None:
     product = data.get("product") if isinstance(data, dict) else None
     if not isinstance(product, dict):
         return generic_result(fetched, url, ctx, item_id=iid, cart_url=cart, source="page-generic")
+    upstream = str(product.get("upstreamErrorCode") or "")
+    if not clean_text(product.get("name")) and not product.get("usItemId") and upstream.startswith("404"):
+        # an item id the store doesn't know: a hollow product (no name / id, "OUT_OF_STOCK") with upstream
+        # 404 codes, and "Uh-oh... This page could not be found." (Sam's Club 16634389868, 2026-09-29)
+        return generic.missing_result(generic.NOT_FOUND_TEXT, url, fetched.url, upstream_error=upstream[:120],
+                                      **base_detail(ctx, item_id=iid))
 
     seller, third = seller_of(product)
     detail.update(seller=seller, third_party=third, source="__NEXT_DATA__")

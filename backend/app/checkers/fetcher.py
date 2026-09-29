@@ -295,6 +295,11 @@ class _State:
         self.warmed: set[str] = set()  # hosts whose homepage was visited this session
         self.browser_lock: asyncio.Lock | None = None
         self.browser_sem: asyncio.Semaphore | None = None
+        self.client_h1: httpx.AsyncClient | None = None  # HTTP/1.1-only client (after an HTTP/2 reset)
+        # A second browser launched with --disable-http2 (own profile "<channel>-h1"), started lazily
+        # for hosts that answer Chrome with net::ERR_HTTP2_PROTOCOL_ERROR.
+        self.h1: "_State | None" = None
+        self.h1_mode = False
 
 
 _state = _State()
@@ -340,6 +345,13 @@ def get_client() -> httpx.AsyncClient:
     if st.client is None or st.client.is_closed:
         st.client = make_client()
     return st.client
+
+
+def _get_client_h1() -> httpx.AsyncClient:
+    st = _st()
+    if st.client_h1 is None or st.client_h1.is_closed:
+        st.client_h1 = make_client(http2=False)
+    return st.client_h1
 
 
 @contextlib.asynccontextmanager
@@ -546,6 +558,42 @@ def _curl_to_httpx(r: Any, url: str) -> httpx.Response:
                           request=httpx.Request("GET", final))
 
 
+# Akamai answers bot-fingerprinted clients with an HTTP/2 stream reset instead of a 403
+# (curl 92 "HTTP/2 stream 1 reset by server (error 0x2 INTERNAL_ERROR)", curl 16 framing
+# errors; Chrome's net::ERR_HTTP2_PROTOCOL_ERROR). The same request over HTTP/1.1 often
+# goes through, so it is retried once that way and the host remembered for BROWSER_HOST_TTL.
+_H2_RESET_RE = re.compile(r"curl:\s*\((?:92|16)\)|HTTP/2 stream \d+ (?:was )?(?:reset|not closed)"
+                          r"|\bINTERNAL_ERROR\b|ERR_HTTP2_PROTOCOL_ERROR|ERR_HTTP2_\w+|StreamReset", re.I)
+_h1_hosts: dict[str, float] = {}
+
+
+def is_http2_reset(message: str) -> bool:
+    return bool(_H2_RESET_RE.search(message or ""))
+
+
+def _mark_h1_host(url: str) -> None:
+    _h1_hosts[host_of(url)] = time.monotonic() + BROWSER_HOST_TTL
+
+
+def _host_wants_h1(url: str) -> bool:
+    exp = _h1_hosts.get(host_of(url))
+    if exp is None:
+        return False
+    if exp < time.monotonic():
+        _h1_hosts.pop(host_of(url), None)
+        return False
+    return True
+
+
+def _curl_http11() -> Any:
+    try:
+        from curl_cffi import CurlHttpVersion  # type: ignore
+
+        return CurlHttpVersion.V1_1
+    except Exception:  # noqa: BLE001 - older curl_cffi / fake module in tests
+        return 2  # CURL_HTTP_VERSION_1_1
+
+
 async def _curl_get(url: str, headers: dict[str, str | None] | None) -> httpx.Response:
     session = _get_curl_session()
     cr = _curl_requests()
@@ -557,15 +605,27 @@ async def _curl_get(url: str, headers: dict[str, str | None] | None) -> httpx.Re
     if left is not None and left < CURL_TOTAL_TIMEOUT:
         connect = min(CURL_CONNECT_TIMEOUT, left)
         kwargs["timeout"] = (connect, max(left - connect, 0.1))  # curl: total = connect + read
-    try:
-        r = await session.get(url, headers=_curl_headers(headers), **kwargs)
-    except asyncio.CancelledError:
-        raise
-    except Exception as e:  # noqa: BLE001 - curl_cffi raises its own RequestException tree
-        msg = (str(e).splitlines() or [""])[0][:200]
-        if (timeout_exc and isinstance(e, timeout_exc)) or "timed out" in msg.lower() or "timeout" in type(e).__name__.lower():
-            raise FetchError(f"Timed out fetching {host_of(url)}") from e
-        raise FetchError(f"Network error: {type(e).__name__}: {msg}".rstrip(": ")) from e
+    h1 = _host_wants_h1(url)
+    while True:
+        if h1:
+            kwargs["http_version"] = _curl_http11()
+        try:
+            r = await session.get(url, headers=_curl_headers(headers), **kwargs)
+            break
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001 - curl_cffi raises its own RequestException tree
+            msg = (str(e).splitlines() or [""])[0][:200]
+            if (timeout_exc and isinstance(e, timeout_exc)) or "timed out" in msg.lower() \
+                    or "timeout" in type(e).__name__.lower():
+                raise FetchError(f"Timed out fetching {host_of(url)}") from e
+            if not h1 and is_http2_reset(msg) and (time_left() is None or time_left() > _MIN_REQUEST_TIME):
+                log.info("HTTP/2 reset from %s (%s): retrying over HTTP/1.1", host_of(url), msg)
+                h1 = True
+                continue
+            raise FetchError(f"Network error: {type(e).__name__}: {msg}".rstrip(": ")) from e
+    if h1 and not _host_wants_h1(url):
+        _mark_h1_host(url)
     return _curl_to_httpx(r, url)
 
 
@@ -603,13 +663,23 @@ async def http_get(url: str, *, headers: dict[str, str | None] | None = None,
             if via == "curl":
                 resp = await _curl_get(url, headers)
             else:
-                try:
-                    cl = client or get_client()
-                    resp = await cl.send(_httpx_request(cl, url, headers))
-                except httpx.TimeoutException as e:
-                    raise FetchError(f"Timed out fetching {host_of(url)}") from e
-                except httpx.HTTPError as e:
-                    raise FetchError(f"Network error: {type(e).__name__}: {e}".rstrip(": ")) from e
+                h1 = client is None and _HTTP2 and _host_wants_h1(url)
+                while True:
+                    try:
+                        cl = client or (_get_client_h1() if h1 else get_client())
+                        resp = await cl.send(_httpx_request(cl, url, headers))
+                        break
+                    except httpx.TimeoutException as e:
+                        raise FetchError(f"Timed out fetching {host_of(url)}") from e
+                    except httpx.HTTPError as e:
+                        msg = f"{type(e).__name__}: {e}"
+                        if client is None and _HTTP2 and not h1 and is_http2_reset(msg):
+                            log.info("HTTP/2 reset from %s (%s): retrying over HTTP/1.1", host_of(url), msg[:200])
+                            h1 = True
+                            continue
+                        raise FetchError(f"Network error: {msg}".rstrip(": ")) from e
+                if h1 and not _host_wants_h1(url):
+                    _mark_h1_host(url)
         except FetchError as e:
             _record(url, via=via, t0=t0, error=str(e))
             raise
@@ -1035,10 +1105,13 @@ def _mark_clean_exit(profile: Path) -> None:
             prefs.write_text(json.dumps(data), encoding="utf-8")
 
 
-def _prepare_profile(channel: str | None) -> tuple[str, bool]:
+def _prepare_profile(channel: str | None, suffix: str = "") -> tuple[str, bool]:
     """(user data dir, persistent?). Falls back to a throwaway profile when the persistent
-    one can't be created or is held by another running browser."""
+    one can't be created or is held by another running browser. ``suffix`` names a sibling
+    profile (the HTTP/1.1 browser's "<channel>-h1": two browsers can't share one profile)."""
     profile = browser_profile_dir(channel)
+    if suffix:
+        profile = profile.with_name(profile.name + suffix)
     try:
         profile.mkdir(parents=True, exist_ok=True)
         if clear_stale_profile_locks(profile):
@@ -1159,13 +1232,15 @@ async def _launch(st: _State) -> None:
             mode = "headless"
     headless = mode == "headless"
     channel = _browser_channel()
-    user_data_dir, persistent = _prepare_profile(channel)
+    user_data_dir, persistent = _prepare_profile(channel, "-h1" if st.h1_mode else "")
     st.temp_profile = None if persistent else user_data_dir
 
     last: Exception | None = None
     for name in engines:
         pw = await _engine_factory(name)().start()
         args = list(_BASE_ARGS) + ([] if name == "patchright" else _PLAYWRIGHT_ARGS)
+        if st.h1_mode:
+            args.append("--disable-http2")
         opts: dict[str, Any] = {"headless": headless, "args": args, "accept_downloads": False}
         if name != "patchright":
             opts["ignore_default_args"] = ["--enable-automation"]
@@ -1206,15 +1281,28 @@ async def _launch(st: _State) -> None:
         st.version = version
         st.info = {"engine": name, "mode": mode, "channel": used_channel or "chromium", "version": version,
                    "persistent_profile": persistent, "cdp": False, "launched": True}
+        if st.h1_mode:
+            st.info["http2"] = False
         ctx.on("close", lambda *_: _mark_closed(st))
         log.info("browser started: %s", st.info)
         return
     raise FetchError(f"Could not start browser: {_first_line(last) if last else 'unknown error'}")
 
 
-async def _get_browser() -> Any:
-    """The shared browser context (launched or connected on first use, relaunched if it died)."""
+def _browser_state(h1: bool = False) -> _State:
+    """The main browser's state, or (``h1``) the lazily created HTTP/1.1-only browser's."""
     st = _st()
+    if not h1:
+        return st
+    if st.h1 is None:
+        st.h1 = _State()
+        st.h1.loop, st.h1.h1_mode = st.loop, True
+    return st.h1
+
+
+async def _get_browser(h1: bool = False) -> Any:
+    """The shared browser context (launched or connected on first use, relaunched if it died)."""
+    st = _browser_state(h1)
     if st.browser_lock is None:
         st.browser_lock = asyncio.Lock()
     async with st.browser_lock:
@@ -1226,6 +1314,8 @@ async def _get_browser() -> Any:
         st.closed = False
         try:
             cdp = browser_cdp_url()
+            if cdp and st.h1_mode:
+                raise FetchError("HTTP/1.1 browser unavailable with BROWSER_CDP_URL")
             if cdp:
                 await _connect_cdp(st, cdp)
             else:
@@ -1258,6 +1348,9 @@ async def _close_browser(st: _State) -> None:
     if st.temp_profile:
         shutil.rmtree(st.temp_profile, ignore_errors=True)
     st.pw = st.browser = st.context = st.temp_profile = None
+    if st.h1 is not None:
+        await _close_browser(st.h1)
+        st.h1 = None
 
 
 def _ua_platform() -> tuple[str, str, str]:
@@ -1310,16 +1403,17 @@ async def _block_route(route: Any) -> None:
 
 
 @contextlib.asynccontextmanager
-async def browser_page(block_resources: bool = True):
+async def browser_page(block_resources: bool = True, *, h1: bool = False):
     """Yield a new page (tab) in the shared browser context; closed afterwards. Cookies
-    persist in the context's profile across fetches."""
+    persist in the context's profile across fetches. ``h1``: the HTTP/1.1-only browser."""
     if not browser_enabled():
         raise FetchError("Browser fallback disabled (ENABLE_BROWSER=false)")
-    st = _st()
-    if st.browser_sem is None:
-        st.browser_sem = asyncio.Semaphore(browser_concurrency())
-    async with st.browser_sem:
-        ctx = await _get_browser()
+    main_st = _st()
+    if main_st.browser_sem is None:
+        main_st.browser_sem = asyncio.Semaphore(browser_concurrency())
+    async with main_st.browser_sem:
+        ctx = await _get_browser(h1)
+        st = _browser_state(h1)
         page = await ctx.new_page()
         try:
             mode = st.info.get("mode")
@@ -1512,19 +1606,48 @@ async def _open(page: Any, url: str, *, interactive: bool) -> tuple[Any, str]:
     return resp, html
 
 
+_browser_h1_hosts: dict[str, float] = {}
+
+
+def _browser_host_wants_h1(url: str) -> bool:
+    exp = _browser_h1_hosts.get(host_of(url))
+    if exp is not None and exp < time.monotonic():
+        _browser_h1_hosts.pop(host_of(url), None)
+        return False
+    return exp is not None
+
+
 async def browser_fetch(url: str, *, capture: Callable[[str], bool] | None = None) -> FetchResult:
     """Load ``url`` in the real browser and return the rendered HTML. A bot challenge gets
     ``BROWSER_CHALLENGE_WAIT`` s to clear; if it doesn't, the site's homepage is visited once
     per host per session (to collect its cookies) and the page tried again, time permitting.
 
     ``capture`` (a URL predicate) collects the page's own XHR/fetch responses (JSON/text up to
-    2 MB) into ``FetchResult.captured`` as ``{"url", "status", "body"}``."""
+    2 MB) into ``FetchResult.captured`` as ``{"url", "status", "body"}``.
+
+    ``net::ERR_HTTP2_PROTOCOL_ERROR`` (Akamai resetting the HTTP/2 stream) is retried once in a
+    second browser launched with ``--disable-http2``; the host then goes straight there for
+    BROWSER_HOST_TTL."""
+    h1 = _browser_host_wants_h1(url)
+    try:
+        return await _browser_fetch_once(url, capture, h1=h1)
+    except FetchError as e:
+        left = time_left()
+        if h1 or not is_http2_reset(str(e)) or browser_cdp_url() or (left is not None and left < _MIN_BROWSER_TIME):
+            raise
+        log.info("HTTP/2 protocol error from %s in the browser: retrying with HTTP/2 disabled", host_of(url))
+        res = await _browser_fetch_once(url, capture, h1=True)
+        _browser_h1_hosts[host_of(url)] = time.monotonic() + BROWSER_HOST_TTL
+        return res
+
+
+async def _browser_fetch_once(url: str, capture: Callable[[str], bool] | None, *, h1: bool) -> FetchResult:
     t0 = time.monotonic()
-    st = _st()
+    st = _browser_state(h1)
     captured: list[dict] = []
     pending: list[asyncio.Future] = []
     try:
-        async with browser_page() as page:
+        async with browser_page(h1=h1) as page:
             interactive = st.info.get("mode") == "cdp"
             if capture is not None:
                 page.on("response", _capture_listener(capture, captured, pending, t0))
@@ -1632,6 +1755,9 @@ async def shutdown() -> None:
         if st.curl is not None:
             with contextlib.suppress(Exception):
                 await st.curl.close()
+        if st.client_h1 is not None:
+            with contextlib.suppress(Exception):
+                await st.client_h1.aclose()
         await _close_browser(st)
     if _xvfb is not None:
         await asyncio.to_thread(_xvfb.stop)
@@ -1639,3 +1765,5 @@ async def shutdown() -> None:
     _state = _State()
     _browser_hosts.clear()
     _plain_hosts.clear()
+    _h1_hosts.clear()
+    _browser_h1_hosts.clear()

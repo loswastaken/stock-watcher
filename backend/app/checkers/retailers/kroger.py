@@ -1,11 +1,14 @@
 """Kroger family of stores (Kroger, Ralphs, Fred Meyer, King Soopers, ...): official Kroger API.
 
-Only used when ``KROGER_CLIENT_ID`` and ``KROGER_CLIENT_SECRET`` are set (free developer account at
-developer.kroger.com); otherwise returns None so the generic browser path handles the page.
+The API is used when ``KROGER_CLIENT_ID`` and ``KROGER_CLIENT_SECRET`` are set (free developer account at
+developer.kroger.com) and the item has a ZIP / store. Otherwise the product page is read: its
+``__INITIAL_STATE__`` carries Kroger's own server-side product lookup (``calypso.useCases.getProducts
+.pdpSSR``) for the page's default store — an empty lookup is "Not sold at <store>".
 Stock is per store: we use the store nearest the item's ZIP (or its pinned ``store_id``).
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -20,7 +23,8 @@ from ..base import Availability, CheckResult
 from ..fetcher import FetchError
 from ..util import clean_text
 from .base import STOCK_KEY, AdapterContext, dig, get_json, result
-from .bigbox import base_detail, error_result
+from .bigbox import base_detail, error_result, generic_result, is_queued, queued_result
+from .pagekit import js_assignment
 
 log = logging.getLogger("stockwatcher.checkers.retailers.kroger")
 
@@ -116,13 +120,14 @@ def _image(product: dict) -> str | None:
 async def check(url: str, ctx: AdapterContext) -> CheckResult | None:
     creds = credentials()
     upc = upc_from_url(url)
-    if not creds or not upc:
+    if not upc:
         return None
     rc = ctx.retailer_config
-    if not (rc.zip or rc.store_id):
-        if rc.fulfillment == "pickup":
+    if not creds or not (rc.zip or rc.store_id):
+        if creds and rc.fulfillment == "pickup":
             return error_result(ctx, "Set a ZIP code for pickup", upc=upc)
-        return None  # stock is per store; without a location the page itself is the best we have
+        # stock is per store; without the API (or a location) the page's own product data is the best we have
+        return await check_page(url, upc, ctx)
 
     if rc.store_id:
         store = {"id": rc.store_id, "name": f"store #{rc.store_id}"}
@@ -141,8 +146,14 @@ async def check(url: str, ctx: AdapterContext) -> CheckResult | None:
                          third_party=False)
     if not isinstance(product, dict):
         return result("out", "Not sold at this store", detail=detail)
+    return product_verdict(product, store, ctx, detail)
+
+
+def product_verdict(product: dict, store: dict, ctx: AdapterContext, detail: dict) -> CheckResult:
+    """Verdict from a Kroger product (the official API's shape, also used by the page's SSR state)."""
+    rc = ctx.retailer_config
     item = (product.get("items") or [{}])[0] or {}
-    level = str(dig(item, "inventory", "stockLevel") or "").upper() or None
+    level = str(dig(item, "inventory", "stockLevel") or dig(product, "inventory", "stockLevel") or "").upper() or None
     ful = item.get("fulfillment") if isinstance(item.get("fulfillment"), dict) else {}
     flags = {str(k).lower(): v for k, v in ful.items()}  # shipToHome / shiptohome / ShipToHome
     promo, regular = dig(item, "price", "promo"), dig(item, "price", "regular")
@@ -169,3 +180,58 @@ async def check(url: str, ctx: AdapterContext) -> CheckResult | None:
     if not available:
         return result("out", f"Not offered for {rc.fulfillment} at {store['name']}", **common)
     return result("in", " · ".join(texts), available=available, **common)
+
+
+# --------------------------------------------------------------------------- the product page (no API)
+
+
+def _page_needs(html: str) -> bool:
+    return "__INITIAL_STATE__" in html
+
+
+def page_state(html: str, upc: str) -> dict | None:
+    """The page's server-side product lookup from ``window.__INITIAL_STATE__ = JSON.parse('...')``:
+    {"loaded", "error", "products", "store": {"id", "name"}} or None when the page has no state."""
+    state = js_assignment(html, "__INITIAL_STATE__")
+    if not isinstance(state, dict):
+        return None
+    ssr = dig(state, "calypso", "useCases", "getProducts", "pdpSSR")
+    if not isinstance(ssr, dict):
+        return None
+    products = dig(ssr, "response", "data", "products")
+    store: dict | None = None
+    laf = dig(state, "calypso", "domains", "products", upc, "metadata", "requestInfo", "loaded", "headers",
+              "x-laf-object")
+    try:
+        mod = (json.loads(laf) if isinstance(laf, str) else laf or [None])[0] or {}
+    except (ValueError, TypeError, IndexError, KeyError):
+        mod = {}
+    sid = dig(mod, "modality", "handoffLocation", "storeId") or dig(mod, "sources", 0, "storeId")
+    if sid:
+        store = {"id": str(sid), "name": clean_text(dig(mod, "modality", "handoffAddress", "address", "name"))
+                 or f"store #{sid}"}
+    return {"loaded": bool(dig(ssr, "async", "loaded")), "error": bool(dig(ssr, "async", "error")),
+            "products": products if isinstance(products, list) else None, "store": store}
+
+
+async def check_page(url: str, upc: str, ctx: AdapterContext) -> CheckResult | None:
+    fetched = await fetcher.fetch_html(url, render_js=bool(ctx.generic_config.get("render_js")), needs=_page_needs)
+    if is_queued(fetched):
+        return queued_result(ctx, upc=upc)
+    st = page_state(fetched.text, upc)
+    if st is None or not st["loaded"] or st["error"] or st["products"] is None:
+        return generic_result(fetched, url, ctx, upc=upc)  # no usable state: the page's own signals
+    store = st["store"] or {"id": None, "name": "the default store"}
+    detail = base_detail(ctx, upc=upc, store_id=store["id"], store_name=store["name"], source="page-state",
+                         seller=ctx.retailer.name, third_party=False, fetched_via="browser" if fetched.via_browser
+                         else "http")
+    if not st["products"]:
+        # Kroger's own product lookup for the page came back empty (the page reads "Product Unavailable —
+        # Item details didn't load"): the item isn't listed for that store.
+        return result("out", f"Not sold at {store['name']} (Kroger lists no item for this UPC)",
+                      detail={**detail, "matched": "pdpSSR: no products"})
+    product = next((p for p in st["products"] if isinstance(p, dict) and
+                    str(p.get("upc") or p.get("gtin13") or upc).lstrip("0") == upc.lstrip("0")), None)
+    if product is None:
+        return generic_result(fetched, url, ctx, upc=upc)
+    return product_verdict(product, store, ctx, {**detail, "matched": "pdpSSR product"})
