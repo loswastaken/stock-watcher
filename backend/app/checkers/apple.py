@@ -201,9 +201,11 @@ TWO_HOUR_RE = re.compile(
 )
 _TWO_HOUR_NEG_RE = re.compile(
     r"\bnot\s+available\b|\bunavailable\b|\bisn'?t\s+available\b|\bnot\s+eligible\b|\bineligible\b"
-    r"|\blearn\s+more\b|\border\s+(?:by|within|in\s+the\s+next)\b",
+    r"|\bno\s+longer\b",
     re.I,
 )
+# "Order within 2 hours for delivery tomorrow" is an order cut-off, not a delivery promise.
+_ORDER_CUTOFF_RE = re.compile(r"\border\s+(?:by|within|in\s+the\s+next)\s+[^.,;·]*", re.I)
 _COURIER_TYPE_RE = re.compile(r"courier|two[_\s-]?hour|2[_\s-]?h(?:ou)?r|same[_\s-]?day", re.I)
 _TYPE_KEYS = {"type", "deliverytype", "shippingmethod", "method", "code", "deliverymethod", "shippingtype",
               "fulfillmenttype", "optiontype", "deliveryoptiontype"}
@@ -233,7 +235,9 @@ def _quote_text(d: dict) -> str:
 
 
 def _is_two_hour_text(s: str) -> bool:
-    return bool(s and TWO_HOUR_RE.search(s) and not _TWO_HOUR_NEG_RE.search(s))
+    if not s or _TWO_HOUR_NEG_RE.search(s):
+        return False
+    return bool(TWO_HOUR_RE.search(_ORDER_CUTOFF_RE.sub(" ", s)))
 
 
 def detect_two_hour(part_delivery: Any) -> tuple[bool, str | None, list[str]]:
@@ -257,6 +261,7 @@ def detect_two_hour(part_delivery: Any) -> tuple[bool, str | None, list[str]]:
         if qtext:
             quotes.append(qtext)
         hit = False
+        negated = bool(qtext and _TWO_HOUR_NEG_RE.search(qtext))
         for k, v in node.items():
             if not isinstance(k, str):
                 continue
@@ -265,7 +270,7 @@ def detect_two_hour(part_delivery: Any) -> tuple[bool, str | None, list[str]]:
                 hit = True
             elif kl in _TYPE_KEYS and isinstance(v, str) and _COURIER_TYPE_RE.search(v):
                 hit = True
-            elif isinstance(v, str) and not _SKIP_TEXT_KEYS.search(k) and _is_two_hour_text(clean_text(v)):
+            elif not negated and isinstance(v, str) and not _SKIP_TEXT_KEYS.search(k) and _is_two_hour_text(clean_text(v)):
                 hit = True
         if not hit and qtext and _is_two_hour_text(qtext):
             hit = True
@@ -490,7 +495,7 @@ async def _client() -> httpx.AsyncClient:
             s.warmed = True
             try:  # collect Apple's session cookies like a real visitor would
                 await fetcher.http_get(APPLE_ORIGIN + STORE_PREFIX + WARMUP_PATH, headers=_DOC_HEADERS, client=s.client)
-            except FetchError as e:
+            except Exception as e:  # noqa: BLE001 - warm-up is best effort
                 log.info("apple warm-up failed: %s", e)
         return s.client
 
@@ -631,7 +636,7 @@ class AppleConfig:
                 parts.append(pn)
                 if isinstance(label, str) and label.strip():
                     labels[pn] = label.strip()
-        md = d.get("max_distance_miles")
+        md = d.get("max_distance_miles", 25)  # explicit null/"" = no distance limit
         try:
             md = float(md) if md not in (None, "") else None
         except (TypeError, ValueError):

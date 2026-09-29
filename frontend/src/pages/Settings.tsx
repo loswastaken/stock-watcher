@@ -81,10 +81,22 @@ export default function SettingsPage() {
         ) : (
           <>
             <TabsContent value="notifications">
-              <NotificationsTab settings={settings.data} key={JSON.stringify(settings.data)} />
+              <NotificationsTab
+                settings={settings.data}
+                key={[
+                  settings.data.ntfy_server,
+                  settings.data.ntfy_topic,
+                  settings.data.ntfy_priority,
+                  settings.data.ntfy_token_set,
+                  settings.data.notify_on_out_of_stock,
+                ].join('|')}
+              />
             </TabsContent>
             <TabsContent value="defaults">
-              <DefaultsTab settings={settings.data} key={JSON.stringify(settings.data)} />
+              <DefaultsTab
+                settings={settings.data}
+                key={[settings.data.default_interval_minutes, settings.data.default_zip, settings.data.default_max_distance_miles].join('|')}
+              />
             </TabsContent>
             <TabsContent value="appearance">
               <AppearanceTab />
