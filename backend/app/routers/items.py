@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import uuid
 from urllib.parse import urlsplit
 
@@ -141,6 +142,99 @@ async def _safe_preview(url: str) -> dict:
         return {}
 
 
+PLATFORM_NAMES = {
+    "shopify": "Shopify",
+    "sfcc": "Salesforce Commerce Cloud",
+    "magento": "Magento",
+    "bigcommerce": "BigCommerce",
+    "woocommerce": "WooCommerce",
+    "opencart": "OpenCart",
+}
+_BLOCKED_RE = re.compile(r"bot protection|blocked|captcha|access denied|refused the connection|HTTP 403|HTTP 429", re.I)
+_NOT_FOUND_RE = re.compile(r"HTTP 40[4]|HTTP 410|not found|no longer available|dead link|update the link", re.I)
+_BLOCKED_DETAIL = "Store blocked our checker — try again later or use a real-browser setup."
+_CUSTOM_RULE_HINT = ("Add it anyway and switch the stock rule to CSS selector or Text match so it knows what "
+                     "“in stock” looks like on this page.")
+
+
+def classify_support(data: dict, retailer: dict | None) -> dict:
+    """→ {level, label, detail}: how well the checker handles this URL, from a preview result.
+
+    dedicated   a registry store whose own site adapter produced the result (or Apple)
+    platform    a platform recipe (Shopify, SFCC, ...) recognised the store
+    generic     generic heuristics — with a definite answer, or unknown (then suggest custom rules)
+    blocked     bot protection stopped the checker
+    unsupported the page couldn't be fetched / was not found / errored
+    """
+    status = str(data.get("status") or "unknown")
+    error = str(data.get("error") or "")
+    adapter = str(data.get("adapter") or "").strip().lower() or None
+    definite = status in ("in_stock", "out_of_stock")
+    store_name = (retailer or {}).get("name")
+
+    if data.get("blocked") or (error and _BLOCKED_RE.search(error) and not definite):
+        return {"level": "blocked", "label": "Blocked by bot protection", "detail": _BLOCKED_DETAIL}
+    if status == "error" or (error and not definite and not data.get("name")):
+        if _NOT_FOUND_RE.search(error):
+            return {"level": "unsupported", "label": "Page not found",
+                    "detail": error or "The store says this page doesn't exist — check the link."}
+        return {"level": "unsupported", "label": "Couldn't check this page",
+                "detail": error or "The checker couldn't read this page."}
+    if data.get("is_apple"):
+        return {"level": "dedicated", "label": "Dedicated support",
+                "detail": "Apple Store integration — pick models and watch delivery or pickup near you."}
+    if adapter in PLATFORM_NAMES:
+        platform = PLATFORM_NAMES[adapter]
+        detail = f"Checked with the built-in {platform} recipe, which works for any {platform} store."
+        if not definite:
+            detail += " It couldn't tell stock status from this page though. " + _CUSTOM_RULE_HINT
+        return {"level": "platform", "label": f"Auto-detected {platform} store", "detail": detail}
+    site_adapter = adapter not in (None, "generic")
+    if retailer and (site_adapter or adapter is None):
+        # adapter None: an older checker that doesn't report it — a registry store is dedicated.
+        note = retailer.get("note")
+        detail = f"{store_name} has a dedicated integration" + (f" — {note}." if note else ".")
+        if not definite:
+            detail += " Stock status wasn't clear on this check; it may resolve on the next one."
+        return {"level": "dedicated", "label": "Dedicated support", "detail": detail}
+    if site_adapter:  # a site adapter the registry doesn't list under this host
+        return {"level": "dedicated", "label": "Dedicated support", "detail": "Checked with a dedicated integration."}
+    if definite:
+        return {"level": "generic", "label": "Works with generic detection",
+                "detail": "Not a dedicated integration, but the page's stock signals were clear enough to read."}
+    return {"level": "generic", "label": "Stock status unclear",
+            "detail": "The page loaded but generic detection couldn't read stock status. " + _CUSTOM_RULE_HINT}
+
+
+def _opt_str(v) -> str | None:
+    return str(v) if v not in (None, "") else None
+
+
+def _preview_out(url: str, data: dict) -> PreviewOut:
+    retailer = _preview_retailer(url, data.get("retailer"))
+    third = data.get("third_party")
+    fields = dict(
+        name=_opt_str(data.get("name")),
+        image_url=_opt_str(data.get("image_url")),
+        price=_opt_str(data.get("price")),
+        status=data.get("status") or "unknown",
+        is_apple=bool(data.get("is_apple", is_apple_host(url))),
+        retailer=retailer,
+        error=_opt_str(data.get("error")),
+        status_text=_opt_str(data.get("status_text")),
+        adapter=_opt_str(data.get("adapter")),
+        fetched_via=_opt_str(data.get("fetched_via")),
+        seller=_opt_str(data.get("seller")),
+        third_party=bool(third) if third is not None else None,
+        cart_url=_opt_str(data.get("cart_url")),
+        signals=[str(x) for x in (data.get("signals") or []) if x][:12],
+        blocked=bool(data.get("blocked")),
+        queued=bool(data.get("queued")),
+    )
+    fields["support"] = classify_support(fields, retailer)
+    return PreviewOut(**fields)
+
+
 # ---------------------------------------------------------------------- routes
 @router.post("/preview", response_model=PreviewOut)
 async def preview(body: UrlRequest, user: User = Depends(current_user)):
@@ -148,22 +242,8 @@ async def preview(body: UrlRequest, user: User = Depends(current_user)):
         data = await asyncio.wait_for(preview_url(body.url), PREVIEW_TIMEOUT)
     except Exception as e:  # noqa: BLE001
         log.info("preview failed for %s: %s", body.url, e)
-        return PreviewOut(
-            status="unknown",
-            is_apple=is_apple_host(body.url),
-            retailer=_preview_retailer(body.url, None),
-            error=f"Could not fetch the page ({type(e).__name__})",
-        )
-    data = data if isinstance(data, dict) else {}
-    return PreviewOut(
-        name=data.get("name"),
-        image_url=data.get("image_url"),
-        price=data.get("price"),
-        status=data.get("status") or "unknown",
-        is_apple=bool(data.get("is_apple", is_apple_host(body.url))),
-        retailer=_preview_retailer(body.url, data.get("retailer")),
-        error=data.get("error"),
-    )
+        data = {"status": "unknown", "error": f"Could not fetch the page ({type(e).__name__})"}
+    return _preview_out(body.url, data if isinstance(data, dict) else {})
 
 
 @router.get("", response_model=list[ItemOut])

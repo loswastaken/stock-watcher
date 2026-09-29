@@ -26,7 +26,7 @@ import {
   Wand2,
 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
-import { Link, useNavigate, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { toast } from 'sonner';
 import { ApplePartsPicker } from '@/components/items/ApplePartsPicker';
 import { ItemImage } from '@/components/ItemImage';
@@ -73,6 +73,10 @@ const FALLBACK_SETTINGS: Pick<Settings, 'default_interval_minutes' | 'default_zi
 export default function ItemFormPage() {
   const { id } = useParams();
   const itemId = id ? Number(id) : null;
+  // "/items/new?url=…" (e.g. from the dashboard's quick check) prefills the link; its preview is
+  // usually already cached under the same query key, so the page isn't fetched again.
+  const [params] = useSearchParams();
+  const initialUrl = itemId == null ? params.get('url')?.trim() || undefined : undefined;
   const settings = useQuery({ queryKey: qk.settings, queryFn: api.settings, staleTime: 60_000 });
   const item = useQuery({
     queryKey: qk.item(itemId ?? 0),
@@ -103,6 +107,7 @@ export default function ItemFormPage() {
       key={item.data?.id ?? 'new'}
       item={item.data ?? null}
       defaults={settings.data ?? FALLBACK_SETTINGS}
+      initialUrl={initialUrl}
     />
   );
 }
@@ -178,9 +183,9 @@ function serverFieldErrors(err: unknown): FieldErrors {
   return out;
 }
 
-function initialState(item: Item | null, d: typeof FALLBACK_SETTINGS): FormState {
+function initialState(item: Item | null, d: typeof FALLBACK_SETTINGS, initialUrl?: string): FormState {
   return {
-    url: item?.url ?? '',
+    url: item?.url ?? initialUrl ?? '',
     name: item?.name ?? '',
     kind: item?.kind ?? 'generic',
     interval: String(item?.interval_minutes ?? d.default_interval_minutes ?? 2),
@@ -211,12 +216,20 @@ function initialState(item: Item | null, d: typeof FALLBACK_SETTINGS): FormState
   };
 }
 
-function ItemFormInner({ item, defaults }: { item: Item | null; defaults: typeof FALLBACK_SETTINGS }) {
+function ItemFormInner({
+  item,
+  defaults,
+  initialUrl,
+}: {
+  item: Item | null;
+  defaults: typeof FALLBACK_SETTINGS;
+  initialUrl?: string;
+}) {
   const isEdit = !!item;
   const navigate = useNavigate();
   const qc = useQueryClient();
   const actions = useItemActions();
-  const [s, setS] = useState<FormState>(() => initialState(item, defaults));
+  const [s, setS] = useState<FormState>(() => initialState(item, defaults, initialUrl));
   const [nameTouched, setNameTouched] = useState(isEdit);
   const [kindTouched, setKindTouched] = useState(isEdit);
   const [submitted, setSubmitted] = useState(false);

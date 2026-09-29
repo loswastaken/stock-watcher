@@ -381,6 +381,16 @@ class StoreCreate(BaseModel):
         return validate_http_url(v)
 
 
+SupportLevel = Literal["dedicated", "platform", "generic", "blocked", "unsupported"]
+
+
+class SupportOut(BaseModel):
+    """How well the checker handles a URL (computed server-side for the quick check)."""
+    level: SupportLevel
+    label: str
+    detail: str | None = None
+
+
 class PreviewOut(BaseModel):
     name: str | None = None
     image_url: str | None = None
@@ -389,6 +399,17 @@ class PreviewOut(BaseModel):
     is_apple: bool = False
     retailer: dict[str, Any] | None = None  # registry entry for the URL's store, when known
     error: str | None = None
+    # What the checker saw (all optional: older checkers don't report them).
+    status_text: str | None = None
+    adapter: str | None = None  # store key, platform recipe ("shopify", ...) or "generic"
+    fetched_via: str | None = None  # "http" | "curl" | "browser"
+    seller: str | None = None
+    third_party: bool | None = None
+    cart_url: str | None = None
+    signals: list[str] = Field(default_factory=list)
+    blocked: bool = False
+    queued: bool = False
+    support: SupportOut | None = None
 
 
 class RetailerOut(BaseModel):

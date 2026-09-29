@@ -1,12 +1,13 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { AlertTriangle, BadgeCheck, BellOff, Search, Store } from 'lucide-react';
+import { AlertTriangle, BadgeCheck, BellOff, ScanSearch, Search, Store } from 'lucide-react';
 import { useMemo, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { toast } from 'sonner';
 import { PageHeader } from '@/components/PageHeader';
 import { PageLoader } from '@/components/PageLoader';
 import { RetailerMonogram } from '@/components/RetailerBadge';
 import { Badge } from '@/components/ui/badge';
-import { Button } from '@/components/ui/button';
+import { Button, buttonClasses } from '@/components/ui/button';
 import { EmptyState } from '@/components/ui/empty-state';
 import { Input } from '@/components/ui/input';
 import { Switch } from '@/components/ui/switch';
@@ -96,14 +97,23 @@ export default function StoresPage() {
           </>
         }
         actions={
-          <div className="w-full sm:w-64">
-            <Input
-              placeholder="Search stores"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              leading={<Search />}
-              aria-label="Search stores"
-            />
+          <div className="flex w-full items-center gap-2 sm:w-auto">
+            <Link
+              to="/?check"
+              className={buttonClasses({ variant: 'outline', className: 'order-2 sm:order-none' })}
+              title="Check any product link, even from stores not listed here"
+            >
+              <ScanSearch /> Check a link
+            </Link>
+            <div className="min-w-0 flex-1 sm:w-64 sm:flex-none">
+              <Input
+                placeholder="Search stores"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                leading={<Search />}
+                aria-label="Search stores"
+              />
+            </div>
           </div>
         }
       />

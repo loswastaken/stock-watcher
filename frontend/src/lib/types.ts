@@ -250,6 +250,28 @@ export interface Preview {
   retailer?: Retailer | null;
   /** Set when the page couldn't be fetched/parsed (response is still 200). */
   error?: string | null;
+  // What the checker saw — all optional (older backends don't send them).
+  status_text?: string | null;
+  /** Store key (site adapter), platform recipe ("shopify", "sfcc", …) or "generic". */
+  adapter?: string | null;
+  /** How the page itself was fetched: "http" | "curl" | "browser". */
+  fetched_via?: string | null;
+  seller?: string | null;
+  third_party?: boolean | null;
+  cart_url?: string | null;
+  signals?: string[];
+  blocked?: boolean;
+  queued?: boolean;
+  /** How well the checker handles this URL (computed server-side). */
+  support?: Support | null;
+}
+
+export type SupportLevel = 'dedicated' | 'platform' | 'generic' | 'blocked' | 'unsupported';
+
+export interface Support {
+  level: SupportLevel;
+  label: string;
+  detail: string | null;
 }
 
 export interface AppleVariant {

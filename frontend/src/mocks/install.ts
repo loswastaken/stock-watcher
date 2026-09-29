@@ -1,6 +1,7 @@
 /* Dev-only fetch mock (VITE_MOCK=1). Never imported in production builds. */
 import type { AuthStatus, Item, ItemCreate, Notification, Restock, Stats, StoreRow, User } from '@/lib/types';
 import { ago, items, makeHistory, notifications, settings, users } from './data';
+import { mockPreview } from './preview';
 import { IMG } from './images';
 import { retailerForUrl, retailers } from './retailers';
 
@@ -66,7 +67,15 @@ function stats(): Stats {
 async function handle(path: string, method: string, body: unknown): Promise<Response> {
   const url = new URL(path, location.origin);
   const p = url.pathname.replace(/^\/api/, '');
-  await delay(p.includes('preview') || p.includes('resolve') || p.endsWith('/check') ? 900 : 150);
+  await delay(
+    p.includes('preview') && /slow/.test(String((body as { url?: string } | null)?.url))
+      ? 8000
+      : p.includes('preview')
+        ? 1500
+        : p.includes('resolve') || p.endsWith('/check')
+          ? 900
+          : 150,
+  );
 
   if (p === '/auth/status')
     return json({ setup_required: store.setup, user: store.authed && !store.setup ? me : null } satisfies AuthStatus);
@@ -130,18 +139,7 @@ async function handle(path: string, method: string, body: unknown): Promise<Resp
   if (p === '/stats') return json(stats());
   if (p === '/retailers') return json(retailers);
 
-  if (p === '/items/preview') {
-    const u = (body as { url: string }).url;
-    const apple = /apple\.com/.test(u);
-    return json({
-      name: apple ? 'iPhone 17 Pro' : 'Steam Deck OLED 1TB',
-      image_url: apple ? IMG.iphone : IMG.switch2,
-      price: apple ? '$1,099.00' : '$649.00',
-      status: apple ? 'unknown' : 'out_of_stock',
-      is_apple: apple,
-      retailer: retailerForUrl(u),
-    });
-  }
+  if (p === '/items/preview') return json(mockPreview((body as { url: string }).url));
   if (p === '/apple/resolve')
     return json({
       product_name: 'iPhone 17 Pro',

@@ -20,6 +20,7 @@ import { Link, useSearchParams } from 'react-router-dom';
 import { ItemCard, ItemRow } from '@/components/items/ItemCard';
 import { ItemCardSkeleton, ItemRowSkeleton } from '@/components/items/ItemSkeletons';
 import { PageHeader } from '@/components/PageHeader';
+import { QuickCheck } from '@/components/QuickCheck';
 import { Button, buttonClasses } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { EmptyState } from '@/components/ui/empty-state';
@@ -250,6 +251,8 @@ export default function Dashboard() {
           </div>
         }
       />
+
+      <QuickCheck />
 
       <StatsRow stats={stats.data} loading={stats.isLoading} filter={filter} setFilter={setFilter} />
 
