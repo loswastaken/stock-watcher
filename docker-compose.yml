@@ -9,7 +9,7 @@ services:
       - /volume2/docker/stock-watcher/data:/data
     environment:
       TZ: America/New_York  # Change to your timezone
-      COOKIE_SECURE: "true"  # Set to false only for plain HTTP on LAN
+      COOKIE_SECURE: "auto"  # auto = secure cookie over HTTPS, still works on plain-http LAN
       # SECRET_KEY: ""  # Optional; otherwise generated and stored in /data/secret.key
     labels:
       com.centurylinklabs.watchtower.enable: "false"  # keep other Watchtowers away; updates are manual

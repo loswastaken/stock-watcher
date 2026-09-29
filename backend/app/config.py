@@ -6,6 +6,7 @@ import os
 import secrets
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -18,7 +19,8 @@ class Settings(BaseSettings):
 
     data_dir: Path = Path("/data")
     secret_key: str | None = None
-    cookie_secure: bool = True
+    # "auto": Secure only when the request arrived over HTTPS (directly or via X-Forwarded-Proto).
+    cookie_secure: Literal["auto", "true", "false"] = "auto"
     session_days: int = 30
     min_interval_seconds: int = 60
     check_concurrency: int = 4

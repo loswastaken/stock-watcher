@@ -45,6 +45,23 @@ def test_secure_cookie_flag(client, monkeypatch):
     assert "Secure" in r.headers["set-cookie"]
 
 
+def test_auto_cookie_secure_follows_scheme(client, monkeypatch):
+    from app import config
+
+    monkeypatch.setenv("COOKIE_SECURE", "auto")
+    config.reload_settings()
+    # Plain http (LAN): no Secure flag, otherwise browsers drop the cookie and login loops.
+    r = client.post("/api/auth/setup", json={"username": "admin", "password": PW})
+    assert r.status_code == 200 and "Secure" not in r.headers["set-cookie"]
+    # Over https (e.g. a Cloudflare tunnel / reverse proxy): Secure.
+    from fastapi.testclient import TestClient
+    from app.main import app
+
+    https_client = TestClient(app, base_url="https://testserver")
+    r = https_client.post("/api/auth/login", json={"username": "admin", "password": PW})
+    assert r.status_code == 200 and "Secure" in r.headers["set-cookie"]
+
+
 def test_login_logout(admin):
     c = make_client()
     assert c.post("/api/auth/login", json={"username": "admin", "password": "wrongpass1"}).status_code == 401
