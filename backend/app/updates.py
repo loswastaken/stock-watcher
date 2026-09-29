@@ -82,7 +82,7 @@ async def fetch_latest(client: httpx.AsyncClient | None = None) -> LatestImage:
             await client.aclose()
 
 
-_cache: dict = {"at": 0.0, "latest": None, "error": None}
+_cache: dict = {"at": None, "latest": None, "error": None}  # at: monotonic time of last check
 
 
 def _same(a: str | None, b: str | None) -> bool:
@@ -91,7 +91,7 @@ def _same(a: str | None, b: str | None) -> bool:
 
 async def status(force: bool = False) -> dict:
     s = get_settings()
-    if force or time.monotonic() - _cache["at"] > CACHE_SECONDS:
+    if force or _cache["at"] is None or time.monotonic() - _cache["at"] > CACHE_SECONDS:
         try:
             _cache["latest"], _cache["error"] = await fetch_latest(), None
         except UpdateError as e:
@@ -133,4 +133,4 @@ async def trigger_update(client: httpx.AsyncClient | None = None) -> None:
     finally:
         if own:
             await client.aclose()
-    _cache["at"] = 0.0
+    _cache["at"] = None  # re-check after an update

@@ -24,9 +24,9 @@ def mock_registry(respx_mock, revision="abc123def456"):
 
 @pytest.fixture(autouse=True)
 def _reset_cache():
-    updates._cache.update(at=0.0, latest=None, error=None)
+    updates._cache.update(at=None, latest=None, error=None)
     yield
-    updates._cache.update(at=0.0, latest=None, error=None)
+    updates._cache.update(at=None, latest=None, error=None)
 
 
 def test_status_reports_update_available(admin, respx_mock, monkeypatch):
@@ -74,6 +74,13 @@ def test_apply_calls_watchtower_for_this_image_only(admin, respx_mock, monkeypat
     assert r.status_code == 400 and "token" in r.json()["detail"]
     respx_mock.get("http://nas.test:8080/v1/update").mock(side_effect=httpx.ConnectError("refused"))
     assert "Could not reach Watchtower" in admin.post("/api/system/update/apply").json()["detail"]
+
+
+def test_first_check_not_skipped_right_after_boot(admin, respx_mock, monkeypatch):
+    # time.monotonic() can be < CACHE_SECONDS right after a (CI or NAS) boot
+    monkeypatch.setattr(updates.time, "monotonic", lambda: 5.0)
+    mock_registry(respx_mock)
+    assert admin.get("/api/system/update").json()["latest_version"] == "abc123def456"
 
 
 def test_admin_only(admin):
