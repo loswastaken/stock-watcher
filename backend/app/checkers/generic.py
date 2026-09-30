@@ -1110,6 +1110,8 @@ _SLUG_STOP = {"the", "and", "for", "with", "of", "in", "on", "to", "an", "by", "
               "buy", "shop", "product", "products", "ip", "dp", "item", "site", "game", "en", "us", "html", "htm",
               "jsp", "aspx", "php", "reg", "pdp", "sku", "com", "www"}
 _MARKS_RE = re.compile(r"[™®©℠]")
+_PRODUCT_MARKS = {"product", "products"}
+_LISTING_MARKS = {"category", "categories", "collection", "collections"}
 
 
 def _stem(w: str) -> str:
@@ -1124,9 +1126,16 @@ def _name_words(s: str) -> set[str]:
 
 def slug_words(url: str) -> tuple[str | None, set[str]]:
     """(the path segment that names the product, its words): the richest ``word-word-word`` segment."""
-    path = unquote(urlsplit(url or "").path)
+    segs = unquote(urlsplit(url or "").path).split("/")
+    # "/category/wifi-special-devices/products/utr-lr" (UniFi), "/collections/x/products/y" (Shopify): the
+    # product is named after the products marker, and a category / collection segment never names it
+    low = [x.lower() for x in segs]
+    marks = [i for i, x in enumerate(low[:-1]) if x in _PRODUCT_MARKS]
+    start = marks[-1] + 1 if marks else 0
     best: tuple[str | None, set[str]] = (None, set())
-    for seg in path.split("/"):
+    for i, seg in enumerate(segs[start:], start):
+        if i and low[i - 1] in _LISTING_MARKS:
+            continue
         base = re.sub(r"\.(?:html?|jsp|aspx?|php|p)$", "", seg, flags=re.I)
         parts = [x for x in re.split(r"[-_+\s]+", base) if x]
         if len(parts) < 2:
