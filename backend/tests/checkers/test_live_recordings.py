@@ -682,6 +682,11 @@ async def test_link_showing_another_product_is_stale(url, routes, other):
     ("https://www.target.com/p/nintendo-switch-2-console-choose-your-game-bundle/-/A-1011032706",
      "Nintendo Switch 2 Console"),
     ("https://www.lg.com/us/tvs/lg-oled65c5pua-oled-4k-tv", "65 Inch Class LG OLED evo AI C5 4K Smart TV 2025"),
+    # UniFi names the category before the product: the category segment is not the product's slug
+    ("https://store.ui.com/us/en/category/wifi-special-devices/products/utr-lr", "UniFi Travel Router Long-Range"),
+    ("https://store.ui.com/us/en/category/all-cloud-gateways/products/ucg-ultra", "Cloud Gateway Ultra"),
+    ("https://shop.example.com/collections/pokemon-trading-cards/products/elite-trainer-box-surging-sparks",
+     "Surging Sparks Elite Trainer Box"),
 ])
 def test_same_product_is_not_flagged(url, title):
     from app.checkers.base import CheckResult
