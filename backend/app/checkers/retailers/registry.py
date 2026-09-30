@@ -22,6 +22,9 @@ class Retailer:
     note: str | None = None
     # why the store no longer sells online (its product links 404 / land on a non-store page), or None
     retired: str | None = None
+    # True when the retired domain now serves someone else's unrelated store: its pages "work" (in stock, a price)
+    # but are not the products this store used to sell, so even an OK check on it means nothing
+    retired_unrelated: bool = False
 
     @property
     def domain(self) -> str:
@@ -45,7 +48,10 @@ R = Retailer
 RETAILERS: list[Retailer] = [
     R("amd", "AMD", ("amd.com",), "electronics:amd", "#000000", browser=True),
     R("asus", "ASUS", ("shop.asus.com", "store.asus.com", "asus.com"), None, "#00539b"),
-    R("acegraphics", "Ace Graphics Cards", ("acegraphicscards.com",), None, "#b91c1c"),
+    R("acegraphics", "Ace Graphics Cards", ("acegraphicscards.com",), None, "#b91c1c", retired_unrelated=True,
+      retired="acegraphicscards.com is no longer a graphics-card store: since the 2026-09-29 probe runs it serves an "
+              "unrelated luxury-handbag Shopify store (Louis Vuitton listings; earlier it redirected to brandedmoda.com), "
+              "so any 'in stock' answer there is about a handbag, not a GPU"),
     R("adorama", "Adorama", ("adorama.com",), "electronics:adorama", "#0a4595", browser=True),
     R("amazon", "Amazon", ("amazon.com", "smile.amazon.com"), "amazon:check", "#ff9900", seller_filter=True),
     R("antonline", "Antonline", ("antonline.com",), "electronics:antonline", "#c8102e"),

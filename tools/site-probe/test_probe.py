@@ -32,8 +32,10 @@ def test_sites_json_covers_every_registry_retailer():
     keys = {r.key for r in registry.RETAILERS}
     assert keys - set(sites) == set(), "stores without sample URLs"
     assert set(sites) - keys == set(), "sample URLs for unknown stores"
+    raw = json.loads(probe.DEFAULT_SITES.read_text(encoding="utf-8"))["sites"]
     for key, entries in sites.items():
-        assert entries, key
+        # a store with no real sample yet says so in a "_<key>" PLACEHOLDER note (NextWarehouse)
+        assert entries or str(raw.get(f"_{key}", "")).startswith("PLACEHOLDER"), key
         for e in entries:
             assert e["url"].startswith("https://"), e
             m = registry.match_retailer(e["url"])
@@ -361,7 +363,7 @@ def test_serve_ui_and_api(tmp_path, fake_backend):
         st, meta = req("GET", "/api/meta")
         meta = json.loads(meta)
         assert len(meta["retailers"]) == len(registry.RETAILERS)
-        assert all(r["samples"] for r in meta["retailers"])
+        assert all(r["samples"] for r in meta["retailers"] if r["key"] != "nextwarehouse")  # placeholder, no sample
         assert req("GET", "/", host="evil.example:80")[0] == 403  # DNS-rebinding guard
 
         st, job = req("POST", "/api/run", {"urls": [URLS["target"]], "keys": [], "options": {"zip": "60601"}})
@@ -566,6 +568,13 @@ def test_sitemap_rank_prefers_product_sitemaps():
      "https://marketplace.nvidia.com/en-us/consumer/graphics-cards/nvidia-geforce-rtx-5090/"),
     ("nvidia", "https://www.nvidia.com/en-us/geforce/graphics-cards/50-series/rtx-5080/", None),  # info page
     ("nvidia", "https://marketplace.nvidia.com/en-sg/consumer/graphics-cards/nvidia-geforce-rtx-5090/", None),
+    # non-US locales are skipped for every store (Newegg's /global/uk-en/ pages were chosen on 2026-09-30)
+    ("newegg", "https://www.newegg.com/p/N82E16814137847", "https://www.newegg.com/p/N82E16814137847"),
+    ("newegg", "https://www.newegg.com/global/uk-en/p/N82E16814137847", None),
+    ("newegg", "https://www.newegg.com/global/ca-en/p/N82E16814137847", None),
+    ("lego", "https://www.lego.com/en-gb/product/millennium-falcon-75192", None),
+    ("lego", "https://www.lego.com/ca-en/product/millennium-falcon-75192", None),
+    ("target", "https://www.target.com/uk-en/p/x/-/A-94693225", None),
     ("microcenter", "https://www.microcenter.com/product/427343/2-year-accidental-damage-protection-plan", None),
     ("stockx", "https://stockx.com/nintendo-switch-2-console-us-version", "https://stockx.com/nintendo-switch-2-console-us-version"),
     ("stockx", "https://stockx.com/category/electronics", None),
@@ -966,6 +975,25 @@ def test_discover_opens_listing_pages_one_level_below_the_seeds():
     assert set(pool) == {f"{base}/item/?p_num=4400123&n=PNY", f"{base}/item/?2573476_g10e"}
 
 
+def test_nextwarehouse_items_found_two_levels_below_the_sitemap():
+    # 2026-09-29 recordings: the homepage / not-found page link only /sitemap.cfm, /categoryList.cfm and
+    # /mfg_browse.html; items sit below a category and a subcategory. Item pages: /item/?<id>_<suffix>.
+    base = "https://www.nextwarehouse.com"
+    assert probe.DISCOVER_SEEDS["nextwarehouse"][-1] == f"{base}/mfg_browse.html"
+    net = FakeNet(pages={
+        f"{base}/categoryList.cfm": '<a href="/aboutus.cfm">about</a><a href="/category/?cat=12">Appliances</a>',
+        f"{base}/category/?cat=12": '<a href="/category/?cat=1201">Freezers</a>',
+        f"{base}/category/?cat=1201": '<a href="/item/?2573476_g10e">Freezer</a><a href="/item/?1746826_g10e&x=1">B</a>',
+    })
+    pool = {}
+    n = _run(probe.collect_from_pages(net, probe.Budget(max_requests=6), base, "nextwarehouse", pool, [],
+                                      [f"{base}/categoryList.cfm"]))
+    assert n == 2 and set(pool) == {f"{base}/item/?2573476_g10e", f"{base}/item/?1746826_g10e&x=1"}
+    assert probe.normalize_candidate(f"{base}/item/?p_num=1234567&n=PNY", "nextwarehouse")
+    for u in (f"{base}/item/", f"{base}/cart.cfm", f"{base}/404.cfm?type=product", f"{base}/search.cfm?q=12345678"):
+        assert probe.normalize_candidate(u, "nextwarehouse") is None, u
+
+
 def test_discover_slow_sitemaps_leave_time_for_the_stale_sample_pages():
     # 2026-09-29: B&H / PS Direct kept their dead samples — sitemaps through the browser (a page load per file)
     # used up the whole pool phase, so the pages their stale samples / menus link to were never opened
@@ -1019,6 +1047,16 @@ def test_retired_store_is_info_and_not_discovered():
     assert probe.retired_verdict(cx, "OK", "In stock") == ("OK", "In stock")
     assert probe.retired_verdict(registry.retailer_by_key("target"), "STALE", "x") == ("STALE", "x")
     res = _run(probe.discover_store(cx, None, FakeNet()))
+    assert res.skipped and not res.chosen
+
+
+def test_retired_unrelated_store_is_info_even_when_the_page_checks_ok():
+    # acegraphicscards.com now serves a luxury-handbag store: Louis Vuitton bags came back OK in the sweep
+    ace = registry.retailer_by_key("acegraphics")
+    assert ace.retired and "handbag" in ace.retired and ace.retired_unrelated
+    assert probe.retired_verdict(ace, "OK", "In stock")[0] == "INFO"
+    assert probe.retired_verdict(ace, "STALE", "Product page not found")[0] == "INFO"
+    res = _run(probe.discover_store(ace, None, FakeNet()))
     assert res.skipped and not res.chosen
 
 

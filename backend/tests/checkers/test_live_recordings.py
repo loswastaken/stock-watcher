@@ -898,3 +898,40 @@ async def test_psdirect_code_less_menu_link_reads_the_page_code():
     assert res.status == "out_of_stock" and res.price == "$749.99" and res.detail["code_from"] == "page"
     assert any("productCodes=1000045123" in c for c in calls)
     assert games.psdirect_page_code(page.replace("</body>", '<div data-product-code="1000099999"></div></body>')) is None
+
+
+_PSD_SLUG_URL = "https://direct.playstation.com/en-us/buy-consoles/playstation5-pro-console-2-tb"
+_PSD_API_OOS = {"products": [{"code": "3009726", "name": "PlayStation 5 Pro Console", "price": {"value": 899.0},
+                              "stock": {"stockLevelStatus": "outOfStock"}}]}
+
+
+@pytest.mark.parametrize("page", [
+    # JSON in a script (productCode) with other products' empty/absent data attributes
+    '<html><body><div data-product-code=""></div><script>window.pdp={"productCode":"3009726","name":"PS5 Pro"}</script></body></html>',
+    # canonical link with the code
+    '<html><head><link rel="canonical" href="https://direct.playstation.com/en-us/buy-consoles/playstation5-pro-console.3009726"/></head><body></body></html>',
+    # a link to this very slug with the code, among menu links to other products
+    '<html><body><a href="/en-us/buy-consoles/playstation5-pro-console-2-tb.3009726">Pro</a>'
+    '<a href="/en-us/buy-consoles/playstation5-console-1-tb.3006222">Base</a></body></html>',
+    # the API URL the page's script builds
+    '<html><body><div data-products-url="https://api.direct.playstation.com/commercewebservices/ps-direct-us/users/:userId/products/productList?fields=BASIC&amp;productCodes=3009726"></div></body></html>',
+])
+async def test_psdirect_code_less_page_code_in_other_shapes(page):
+    with replay({_PSD_SLUG_URL: {"body": page}, "https://api.direct.playstation.com/commercewebservices/*": {"body": _PSD_API_OOS}}) as calls:
+        res = await check(_PSD_SLUG_URL)
+    assert res.status == "out_of_stock" and res.price == "$899.00" and res.detail["code_from"] == "page"
+    assert any("productCodes=3009726" in c for c in calls)
+
+
+@pytest.mark.parametrize("page", [
+    '<html><head><title>PlayStation 5 Pro Console (2 TB)</title></head><body><h1>PlayStation 5 Pro Console 2 TB</h1><p>Shop now</p>'
+    + '<p>PlayStation Direct: consoles, accessories and more, shipped by Sony Interactive Entertainment.</p>' * 20
+    + '</body></html>',
+    # a page full of other products' cards: nothing to pick the right one from
+    '<html><body><div data-product-code="3009726"></div><div data-product-code="3006222"></div></body></html>',
+])
+async def test_psdirect_code_less_page_without_a_code_says_so(page):
+    with replay({_PSD_SLUG_URL: {"body": page}}) as calls:
+        res = await check(_PSD_SLUG_URL)
+    print(res);     assert res.status == "unknown" and res.status_text == "Couldn't find the PS Direct product code on this page"
+    assert not any("productList" in c for c in calls)

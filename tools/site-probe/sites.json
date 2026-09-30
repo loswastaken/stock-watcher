@@ -1,13 +1,16 @@
 {
   "_README": "SAMPLE product URLs, one or more per supported store (keys match backend/app/checkers/retailers/registry.py). They were written without live access to the sites, so some will be stale, delisted or redirect: run `./run.sh discover --write` to refresh them with current product URLs, or replace any that 404 or point at the wrong product with a current product page you care about (a mix of in-stock and sold-out items is ideal). Each entry is either a URL string or {\"url\": ..., \"retailer_config\": {...}, \"note\": ...}; retailer_config accepts fulfillment (delivery|pickup|any), zip, radius_miles, store_id, official_only, condition.",
-  "_comment": "2026-09-30: AMD's direct-buy pages are retired (AMD now sells from its BigCommerce store, shop-us-en.amd.com; discover looks there). Consutronix no longer sells online (registry `retired`: INFO, not STALE). NextWarehouse's sample is a placeholder item that 404s: run `discover --write` for real ones.",
+  "_comment": "2026-09-30: AMD's direct-buy pages are retired (AMD now sells from its BigCommerce store, shop-us-en.amd.com; discover looks there). Consutronix no longer sells online (registry `retired`: INFO, not STALE). NextWarehouse has no sample until a real item link is known (see `_nextwarehouse`); ace graphics (acegraphicscards.com) now serves an unrelated handbag store (registry `retired`: INFO).",
   "sites": {
     "amd": [
       {"url": "https://www.amd.com/en/products/processors/desktops/ryzen/9000-series/amd-ryzen-7-9800x3d.html",
        "note": "a spec page (INFO). AMD retired its amd.com/en/direct-buy/<id>/us links (they redirect to the homepage of its store, shop-us-en.amd.com): `discover --write` finds store items"}
     ],
     "asus": ["https://shop.asus.com/us/90mb1ir0-m0aay0-rog-strix-b850-f-gaming-wifi.html"],
-    "acegraphics": ["https://acegraphicscards.com/products/msi-geforce-rtx-5070-ventus-2x-oc-12g"],
+    "acegraphics": [
+      {"url": "https://acegraphicscards.com/products/msi-geforce-rtx-5070-ventus-2x-oc-12g",
+       "note": "retired in the registry: acegraphicscards.com now serves an unrelated luxury-handbag store (Louis Vuitton listings), so the probe reports INFO whatever the page says"}
+    ],
     "adorama": ["https://www.adorama.com/ifjx100vs.html"],
     "amazon": [
       "https://www.amazon.com/dp/B0D1XD1ZV3",
@@ -76,7 +79,8 @@
       "https://www.newegg.com/p/N82E16819113877",
       "https://www.newegg.com/msi-geforce-rtx-5070-ti-rtx-5070-ti-16g-gaming-trio-oc/p/N82E16814137917"
     ],
-    "nextwarehouse": ["https://www.nextwarehouse.com/item/?p_num=1234567&n=PNY+GeForce+RTX+5080"],
+    "_nextwarehouse": "PLACEHOLDER, no sample: no real NextWarehouse item URL has been recorded (the earlier p_num=1234567 sample was made up and hit the site's 'page no longer in our system' page). Run `discover --write` or paste a real https://www.nextwarehouse.com/item/?<id> link here.",
+    "nextwarehouse": [],
     "ninja": ["https://www.ninjakitchen.com/pdp/ninja-creami-deluxe-11-in-1-ice-cream-frozen-treat-maker/zidNC501.html"],
     "nintendo": ["https://www.nintendo.com/us/store/products/nintendo-switch-2-system-123669/"],
     "nvidia": [

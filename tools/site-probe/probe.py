@@ -347,7 +347,8 @@ def retired_verdict(retailer: Any, verdict: str, reason: str) -> tuple[str, str]
     """A dead link on a store the registry marks ``retired`` (it no longer sells online) is expected: INFO,
     not STALE — there is no current link to update it to."""
     why = getattr(retailer, "retired", None) if retailer is not None else None
-    if why and verdict in ("STALE", "FAIL"):
+    if why and (verdict in ("STALE", "FAIL") or (verdict == "OK" and getattr(retailer, "retired_unrelated", False))):
+        # (an OK on a domain that now runs an unrelated store — acegraphicscards.com's handbags — is as meaningless)
         return "INFO", f"Store no longer sells online — {why}"
     return verdict, reason
 
@@ -1150,7 +1151,9 @@ DISCOVER_SEEDS: dict[str, list[str]] = {
     "nvidia": ["https://marketplace.nvidia.com/en-us/consumer/graphics-cards/"],
     "psdirect": ["https://direct.playstation.com/en-us/sitemap", "https://direct.playstation.com/en-us/accessories",
                  "https://direct.playstation.com/en-us/hardware/ps5"],
-    "nextwarehouse": ["https://www.nextwarehouse.com/sitemap.cfm", "https://www.nextwarehouse.com/categoryList.cfm"],
+    # the three listing pages its homepage / not-found page link to (2026-09-29 recordings)
+    "nextwarehouse": ["https://www.nextwarehouse.com/sitemap.cfm", "https://www.nextwarehouse.com/categoryList.cfm",
+                      "https://www.nextwarehouse.com/mfg_browse.html"],
     "evga": ["https://www.evga.com/products/productlist.aspx.type=10.html"],
     "asus": ["https://shop.asus.com/us/"],
     # AMD retired its amd.com/en/direct-buy/<id>/us pages: on 2026-09-29 they all redirected to the homepage of
@@ -1234,7 +1237,10 @@ PRODUCT_PATTERNS: dict[str, str] = {
     "nyxi": _SHOPIFY,
     "neutronusa": _SHOPIFY,
     "newegg": r"/p/(?:N82E\d+|[0-9A-Z]{4}-[0-9A-Z]{4}-[0-9A-Z]{4,5}|[0-9A-Z]{15})",
-    "nextwarehouse": r"/item/\?(?:(?:[^#]*&)?p_num=\d+|\d{4,}_\w+)",  # /item/?p_num=123 or /item/?2573476_g10e
+    # /item/?2573476_g10e (a long id, usually with a _suffix; the query is the whole address); also ?p_num=123-style ids.
+    # The pattern is loose on purpose: no real item page was ever recorded (the item URLs in the 2026-09-29 runs were
+    # invented and answered the site's "page ... no longer in our system" page), so any /item/? address with an id counts.
+    "nextwarehouse": r"/item/\?[^#]*\d{5,}",
     "ninja": r"/pdp/[^/?#]+/[^/?#]+\.html",
     "nintendo": r"/us/store/products/[^/?#]+",
     # marketplace product pages only (CANDIDATE_HOSTS): /en-us/consumer/graphics-cards/nvidia-geforce-rtx-5090/
@@ -1274,8 +1280,9 @@ _DENY_PATH = re.compile(
     r"|(?:protection|service|replacement|care|damage)[-_]?plans?\b|\bwarrant(?:y|ies)\b|gift[-_]?cards?\b|\be[-_]?gift",
     re.I,
 )
-# a locale segment other than the US one (NVIDIA's /en-sg/ GPU pages were chosen on 2026-09-29)
-_FOREIGN_LOCALE = re.compile(r"^/(?!en[-_]us(?:/|$))[a-z]{2}[-_][a-z]{2}(?:/|$)", re.I)
+# a locale segment other than the US one (NVIDIA's /en-sg/ GPU pages were chosen on 2026-09-29; Newegg's
+# /global/uk-en/p/... pages on 2026-09-30, its US pages have no prefix): /en-gb/, /uk-en/, /ca-en/, /global/<locale>/
+_FOREIGN_LOCALE = re.compile(r"^/(?:global(?:/|$)|(?!(?:en[-_]us|us[-_]en)(?:/|$))[a-z]{2}[-_][a-z]{2}(?:/|$))", re.I)
 _compiled: dict[str, re.Pattern[str]] = {}
 
 
@@ -1550,10 +1557,14 @@ def extract_links(html: str, base: str) -> list[str]:
 _LISTING_HINT = re.compile(
     r"/(?:collections?|c|b|category|categories|browse|shop|deals|new|new-arrivals|best-?sellers?|gaming|toys|"
     r"video-games|electronics|cameras|graphics-cards|consoles|laptops|tvs|products|accessories|hardware)(?:/|$)"
+    # old-style .cfm/.aspx listing pages: /cat.cfm?c=517, /category.cfm, /mfg.cfm (NextWarehouse)
+    r"|/(?:cat|cats|category|categories|mfg|manufacturers?|dept|departments?)(?:\.\w+)?(?:/|$)"
     # HTML sitemaps and old-style listing pages (NextWarehouse /sitemap.cfm, /categoryList.cfm, /mfg_browse.html;
     # EVGA /products/productlist.aspx.type=10.html; PS Direct /en-us/sitemap)
     r"|/[^/]*(?:sitemap|categorylist|productlist|mfg_browse)[^/]*$", re.I)
 _HTML_SITEMAP = re.compile(r"sitemap", re.I)
+# stores whose HTML sitemap / category list is two levels above the products (sitemap → category → subcategory → items)
+DEEP_LISTING_STORES = frozenset({"nextwarehouse"})
 
 
 _UTILITY_PATH = re.compile(
@@ -1647,7 +1658,7 @@ async def collect_from_pages(net: Any, budget: Budget, base: str, key: str, pool
         html = await page(url)
         origin = _origin(url)
         links = extract_links(html, origin)
-        if harvest(links) or depth >= 1 or not links:
+        if harvest(links) or depth >= (2 if key in DEEP_LISTING_STORES else 1) or not links:
             continue
         # no products here: its listing pages next (before the homepage), relaxed for listing-type seeds
         relaxed = is_seed and not product_pattern(key).search(urlsplit(url).path) or bool(

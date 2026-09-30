@@ -424,15 +424,39 @@ def _psd_region(url: str) -> str:
     return m.group(1).lower() if m else "us"
 
 
-_PSD_PAGE_CODE_RE = re.compile(r"""data-product-code=["'](\d{7,})["']""")
+_PSD_TIERS = (
+    # 1. the page naming itself: canonical / og:url ending in the product code
+    re.compile(r"""<(?:link|meta)\b[^>]*?(?:rel=["']canonical["']|property=["']og:url["'])[^>]*?"""
+               r"""(?:href|content)=["'][^"']*[./](\d{7,})["'/?#]""", re.I),
+    # 2. data attributes on the product component (empty data-product-code="" never matches)
+    re.compile(r"""\bdata-(?:product-?code|productcode|sku|product-?id)=["'](\d{7,})["']""", re.I),
+    # 3. JSON / script values: "productCode":"3009726", productCode = '3009726', "sku":"3009726"
+    re.compile(r"""["']?\b(?:product_?code|productCode|productID|product_?id|sku)["']?\s*[:=]\s*["']?(\d{7,})\b""", re.I),
+    # 4. the product API URL a page's script builds: ...productList?fields=BASIC&productCodes=3009726
+    re.compile(r"""productCodes=(\d{7,})\b""", re.I),
+)
+_PSD_HREF_CODE_RE = re.compile(r"""(?:href|content)=["']([^"']*?[./]\d{7,})["'/?#]""", re.I)
 
 
-def psdirect_page_code(html: str) -> str | None:
+def psdirect_page_code(html: str, url: str | None = None) -> str | None:
     """The product code a code-less page (/en-us/buy-consoles/playstation5-pro-console-2-tb, the links PS
-    Direct's own menus carried on 2026-09-29) renders on its product components (``data-product-code``, which
-    the page's script sends to productList). Only when the page names exactly one product."""
-    codes = set(_PSD_PAGE_CODE_RE.findall(html or ""))
-    return codes.pop() if len(codes) == 1 else None
+    Direct's own menus carried on 2026-09-29) carries in its HTML. Strongest evidence first: a link to this very
+    page's slug with a code (``<slug>.3009726``), the canonical/og:url, ``data-product-code`` (and sibling data
+    attributes), JSON ``productCode``/``sku`` values, a ``productCodes=`` API URL. The first kind that names
+    exactly one product wins; a kind naming several (a page full of other products' cards) is skipped, and
+    nothing is guessed when no kind is unambiguous."""
+    html = html or ""
+    slug = urlsplit(url).path.rstrip("/").rsplit("/", 1)[-1].lower() if url else ""
+    if slug and not _PSD_CODE_RE.search("/" + slug):
+        own = {m.group(1) for h in _PSD_HREF_CODE_RE.findall(html)
+               for m in [re.search(r"/" + re.escape(slug) + r"[./](\d{7,})$", h.lower())] if m}
+        if len(own) == 1:
+            return own.pop()
+    for rx in _PSD_TIERS:
+        codes = set(rx.findall(html))
+        if len(codes) == 1:
+            return codes.pop()
+    return None
 
 
 async def _psd_api(url: str, code: str, ctx: AdapterContext) -> CheckResult | None:
@@ -463,15 +487,20 @@ async def psdirect(url: str, ctx: AdapterContext) -> CheckResult | None:
     fetched = await fetch_page(url, ctx)
     if is_queued(fetched):
         return queue_result(ctx, product_code=code)
-    if not code and getattr(fetched, "status", 200) < 400:
-        page_code = psdirect_page_code(fetched.text)
+    page_ok = getattr(fetched, "status", 200) < 400
+    if not code and page_ok:
+        page_code = psdirect_page_code(fetched.text, url)
         if page_code:
             res = await _psd_api(url, page_code, ctx)
             if res is not None:
                 res.detail["code_from"] = "page"
                 return res
             code = page_code
-    return analyze_page(fetched.text, url, ctx, fetched.url, extra={"product_code": code, "source": "html"})
+    res = analyze_page(fetched.text, url, ctx, fetched.url, extra={"product_code": code, "source": "html"})
+    if not code and page_ok and res.status == "unknown":
+        res.status_text = "Couldn't find the PS Direct product code on this page"
+        res.detail["matched"] = "no product code in the page"
+    return res
 
 
 def _psd_from_api(prod: dict, code: str, ctx: AdapterContext) -> CheckResult | None:
