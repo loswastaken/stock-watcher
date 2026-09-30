@@ -424,31 +424,53 @@ def _psd_region(url: str) -> str:
     return m.group(1).lower() if m else "us"
 
 
+_PSD_PAGE_CODE_RE = re.compile(r"""data-product-code=["'](\d{7,})["']""")
+
+
+def psdirect_page_code(html: str) -> str | None:
+    """The product code a code-less page (/en-us/buy-consoles/playstation5-pro-console-2-tb, the links PS
+    Direct's own menus carried on 2026-09-29) renders on its product components (``data-product-code``, which
+    the page's script sends to productList). Only when the page names exactly one product."""
+    codes = set(_PSD_PAGE_CODE_RE.findall(html or ""))
+    return codes.pop() if len(codes) == 1 else None
+
+
+async def _psd_api(url: str, code: str, ctx: AdapterContext) -> CheckResult | None:
+    api = PSD_API.format(region=_psd_region(url), code=code)
+    headers = {"Accept": "application/json, text/plain, */*", "Origin": "https://direct.playstation.com",
+               "Referer": "https://direct.playstation.com/", "Sec-Fetch-Dest": "empty", "Sec-Fetch-Mode": "cors",
+               "Sec-Fetch-Site": "same-site"}
+    data = None
+    try:
+        resp = await fetcher.http_get(api, headers=headers)
+        if is_queue_url(str(resp.url)) or any(is_queue_url(str(h.headers.get("location") or ""))
+                                              for h in resp.history):
+            return queue_result(ctx, product_code=code)
+        if resp.status_code < 400:
+            data = json.loads(resp.text)
+    except (FetchError, ValueError):
+        data = None
+    prod = dig(data, "products", 0)
+    return _psd_from_api(prod, code, ctx) if isinstance(prod, dict) else None
+
+
 async def psdirect(url: str, ctx: AdapterContext) -> CheckResult | None:
     code = psdirect_code(url)
     if code:
-        api = PSD_API.format(region=_psd_region(url), code=code)
-        headers = {"Accept": "application/json, text/plain, */*", "Origin": "https://direct.playstation.com",
-                   "Referer": "https://direct.playstation.com/", "Sec-Fetch-Dest": "empty", "Sec-Fetch-Mode": "cors",
-                   "Sec-Fetch-Site": "same-site"}
-        data = None
-        try:
-            resp = await fetcher.http_get(api, headers=headers)
-            if is_queue_url(str(resp.url)) or any(is_queue_url(str(h.headers.get("location") or ""))
-                                                  for h in resp.history):
-                return queue_result(ctx, product_code=code)
-            if resp.status_code < 400:
-                data = json.loads(resp.text)
-        except (FetchError, ValueError):
-            data = None
-        prod = dig(data, "products", 0)
-        if isinstance(prod, dict):
-            res = _psd_from_api(prod, code, ctx)
-            if res is not None:
-                return res
+        res = await _psd_api(url, code, ctx)
+        if res is not None:
+            return res
     fetched = await fetch_page(url, ctx)
     if is_queued(fetched):
         return queue_result(ctx, product_code=code)
+    if not code and getattr(fetched, "status", 200) < 400:
+        page_code = psdirect_page_code(fetched.text)
+        if page_code:
+            res = await _psd_api(url, page_code, ctx)
+            if res is not None:
+                res.detail["code_from"] = "page"
+                return res
+            code = page_code
     return analyze_page(fetched.text, url, ctx, fetched.url, extra={"product_code": code, "source": "html"})
 
 

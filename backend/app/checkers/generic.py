@@ -376,6 +376,15 @@ def analyze_structured(roots: list, source: str, page_url: str) -> StructuredRes
                 break
 
     if not entries:
+        # an Offer with a price but no availability (Home Depot's JSON-LD, 2026-09-29): still the product's
+        # price, when this Product is unambiguously the page's own
+        if len(top) == 1 or (page_path and _url_path(main.get("url")) == page_path):
+            for off in _as_list(main.get("offers")):
+                off = g.deref(off)
+                p = _offer_price(off, main) if isinstance(off, dict) else None
+                if p:
+                    res.price = p
+                    break
         return res
 
     hints = _variant_hints(page_url)
@@ -732,7 +741,8 @@ class PageMeta:
 
 
 _SHOWN_PRICE_SEL = (".product-price-sales_productDetail, .product-info-price .product-sales-price, "
-                    "[data-e2e=product-price], .product__price--sale, .price__sale .price-item--sale")
+                    "[data-e2e=product-price], .product__price--sale, .price__sale .price-item--sale, "
+                    "[data-testid=sharedPSPDellPrice] .ps-dell-price-amount")
 _SHOWN_PRICE_RE = re.compile(r"([$£€])\s*(\d{1,3}(?:[,\s]\d{3})*|\d+)(?:\s*[.,]\s*|\s+)(\d{2})\b")
 
 
@@ -956,6 +966,8 @@ def analyze(html: str, url: str, config: dict | GenericConfig | None = None, *, 
         # store, 2026-09-29: JSON-LD "GBP 90" from a GB session cookie, rendered "$119.16" to the US viewer)
         detail["structured_price"] = meta.price
         meta.price = shown
+    elif shown and not meta.price:
+        meta.price = shown  # no structured price (Dell's monitor pages: only "Dell Price $419.99" is shown)
     canon = soup.select_one("link[rel=canonical][href], meta[property='og:url'][content]")
     if canon is not None:
         detail["canonical"] = urljoin(base, str(canon.get("href") or canon.get("content") or "").strip()) or None

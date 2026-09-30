@@ -597,9 +597,15 @@ def test_every_registry_store_has_a_pattern_and_samples_match_it():
 def test_select_candidates_prefers_recent_and_is_deterministic():
     pool = [(f"https://s.test/p/{i}", f"2026-01-{i:02d}") for i in range(1, 20)] + [("https://s.test/p/x", None)]
     got = probe.select_candidates(pool, 3, "k")
-    assert len(got) == 3 and "https://s.test/p/x" not in got
-    assert all(int(u.rsplit("/", 1)[1]) >= 8 for u in got)  # only from the recent 12
+    # a page-linked URL (no lastmod: the store's menus show it today) always gets a share of the tries
+    assert len(got) == 3 and "https://s.test/p/x" in got
+    assert all(int(u.rsplit("/", 1)[1]) >= 8 for u in got if u != "https://s.test/p/x")  # only from the recent 12
     assert got == probe.select_candidates(pool, 3, "k")
+    assert "https://s.test/p/x" not in probe.select_candidates(pool, 1, "k")
+    # a big sitemap never crowds page links out; few page links leave the rest to the sitemap
+    many = [(f"https://s.test/p/{i}", "2026-01-01") for i in range(80)] + [(f"https://s.test/q/{i}", None) for i in range(5)]
+    got = probe.select_candidates(many, 6, "k")
+    assert len(got) == 6 and sum("/q/" in u for u in got) == 2
     assert probe.select_candidates([("https://s.test/p/a", None)] * 3, 5) == ["https://s.test/p/a"]
 
 
@@ -940,7 +946,123 @@ def test_discover_uses_stale_sample_pages_and_html_sitemaps():
                          f"{base}/sitemap.cfm": '<a href="/item/?2573476_g10e">x</a>'})
     pool = {}
     assert _run(probe.collect_from_pages(net, probe.Budget(), base, "nextwarehouse", pool, [])) == 1
-    assert net.paged == [f"{base}/", f"{base}/sitemap.cfm"]
+    assert net.paged[:2] == [f"{base}/", f"{base}/sitemap.cfm"]
+
+
+def test_discover_opens_listing_pages_one_level_below_the_seeds():
+    # 2026-09-29: NextWarehouse's seed pages (sitemap.cfm, categoryList.cfm) list categories, not products, so
+    # discovery found nothing; their category pages (.cfm?... query links) are opened next, before the homepage
+    base = "https://www.nextwarehouse.com"
+    net = FakeNet(pages={
+        f"{base}/sitemap.cfm": '<a href="/aboutus.cfm">about</a><a href="/cat.cfm?c=517">Video Cards</a>'
+                               '<a href="/cat.cfm?c=12">Memory</a>',
+        f"{base}/cat.cfm?c=517": '<a href="/item/?p_num=4400123&n=PNY">x</a><a href="/item/?2573476_g10e">y</a>',
+    })
+    pool, notes = {}, []
+    n = _run(probe.collect_from_pages(net, probe.Budget(max_requests=4), base, "nextwarehouse", pool, notes,
+                                      [f"{base}/sitemap.cfm"]))
+    assert n == 2 and net.paged[:2] == [f"{base}/sitemap.cfm", f"{base}/cat.cfm?c=517"]
+    assert f"{base}/aboutus.cfm" not in net.paged
+    assert set(pool) == {f"{base}/item/?p_num=4400123&n=PNY", f"{base}/item/?2573476_g10e"}
+
+
+def test_discover_slow_sitemaps_leave_time_for_the_stale_sample_pages():
+    # 2026-09-29: B&H / PS Direct kept their dead samples — sitemaps through the browser (a page load per file)
+    # used up the whole pool phase, so the pages their stale samples / menus link to were never opened
+    stale = "https://www.bhphotovideo.com/c/product/1809440-REG/fujifilm_16821474_x100vi_digital_camera_silver.html"
+    live = ("https://www.bhphotovideo.com/c/product/49510-REG/Sony_MDR_7506_MDR_7506_Headphone.html",
+            "https://www.bhphotovideo.com/c/product/758628-REG/Shure_SE215_CL_SE215_Sound_Isolating_In_Ear_Stereo.html")
+
+    class SlowSitemaps(FakeNet):
+        async def get(self, url):
+            self.gets.append(url)
+            await asyncio.sleep(0.5)
+            return 404, b""
+
+    net = SlowSitemaps(pages={stale: "".join(f'<a href="{u}">p</a>' for u in live)})
+
+    async def check(url, rc):
+        return {"status": "in_stock" if "49510" in url else "out_of_stock", "verdict": "OK", "price": "$1"}
+
+    bh = registry.retailer_by_key("bhphoto")
+    res = _run(probe.discover_store(bh, [{"url": stale}], net, time_cap=2.0, check=check, min_check_time=0.1))
+    assert net.paged and net.paged[0] == stale and "sitemaps: time share used up" in res.notes
+    assert sorted(c["url"] for c in res.chosen) == sorted(live)
+
+
+def test_discover_prefers_items_that_can_come_back():
+    v = [("ipod", {"status": "out_of_stock", "verdict": "OK", "verdict_reason": "No longer available"}),
+         ("in", _summary("in_stock")), ("out", {"status": "out_of_stock", "verdict": "OK", "verdict_reason": "Sold out"})]
+    assert [c["url"] for c in probe.choose_verified(v, 2)] == ["in", "out"]
+    assert [c["url"] for c in probe.choose_verified(v[:1], 2)] == ["ipod"]  # still better than nothing
+    assert not probe._enough([v[0], v[1]], 2)
+
+
+def test_amd_discovery_looks_in_its_store():
+    amd = registry.retailer_by_key("amd")
+    assert probe.store_bases(amd, [{"url": "https://www.amd.com/en/direct-buy/5335621300/us"}]) == \
+        ["https://shop-us-en.amd.com"]
+    # the store's homepage (recorded 2026-09-29, where direct-buy links land) links its HTML sitemap
+    assert "https://shop-us-en.amd.com/sitemap.php" in probe.DISCOVER_SEEDS["amd"]
+    ok = "https://shop-us-en.amd.com/amd-ryzen-7-9800x3d-processor/"
+    assert probe.normalize_candidate(ok, "amd") == ok
+    for u in ("https://shop-us-en.amd.com/adaptive-embedded-computing/", "https://shop-us-en.amd.com/terms-of-purchase/",
+              "https://shop-us-en.amd.com/amd-game-bundle-with-onimusha-way-of-the-sword/",
+              "https://shop-us-en.amd.com/processors/", "https://shop-us-en.amd.com/cart.php"):
+        assert probe.normalize_candidate(u, "amd") is None, u
+
+
+def test_retired_store_is_info_and_not_discovered():
+    cx = registry.retailer_by_key("consutronix")
+    assert cx.retired
+    assert probe.retired_verdict(cx, "STALE", "Product page not found (HTTP 404)")[0] == "INFO"
+    assert probe.retired_verdict(cx, "OK", "In stock") == ("OK", "In stock")
+    assert probe.retired_verdict(registry.retailer_by_key("target"), "STALE", "x") == ("STALE", "x")
+    res = _run(probe.discover_store(cx, None, FakeNet()))
+    assert res.skipped and not res.chosen
+
+
+def test_retired_store_sweep_reports_info(monkeypatch, tmp_path):
+    async def fake_run_check(kind, url, generic_config, apple_config, retailer_config=None):
+        return CheckResult(status="error", status_text="Product page not found (HTTP 404)",
+                           error="Product page not found (HTTP 404) — update the link")
+
+    monkeypatch.setattr(checkers, "run_check", fake_run_check)
+    s = _run(probe.probe_one("https://consutronix.com/products/gigabyte-geforce-rtx-5080-windforce-oc-sff-16g",
+                             preview=False, out_root=None))
+    assert s["verdict"] == "INFO" and s["verdict_reason"].startswith("Store no longer sells online")
+
+
+def test_local_sites_take_fixed_shipped_samples(tmp_path, monkeypatch):
+    # the 2026-09-29 19:53 sweep read sites.local.json (its URLs aren't sites.json's), which still carried the dead
+    # B&H / AMD / PS Direct samples discovery found nothing for; a shipped fix must reach it
+    shipped = json.loads(probe.DEFAULT_SITES.read_text())
+    legacy_local = {"_README": "x", "_comment": "Discovered 2026-09-29 by `probe.py discover` for 50 store(s): ...", "sites": {
+        "bhphoto": ["https://www.bhphotovideo.com/c/product/1809440-REG/fujifilm_16821474_x100vi_digital_camera_silver.html"],
+        "asus": ["https://eshop.asus.com/us/rog-strix-scar-18-2026-gaming-laptop.html"],  # discovered
+        "psdirect": ["https://direct.playstation.com/en-us/buy-consoles/playstation5-pro-console.3009726"],
+    }}
+    got = probe.load_sites_data(probe.overlay_shipped(legacy_local, shipped))
+    assert got["asus"][0]["url"] == "https://eshop.asus.com/us/rog-strix-scar-18-2026-gaming-laptop.html"
+    assert got["bhphoto"][0]["url"] == shipped["sites"]["bhphoto"][0]["url"] != legacy_local["sites"]["bhphoto"][0]
+    assert got["psdirect"][0]["url"].endswith("playstation5-pro-console-2-tb")
+    assert "target" in got and "lego" in got  # stores the local file lacks come from sites.json
+    # with the new bookkeeping: a store no discovery found takes the shipped entries, discovered ones stay
+    merged = probe.merge_sites(legacy_local, [probe.StoreResult(key="asus", chosen=[
+        {"url": "https://eshop.asus.com/us/x-1.html", "status": "in_stock", "verdict": "OK", "definite": True}])])
+    assert merged["_discovered"] == ["asus"]
+    merged["sites"]["lego"] = ["https://www.lego.com/en-us/product/old-12345"]
+    again = probe.load_sites_data(probe.overlay_shipped(merged, shipped))
+    assert again["asus"][0]["url"] == "https://eshop.asus.com/us/x-1.html"
+    assert again["lego"][0]["url"] == probe.load_sites_data(shipped)["lego"][0]["url"]
+    # sweep / discover read the overlay when the local file is the one in use
+    local = tmp_path / "sites.local.json"
+    local.write_text(json.dumps(legacy_local))
+    monkeypatch.setattr(probe, "LOCAL_SITES", local)
+    assert probe.sites_doc_for(local)["sites"]["bhphoto"] == shipped["sites"]["bhphoto"]
+    assert probe.sites_doc_for(tmp_path / "other.json")["sites"] == {}
+    with pytest.raises(probe.ProbeError):
+        probe.sites_doc_for(tmp_path / "missing.json", must_exist=True)
 
 
 def test_discover_bases_and_locale_sitemaps():
@@ -970,3 +1092,37 @@ def test_discover_write_goes_to_gitignored_local_file(tmp_path, monkeypatch):
     assert probe.effective_sites(None) == local  # discover --write output wins once it exists
     assert probe.effective_sites(tmp_path / "x.json") == tmp_path / "x.json"  # explicit --sites always wins
     assert "sites.local.json" in (Path(probe.__file__).parent / ".gitignore").read_text()
+
+
+def test_report_names_the_sample_file(tmp_path):
+    s = {"url": "https://www.target.com/p/-/A-1", "store": "target", "status": "in_stock", "verdict": "OK"}
+    md, js = probe.write_report([s], tmp_path, sites=probe.LOCAL_SITES)
+    assert "Sample URLs from: sites.local.json (from `discover --write`)." in md.read_text()
+    assert json.loads(js.read_text())["sites"] == "sites.local.json (from `discover --write`)"
+    md, _ = probe.write_report([s], tmp_path, sites=probe.DEFAULT_SITES)
+    assert "Sample URLs from: sites.json (shipped samples)." in md.read_text()
+
+
+def test_livenet_gzipped_sitemap_through_the_browser_stays_binary(monkeypatch):
+    # a .xml.gz read as text in the page came back mangled (B&H's walled sitemaps): the browser returns base64
+    import base64 as b64
+
+    xml = _urlset("https://www.bhphotovideo.com/c/product/49510-REG/Sony_MDR_7506_MDR_7506_Headphone.html")
+    seen = {}
+
+    async def fake_http_get(url, **kw):
+        return httpx.Response(403, content=b"Access Denied", request=httpx.Request("GET", url))
+
+    async def fake_browser(page_url, target_url, accept="application/json", *, binary=False):
+        seen[target_url] = binary
+        return 200, (b64.b64encode(gzip.compress(xml.encode())).decode() if binary else xml), []
+
+    monkeypatch.setattr(fetcher, "http_get", fake_http_get)
+    monkeypatch.setattr(fetcher, "browser_fetch_from_page", fake_browser)
+    monkeypatch.setattr(fetcher, "browser_enabled", lambda: True)
+    net = probe.LiveNet(gap=0)
+    status, data = _run(net.get("https://www.bhphotovideo.com/sitemap/products-1.xml.gz"))
+    assert status == 200 and seen["https://www.bhphotovideo.com/sitemap/products-1.xml.gz"] is True
+    assert probe.parse_sitemap(data).entries[0][0].endswith("Sony_MDR_7506_MDR_7506_Headphone.html")
+    status, data = _run(net.get("https://www.bhphotovideo.com/sitemap.xml"))
+    assert seen["https://www.bhphotovideo.com/sitemap.xml"] is False and b"<loc>" in data

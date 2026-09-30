@@ -1698,14 +1698,22 @@ async def _browser_fetch_once(url: str, capture: Callable[[str], bool] | None, *
             f.cancel()
 
 
-async def browser_fetch_from_page(page_url: str, target_url: str, accept: str = "application/json") -> tuple[int, str, list[dict]]:
+async def browser_fetch_from_page(page_url: str, target_url: str, accept: str = "application/json", *,
+                                  binary: bool = False) -> tuple[int, str, list[dict]]:
     """Open ``page_url`` in the browser, then fetch ``target_url`` from inside that page
-    (same-origin XHR with the page's cookies). Returns (status, body, cookies)."""
+    (same-origin XHR with the page's cookies). Returns (status, body, cookies). With ``binary`` the body is
+    the raw bytes, base64-encoded (a gzipped sitemap read as text comes back mangled)."""
     script = """
-    async ([u, accept]) => {
+    async ([u, accept, binary]) => {
         const r = await fetch(u, {credentials: 'include', headers: {'Accept': accept, 'x-skip-redirect': 'true'}});
         const headers = {};
         r.headers.forEach((v, k) => { headers[k] = v; });
+        if (binary) {
+            const b = new Uint8Array(await r.arrayBuffer());
+            let s = '';
+            for (let i = 0; i < b.length; i += 32768) s += String.fromCharCode.apply(null, b.subarray(i, i + 32768));
+            return {status: r.status, text: btoa(s), url: r.url, headers};
+        }
         return {status: r.status, text: await r.text(), url: r.url, headers};
     }
     """
@@ -1714,11 +1722,11 @@ async def browser_fetch_from_page(page_url: str, target_url: str, accept: str = 
     try:
         async with browser_page() as page:
             await _open(page, page_url, interactive=st.info.get("mode") == "cdp")
-            res = await page.evaluate(script, [target_url, accept])
+            res = await page.evaluate(script, [target_url, accept, binary])
             cookies = await page.context.cookies([page_url, target_url])
             status, text = int(res.get("status") or 0), str(res.get("text") or "")
             _record(target_url, via="browser", t0=t0, status=status, final_url=str(res.get("url") or target_url),
-                    headers=res.get("headers") or {}, body=text)
+                    headers=res.get("headers") or {}, body=f"[binary, base64: {len(text)} chars]" if binary else text)
             return status, text, cookies
     except FetchError as e:
         _record(target_url, via="browser", t0=t0, error=str(e))

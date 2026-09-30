@@ -9,6 +9,7 @@ import pytest
 import respx
 
 from app.checkers import fetcher
+from app.checkers.fetcher import FetchError
 from app.checkers.retailers import electronics as el
 from app.checkers.retailers import run_adapter
 from app.checkers.retailers.base import AdapterContext, RetailerConfig
@@ -189,7 +190,9 @@ async def test_nvidia_never_reports_another_gpus_founders_edition():
     respx.get(url).mock(return_value=httpx.Response(404))
     # the inventory answers with the 5090's row only: never taken for the (guessed) NVGFT570
     inv = respx.get(NV_INV).mock(return_value=httpx.Response(200, json=fxj("nvidia_feinventory_active.json")))
-    assert await el.nvidia(url, ctx_for(url)) is None
+    with pytest.raises(FetchError) as e:  # the page itself (404 here) decides, never the 5090's row
+        await el.nvidia(url, ctx_for(url))
+    assert e.value.status == 404
     assert inv.calls.last.request.url.params["skus"] == "NVGFT570"
     # a pinned SKU missing from the search must not borrow the 5080 FE's buy_now status
     url = "https://marketplace.nvidia.com/en-us/consumer/graphics-cards/nvidia-geforce-rtx-5080/"
@@ -198,9 +201,21 @@ async def test_nvidia_never_reports_another_gpus_founders_edition():
     assert res.status == "unknown" and res.detail["sku"] == "NVGFT999"
 
 
-async def test_nvidia_without_gpu_or_sku_falls_through():
+@respx.mock
+async def test_nvidia_without_gpu_or_sku_is_never_generic_in_stock():
+    # www.nvidia.com sells nothing itself: its JSON-LD "InStock" at MSRP is marketing
     url = "https://www.nvidia.com/en-us/shield/"
-    assert await el.nvidia(url, ctx_for(url)) is None
+    html = ('<html><head><title>SHIELD TV</title><script type="application/ld+json">{"@type":"Product","name":"SHIELD TV",'
+            '"offers":{"@type":"Offer","price":"149.99","priceCurrency":"USD","availability":"https://schema.org/InStock"}}'
+            '</script></head><body><h1>SHIELD TV</h1><button>Buy Now</button></body></html>')
+    respx.get(url).mock(return_value=httpx.Response(200, text=html))
+    res = await el.nvidia(url, ctx_for(url))
+    assert res.status == "unknown" and res.status_text == el.NO_DIRECT_SALES and res.detail["info_only"] is True
+    # a marketplace page nothing could read: unknown, not the generic checker's "Add to Cart" guess
+    mp = "https://marketplace.nvidia.com/en-us/consumer/shield-tv/"
+    respx.get(mp).mock(return_value=httpx.Response(200, text=html))
+    res = await el.nvidia(mp, ctx_for(mp))
+    assert res.status == "unknown" and res.status_text == el.NV_UNREAD_TEXT
 
 
 # ============================================================ Micro Center

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import contextlib
 import contextvars
 import dataclasses
@@ -342,6 +343,15 @@ def classify(status: str, status_text: str | None, error: str | None, detail: di
     return "FAIL", f"Could not decide: {status_text or 'Unknown'}"
 
 
+def retired_verdict(retailer: Any, verdict: str, reason: str) -> tuple[str, str]:
+    """A dead link on a store the registry marks ``retired`` (it no longer sells online) is expected: INFO,
+    not STALE — there is no current link to update it to."""
+    why = getattr(retailer, "retired", None) if retailer is not None else None
+    if why and verdict in ("STALE", "FAIL"):
+        return "INFO", f"Store no longer sells online — {why}"
+    return verdict, reason
+
+
 # --------------------------------------------------------------------------- one check
 
 
@@ -458,6 +468,7 @@ async def probe_one(url: str, retailer_config: dict | None = None, generic_confi
     fetched_via = detail.get("fetched_via") or ("browser" if "browser" in vias else (vias[-1] if vias else None))
     verdict, reason = classify(result.get("status") or "unknown", result.get("status_text"), result.get("error"),
                                detail, check_entries, getattr(fetcher, "looks_like_challenge", None))
+    verdict, reason = retired_verdict(retailer, verdict, reason)
     expected = retailer.adapter.partition(":")[0] if retailer and retailer.adapter else "generic"
     if retailer and retailer.adapter:
         with contextlib.suppress(Exception):
@@ -629,7 +640,20 @@ def _md(s: Any, n: int = 160) -> str:
     return s if len(s) <= n else s[: n - 1] + "…"
 
 
-def write_report(results: list[dict], out_root: Path = DEFAULT_OUT, *, title: str = "Site probe report") -> tuple[Path, Path]:
+def sites_label(path: Path | None) -> str | None:
+    """How the report names the sample file a sweep used (sites.local.json = `discover --write` output)."""
+    if path is None:
+        return None
+    p = Path(path)
+    if p.name == LOCAL_SITES.name:
+        return f"{p.name} (from `discover --write`)"
+    if p.name == DEFAULT_SITES.name:
+        return f"{p.name} (shipped samples)"
+    return p.name
+
+
+def write_report(results: list[dict], out_root: Path = DEFAULT_OUT, *, title: str = "Site probe report",
+                 sites: Path | str | None = None) -> tuple[Path, Path]:
     out_root = Path(out_root)
     out_root.mkdir(parents=True, exist_ok=True)
     counts = {v: sum(1 for r in results if r.get("verdict") == v) for v in VERDICTS}
@@ -644,6 +668,7 @@ def write_report(results: list[dict], out_root: Path = DEFAULT_OUT, *, title: st
         "",
         f"Browser engine: {describe_browser(env.get('browser') or {})}.",
         "",
+        *([f"Sample URLs from: {sites if isinstance(sites, str) else sites_label(sites)}.", ""] if sites else []),
         f"**{len(results)} checks:** " + ", ".join(f"{counts[v]} {v}" for v in VERDICTS),
         "",
         "Verdicts: OK = definite in/out-of-stock answer; INFO = info page, no direct sales (not a failure); "
@@ -690,8 +715,9 @@ def write_report(results: list[dict], out_root: Path = DEFAULT_OUT, *, title: st
     md.write_text("\n".join(lines) + "\n", encoding="utf-8")
     js = out_root / "report.json"
     shareable = [{k: v for k, v in r.items() if k != "bundle_path"} for r in results]  # no local paths
-    js.write_text(json.dumps(_jsonable({"generated_at": now, "environment": env, "counts": counts,
-                                        "results": shareable}), indent=2), encoding="utf-8")
+    sites_name = (sites if isinstance(sites, str) else sites_label(sites)) if sites else None
+    js.write_text(json.dumps(_jsonable({"generated_at": now, "environment": env, "sites": sites_name,
+                                        "counts": counts, "results": shareable}), indent=2), encoding="utf-8")
     return md, js
 
 
@@ -956,7 +982,7 @@ class ProbeServer:
     def meta(self) -> dict:
         _, fetcher, registry = backend()
         try:
-            sites = load_sites(self.sites_path)
+            sites = load_sites_data(sites_doc_for(self.sites_path, must_exist=True))
         except ProbeError:
             sites = {}
         note = None if callable(getattr(fetcher, "recording", None)) else HOOK_MISSING_MSG
@@ -975,7 +1001,7 @@ class ProbeServer:
             raise ProbeError(f"Not an http(s) URL: {bad[0]}")
         entries = [{"key": None, "url": u, "retailer_config": {}, "note": None} for u in urls]
         if keys:
-            entries += select_entries(load_sites(self.sites_path), keys)
+            entries += select_entries(load_sites_data(sites_doc_for(self.sites_path, must_exist=True)), keys)
         if not entries:
             raise ProbeError("Nothing to run")
         opts = body.get("options") or {}
@@ -997,7 +1023,7 @@ class ProbeServer:
                 with self.lock:
                     self.session_results.extend(res)
                     all_results = list(self.session_results)
-                write_report(all_results, self.out_root)
+                write_report(all_results, self.out_root, sites=self.sites_path)
             except Exception as e:  # noqa: BLE001
                 with self.lock:
                     for i, r in enumerate(job["results"]):
@@ -1127,6 +1153,9 @@ DISCOVER_SEEDS: dict[str, list[str]] = {
     "nextwarehouse": ["https://www.nextwarehouse.com/sitemap.cfm", "https://www.nextwarehouse.com/categoryList.cfm"],
     "evga": ["https://www.evga.com/products/productlist.aspx.type=10.html"],
     "asus": ["https://shop.asus.com/us/"],
+    # AMD retired its amd.com/en/direct-buy/<id>/us pages: on 2026-09-29 they all redirected to the homepage of
+    # AMD's BigCommerce store, which links its HTML sitemap and the processor listing
+    "amd": ["https://shop-us-en.amd.com/sitemap.php", "https://shop-us-en.amd.com/processors/"],
 }
 # (all seed pages above were linked from the stores' own pages in the 2026-09-29 recordings; B&H and Home
 # Depot get theirs from the sample pages — B&H's stale product page linked 13 live products — and the
@@ -1136,6 +1165,7 @@ DISCOVER_SEEDS: dict[str, list[str]] = {
 DISCOVER_BASES: dict[str, list[str]] = {
     "nvidia": ["https://marketplace.nvidia.com"],
     "asus": ["https://shop.asus.com"],
+    "amd": ["https://shop-us-en.amd.com"],
 }
 # Stores with no useful public sitemap: straight to the seed pages.
 NO_SITEMAP = frozenset({"ebay", "stockx"})
@@ -1159,7 +1189,11 @@ POOL_TARGET = 80  # stop reading sitemaps once this many matching URLs are known
 # are considered. Keys missing here fall back to GENERIC_PRODUCT_PATTERN.
 _SHOPIFY = r"/products/[^/?#]+"
 PRODUCT_PATTERNS: dict[str, str] = {
-    "amd": r"/direct-buy/\d+/us|/products/[^?#]+\.html$",
+    # AMD's store (shop-us-en.amd.com, BigCommerce): /amd-ryzen-7-9800x3d-processor/-style one-segment slugs with
+    # a model number, not its sections; www.amd.com /products/ pages are spec sheets (INFO, never kept)
+    "amd": r"^/(?!(?:processors|graphics|adaptive-embedded-computing|gaming-personal-computing|amd-promotions|"
+           r"terms-of-purchase|amdonlinestorefaq|sitemap|compare|brands?)(?:[/.]|$))(?=[^/]*\d)[a-z0-9]+(?:-[a-z0-9]+){2,}/?$"
+           r"|/products/[^?#]+\.html$",
     # shop.asus.com/us/90mb1ir0-m0aay0-rog-strix-b850-f-gaming-wifi.html (part number + name), also under a
     # section (/us/rog/...): a name with a digit, never CMS pages (/us/id-me-page)
     "asus": r"^/us/(?:[a-z0-9-]+/)?[a-z0-9][a-z0-9-]*\d[a-z0-9-]*\.html$",
@@ -1522,26 +1556,45 @@ _LISTING_HINT = re.compile(
 _HTML_SITEMAP = re.compile(r"sitemap", re.I)
 
 
-def pick_listing_links(links: list[str], key: str, limit: int = 2) -> list[str]:
-    """Same-store category/listing pages worth opening when the homepage itself shows no products."""
+_UTILITY_PATH = re.compile(
+    r"about|contact|help|faq|support|polic|privacy|terms|legal|return|shipping|career|login|account|cart|checkout"
+    r"|order|track|store-?locator|affiliate|press|news|blog|warrant|rebate|financ|credit|subscribe|newsletter", re.I)
+
+
+def pick_listing_links(links: list[str], key: str, limit: int = 2, *, relaxed: bool = False) -> list[str]:
+    """Same-store category/listing pages worth opening when a page itself shows no products. ``relaxed`` (links
+    taken from an HTML sitemap or a listing page): query-string pages (NextWarehouse's .cfm?...) and pages
+    without a listing word count too, after those with one — never account / help / policy pages."""
     _, _, registry = backend()
-    out: list[str] = []
+    hinted: list[str] = []
+    other: list[str] = []
     for u in links:
         try:
             parts = urlsplit(u)
         except ValueError:
             continue
         r = registry.match_retailer(u)
-        if r is None or r.key != key or parts.query or _DENY_PATH.search(parts.path) \
-                or _FOREIGN_LOCALE.search(parts.path):
+        if r is None or r.key != key or _DENY_PATH.search(parts.path) or _FOREIGN_LOCALE.search(parts.path):
             continue
-        if _LISTING_HINT.search(parts.path) and not product_pattern(key).search(parts.path):
-            u2 = urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
-            if u2 not in out:
-                out.append(u2)
+        if product_pattern(key).search(parts.path) or (parts.query and product_pattern(key).search(
+                f"{parts.path}?{parts.query}")):
+            continue
+        if parts.query and not relaxed:
+            continue
+        u2 = urlunsplit((parts.scheme, parts.netloc, parts.path, parts.query if relaxed else "", ""))
+        if _LISTING_HINT.search(parts.path):
+            if u2 not in hinted:
+                hinted.append(u2)
+        elif relaxed and parts.path.strip("/") and not _UTILITY_PATH.search(f"{parts.path}?{parts.query}") \
+                and not generic_home(parts.path) and u2 not in other:
+            other.append(u2)
     # an HTML sitemap lists every product: open it first
-    out.sort(key=lambda u: 0 if _HTML_SITEMAP.search(urlsplit(u).path) else 1)
-    return out[:limit]
+    hinted.sort(key=lambda u: 0 if _HTML_SITEMAP.search(urlsplit(u).path) else 1)
+    return (hinted + other)[:limit]
+
+
+def generic_home(path: str) -> bool:
+    return bool(re.fullmatch(r"/?(?:[a-z]{2}[-_][a-z]{2}/?)?(?:index\.\w+|default\.\w+|home\.\w+)?", path or "/", re.I))
 
 
 def _origin(url: str) -> str:
@@ -1553,8 +1606,9 @@ async def collect_from_pages(net: Any, budget: Budget, base: str, key: str, pool
                              notes: list[str], seeds: list[str] | None = None, *, want: int = 12) -> int:
     """Open pages in the real browser and collect product links: ``seeds`` first (the store's own listing /
     search pages, then its current sample pages — a stale product page still links to live ones), then the
-    homepage; when the homepage shows none, up to two listing pages (an HTML sitemap first) linked from it.
-    Stops once ``want`` product links are known."""
+    homepage. A page that shows no product links has up to two listing pages it links to opened in turn (an
+    HTML sitemap first; one level down from a seed or the homepage — NextWarehouse's sitemap.cfm lists
+    categories, not products). Stops once ``want`` product links are known or the budget is spent."""
     start = len(pool)
 
     def harvest(links: list[str]) -> int:
@@ -1567,8 +1621,6 @@ async def collect_from_pages(net: Any, budget: Budget, base: str, key: str, pool
         return n
 
     async def page(url: str) -> str:
-        if not budget.left:
-            return ""
         budget.requests += 1
         try:
             html = await net.page(url)
@@ -1578,19 +1630,30 @@ async def collect_from_pages(net: Any, budget: Budget, base: str, key: str, pool
         budget.bytes += len(html or "")
         return html or ""
 
-    for seed in seeds or []:
-        if len(pool) - start >= want or not budget.left:
-            break
-        harvest(extract_links(await page(seed), _origin(seed)))
-    if len(pool) - start >= want:
-        return len(pool) - start
-    html = await page(f"{base}/")
-    links = extract_links(html, base)
-    found = harvest(links)
-    if not found and links:
-        for listing in pick_listing_links(links, key):
-            if harvest(extract_links(await page(listing), base)):
+    home = f"{base}/"
+    queue: list[tuple[str, int, bool]] = [(u, 0, True) for u in (seeds or [])]  # (url, depth, is_seed)
+    opened: set[str] = set()
+    home_queued = False
+    while budget.left and len(pool) - start < want:
+        if not queue:
+            if home_queued:
                 break
+            queue.append((home, 0, False))
+            home_queued = True
+        url, depth, is_seed = queue.pop(0)
+        if url in opened:
+            continue
+        opened.add(url)
+        html = await page(url)
+        origin = _origin(url)
+        links = extract_links(html, origin)
+        if harvest(links) or depth >= 1 or not links:
+            continue
+        # no products here: its listing pages next (before the homepage), relaxed for listing-type seeds
+        relaxed = is_seed and not product_pattern(key).search(urlsplit(url).path) or bool(
+            _LISTING_HINT.search(urlsplit(url).path))
+        children = [c for c in pick_listing_links(links, key, relaxed=relaxed) if c not in opened]
+        queue[0:0] = [(c, depth + 1, False) for c in children]
     if len(pool) == start:
         notes.append("pages: no product links found" if seeds else "homepage: no product links found")
     return len(pool) - start
@@ -1599,8 +1662,10 @@ async def collect_from_pages(net: Any, budget: Budget, base: str, key: str, pool
 # ---- candidates, verification, results
 
 def select_candidates(pool: list[tuple[str, str | None]], limit: int, seed: str = "") -> list[str]:
-    """Up to ``limit`` URLs to try: the most recently modified first (a fresh lastmod means the page is live),
-    shuffled among themselves (deterministically) so in- and out-of-stock items both turn up."""
+    """Up to ``limit`` URLs to try: sitemap URLs, the most recently modified first (a fresh lastmod means the
+    page is live), shuffled among themselves (deterministically) so in- and out-of-stock items both turn up;
+    and — for at least a third of the tries — URLs linked from the store's pages (no lastmod), which its menus
+    show today (a big sitemap of old items must not crowd them out)."""
     import random
 
     rng = random.Random(seed)
@@ -1616,7 +1681,18 @@ def select_candidates(pool: list[tuple[str, str | None]], limit: int, seed: str 
     top = [u for u, _ in dated[: max(limit * 4, limit)]]
     rng.shuffle(top)
     rng.shuffle(undated)
-    return (top + undated)[:limit]
+    share = min(len(undated), max(1, limit // 3) if limit >= 2 else 0)
+    head = top[: limit - share] if len(top) > limit - share else top
+    out = head + undated[: limit - len(head)]
+    return (out + [u for u in top if u not in out])[:limit]
+
+
+_DEAD_END_RE = re.compile(r"discontinued|no longer (?:available|sold|carried)|removed from sale|not available", re.I)
+
+
+def _dead_end(s: dict) -> bool:
+    return s.get("status") == "out_of_stock" and bool(_DEAD_END_RE.search(str(s.get("verdict_reason") or "")
+                                                                           + " " + str(s.get("status_text") or "")))
 
 
 def _definite(s: dict) -> bool:
@@ -1633,7 +1709,8 @@ def choose_verified(verified: list[tuple[str, dict]], per_store: int) -> list[di
         return {"url": url, "status": s.get("status"), "verdict": s.get("verdict"), "price": s.get("price"),
                 "definite": definite, "reason": s.get("verdict_reason")}
 
-    good = [(u, s) for u, s in verified if _definite(s)]
+    # a discontinued / no-longer-available item is a definite answer but a poor sample: it never comes back
+    good = sorted(((u, s) for u, s in verified if _definite(s)), key=lambda p: _dead_end(p[1]))
     chosen: list[tuple[str, dict]] = []
     ins = [p for p in good if p[1].get("status") == "in_stock"]
     outs = [p for p in good if p[1].get("status") == "out_of_stock"]
@@ -1650,7 +1727,7 @@ def choose_verified(verified: list[tuple[str, dict]], per_store: int) -> list[di
 
 
 def _enough(verified: list[tuple[str, dict]], per_store: int) -> bool:
-    good = [s for _, s in verified if _definite(s)]
+    good = [s for _, s in verified if _definite(s) and not _dead_end(s)]
     both = {"in_stock", "out_of_stock"} <= {s.get("status") for s in good}
     return len(good) >= per_store and (per_store < 2 or both or len(verified) >= 4)
 
@@ -1704,8 +1781,8 @@ async def discover_store(retailer: Any, samples: list[dict] | None, net: Any, *,
     """Find up to ``per_store`` real, current product URLs for one store (see the section comment)."""
     key = retailer.key
     res = StoreResult(key=key, name=retailer.name)
-    if key in DISCOVER_SKIP:
-        res.skipped = DISCOVER_SKIP[key]
+    if key in DISCOVER_SKIP or getattr(retailer, "retired", None):
+        res.skipped = DISCOVER_SKIP.get(key) or "no longer sells online (registry: retired)"
         return res
     check = check or verify_url
     t_end = clock() + time_cap
@@ -1713,28 +1790,37 @@ async def discover_store(retailer: Any, samples: list[dict] | None, net: Any, *,
     pool: dict[str, str | None] = {}
     sources: list[str] = []
 
+    async def sitemaps_phase(bases: list[str]) -> None:
+        for base in bases:
+            if await collect_from_sitemaps(net, budget, base, key, pool, res.notes,
+                                           extra_seeds=locale_sitemaps(base, samples)) \
+                    and "sitemap" not in sources:
+                sources.append("sitemap")
+
     async def gather_pool() -> None:
         bases = store_bases(retailer, samples)
         if key not in NO_SITEMAP:
-            for base in bases:
-                if await collect_from_sitemaps(net, budget, base, key, pool, res.notes,
-                                               extra_seeds=locale_sitemaps(base, samples)) \
-                        and "sitemap" not in sources:
-                    sources.append("sitemap")
+            # sitemaps get their own share of the time: through the browser (bot-walled stores) each file
+            # costs a page load, and on 2026-09-29 slow sitemaps used up the whole pool phase for B&H and
+            # PS Direct, so the pages their menus / stale samples link to were never opened
+            try:
+                await asyncio.wait_for(sitemaps_phase(bases), timeout=max(1.0, time_cap * 0.3))
+            except asyncio.TimeoutError:
+                res.notes.append("sitemaps: time share used up")
         if len(pool) < max_tries and key in SHOPIFY_KEYS:
             if await collect_from_shopify(net, budget, bases[0], key, pool):
                 sources.append("shopify")
-        if len(pool) < max_tries:
-            # the store's listing / search pages, then its current sample pages (stale ones included: they
-            # still link to live products), then the homepage — on their own, smaller budget
-            seeds = list(DISCOVER_SEEDS.get(key, []))
-            for smp in samples or []:
-                u = smp.get("url")
-                if u and u not in seeds and registry_key(u) == key:
-                    seeds.append(u)
-            if await collect_from_pages(net, Budget(max_requests=MAX_PAGE_REQUESTS), bases[0], key, pool, res.notes,
-                                        seeds):
-                sources.append("pages" if seeds else "homepage")
+        # the store's listing / search pages, then its current sample pages (stale ones included: they still
+        # link to live products), then the homepage — always, on their own budget: links a store's menus show
+        # today are fresher than a sitemap's (smaller budget when the sitemaps already gave plenty)
+        seeds = list(DISCOVER_SEEDS.get(key, []))
+        for smp in samples or []:
+            u = smp.get("url")
+            if u and u not in seeds and registry_key(u) == key:
+                seeds.append(u)
+        pages = MAX_PAGE_REQUESTS if len(pool) < max_tries else 2
+        if await collect_from_pages(net, Budget(max_requests=pages), bases[0], key, pool, res.notes, seeds):
+            sources.append("pages" if seeds else "homepage")
 
     try:
         await asyncio.wait_for(gather_pool(), timeout=max(1.0, time_cap * 0.6))
@@ -1816,9 +1902,13 @@ class LiveNet:
                     return resp.status_code, (body if resp.status_code < 400 else b"")
         if fetcher.browser_enabled():
             self._browser_hosts.add(host)
+            binary = urlsplit(url).path.lower().endswith(".gz")  # read as text, gzip bytes come back mangled
             try:
                 status, text, _ = await fetcher.browser_fetch_from_page(
-                    f"https://{host}/", url, accept="application/xml,text/xml,text/plain,*/*")
+                    f"https://{host}/", url, accept="application/xml,text/xml,text/plain,*/*",
+                    **({"binary": True} if binary else {}))
+                if binary:
+                    return status, base64.b64decode(text or "")
             except Exception:  # noqa: BLE001
                 return None, b""
             return status, text.encode("utf-8", "replace")
@@ -1863,17 +1953,73 @@ def _entry_cfg(e: Any) -> dict:
     return dict(e.get("retailer_config") or {}) if isinstance(e, dict) else {}
 
 
+def _sites_of(doc: Any) -> dict:
+    if not isinstance(doc, dict):
+        return {}
+    return doc.get("sites") if isinstance(doc.get("sites"), dict) else {k: v for k, v in doc.items() if not k.startswith("_")}
+
+
+# Sample URLs sites.json used to ship that are dead now (2026-09-29 sweeps): a sites.local.json written before
+# `_discovered` existed that still carries one for a store only copied the old samples there.
+REPLACED_SAMPLES = frozenset({
+    "https://www.amd.com/en/direct-buy/5335621300/us",
+    "https://www.bhphotovideo.com/c/product/1809440-REG/fujifilm_16821474_x100vi_digital_camera_silver.html",
+    "https://direct.playstation.com/en-us/buy-consoles/playstation5-pro-console.3009726",
+})
+
+
+def _entry_urls(entries: Any) -> set[str]:
+    entries = entries if isinstance(entries, list) else [entries]
+    return {e if isinstance(e, str) else str((e or {}).get("url") or "") for e in entries}
+
+
+def overlay_shipped(local: dict, shipped: dict) -> dict:
+    """The sites document a sweep / discover uses when sites.local.json exists: its stores, except those it only
+    holds a copy of the shipped samples for (no discovery found them: not in ``_discovered``; for an older local
+    file, one still carrying a REPLACED_SAMPLES link) — those, and stores new in sites.json, take the current
+    shipped entries, so fixed samples reach users who already have a local file. The shipped ``_README`` /
+    ``_comment`` are carried."""
+    sites = dict(_sites_of(local))
+    legacy = "_discovered" not in local
+    found = {k for k in local.get("_discovered") or [] if isinstance(k, str)}
+    for key, entries in _sites_of(shipped).items():
+        cur = sites.get(key)
+        if cur is None or (legacy and _entry_urls(cur) & REPLACED_SAMPLES) or (not legacy and key not in found):
+            sites[key] = entries
+    out = {k: v for k, v in local.items() if k.startswith("_")}
+    out.update({k: v for k, v in shipped.items() if k in ("_README", "_comment")})
+    out["sites"] = sites
+    return out
+
+
+def sites_doc_for(path: Path, *, must_exist: bool = False) -> dict:
+    """The sites document at ``path``; for the local file, overlaid with the shipped samples (overlay_shipped)."""
+    if must_exist and not Path(path).exists():
+        raise ProbeError(f"sites file not found: {path}")
+    doc = read_sites_doc(path)
+    if Path(path).resolve() == LOCAL_SITES.resolve() and DEFAULT_SITES.exists():
+        doc = overlay_shipped(doc, read_sites_doc(DEFAULT_SITES))
+    return doc
+
+
+def _sites_of(doc: Any) -> dict:
+    if not isinstance(doc, dict):
+        return {}
+    return doc.get("sites") if isinstance(doc.get("sites"), dict) else {k: v for k, v in doc.items() if not k.startswith("_")}
+
+
 def merge_sites(raw: dict, results: list[StoreResult], *, when: dt.date | None = None) -> dict:
     """A new sites document: discovered URLs replace each found store's sample URLs.
 
     Entries that carry a ``retailer_config`` (Target pickup near a ZIP, Micro Center store 151, Best Buy
     delivery...) keep that config and their note, moved onto discovered URLs; stores discovery skipped or
-    found nothing for keep their existing entries; every ``_`` key (``_README``...) is preserved and
-    ``_comment`` records the run."""
+    found nothing for keep their existing entries; every ``_`` key (``_README``...) is preserved,
+    ``_comment`` records the run (after the samples' own comment) and ``_discovered`` lists the stores whose
+    entries came from a discovery (see overlay_shipped)."""
     when = when or dt.date.today()
     doc = dict(raw) if isinstance(raw, dict) else {}
-    sites_in = doc.get("sites") if isinstance(doc.get("sites"), dict) else {k: v for k, v in doc.items() if not k.startswith("_")}
-    sites = dict(sites_in)
+    sites = dict(_sites_of(doc))
+    prev_found = {k for k in doc.get("_discovered") or [] if isinstance(k, str)}
     changed: list[str] = []
     for r in results:
         urls = [c["url"] for c in r.chosen]
@@ -1896,9 +2042,12 @@ def merge_sites(raw: dict, results: list[StoreResult], *, when: dt.date | None =
         sites[r.key] = new
         changed.append(r.key)
     out = {k: v for k, v in doc.items() if k.startswith("_")}
+    out["_discovered"] = sorted(prev_found | set(changed))
+    prior = re.sub(r"^Discovered \S+ by `probe\.py discover`.*?keep their previous samples\.\s*", "",
+                   str(doc.get("_comment") or ""), flags=re.S)
     out["_comment"] = (f"Discovered {when.isoformat()} by `probe.py discover` for {len(changed)} store(s): real product URLs "
                f"from sitemaps / the storefront, verified with the real checker (in-stock and sold-out mixed). "
-               f"Stores it finds nothing for keep their previous samples.")
+               f"Stores it finds nothing for keep their previous samples." + (f" {prior}" if prior else ""))
     out["sites"] = sites
     return out
 
@@ -2112,7 +2261,7 @@ def cmd_discover(a: argparse.Namespace) -> int:
         raise ProbeError("--per-store must be at least 1")
     a.sites_arg = getattr(a, "sites_arg", getattr(a, "sites", None))
     a.sites = effective_sites(a.sites_arg)
-    doc = read_sites_doc(a.sites)
+    doc = sites_doc_for(a.sites)
     backend()
     print(f"Discovering up to {a.per_store} product URL(s) per store, {a.discover_concurrency} store(s) at a time "
           f"(<= {a.store_timeout:.0f}s each). This can take several minutes…")
@@ -2150,11 +2299,11 @@ def cmd_sweep(a: argparse.Namespace) -> int:
     only = [k.strip() for k in (a.only or "").split(",") if k.strip()] or None
     a.sites = effective_sites(a.sites)
     if a.discover:
-        doc = read_sites_doc(a.sites)
+        doc = sites_doc_for(a.sites)
         entries: list[dict] = []
     else:
         doc = {}
-        entries = select_entries(load_sites(a.sites), only)
+        entries = select_entries(load_sites_data(sites_doc_for(a.sites, must_exist=True)), only)
     backend()
     print(f"Browser: {describe_browser(browser_info())}")
     done = [0]
@@ -2185,7 +2334,8 @@ def cmd_sweep(a: argparse.Namespace) -> int:
             await _shutdown_backend()
 
     results = asyncio.run(main())
-    md, js = write_report(results, a.out)
+    md, js = write_report(results, a.out, sites="probe-output/discovered.json (sweep --discover)" if a.discover
+                          else a.sites)
     counts = {v: sum(1 for r in results if r.get("verdict") == v) for v in VERDICTS}
     print("\n" + ", ".join(f"{n} {v}" for v, n in counts.items()))
     print(f"Report: {_rel(md)}  (+ {_rel(js)})")

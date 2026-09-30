@@ -20,6 +20,8 @@ class Retailer:
     seller_filter: bool = False  # can tell first-party from marketplace sellers
     browser: bool = False  # known to need a real browser
     note: str | None = None
+    # why the store no longer sells online (its product links 404 / land on a non-store page), or None
+    retired: str | None = None
 
     @property
     def domain(self) -> str:
@@ -52,7 +54,9 @@ RETAILERS: list[Retailer] = [
     R("bandai", "Bandai Namco", ("p-bandai.com", "bandainamcoent.com"), "games:bandai", "#1f1f1f"),
     R("bestbuy", "Best Buy", ("bestbuy.com",), "bestbuy:check", "#0046be", pickup=True, seller_filter=True),
     R("canon", "Canon", ("usa.canon.com", "shop.usa.canon.com"), None, "#cc0000"),
-    R("consutronix", "Consutronix", ("consutronix.com",), None, "#dc2626"),
+    R("consutronix", "Consutronix", ("consutronix.com",), None, "#dc2626",
+      retired="consutronix.com no longer runs an online store: every product link answers the web host's own "
+              "'404 Page Not Found' page and no product pages could be found (2026-09-29 probe runs)"),
     R("costco", "Costco", ("costco.com",), "bigbox:costco", "#e31837", browser=True),
     R("dell", "Dell", ("dell.com",), "electronics:dell", "#007db8", browser=True),
     R("disney", "Disney", ("disneystore.com", "shopdisney.com"), None, "#113ccf"),

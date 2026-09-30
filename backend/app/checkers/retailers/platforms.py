@@ -545,8 +545,30 @@ async def check_woocommerce(url: str, html: str, final_url: str, headers: dict, 
 
 
 def _data_price(scope: Tag | BeautifulSoup) -> str | None:
-    el = scope.select_one("[data-price-type=finalPrice][data-price-amount]") or scope.select_one("[data-price-amount]")
-    return str(el.get("data-price-amount")) if isinstance(el, Tag) and el.get("data-price-amount") else None
+    """The final price Magento renders. A zero amount is no price: a configurable product with no option
+    picked renders "Starting at $0.00" (eshop.asus.com, 2026-09-29) while its JSON-LD has the real one."""
+    for el in scope.select("[data-price-type=finalPrice][data-price-amount]") + scope.select("[data-price-amount]"):
+        amt = str(el.get("data-price-amount") or "").strip()
+        try:
+            if amt and float(amt) > 0:
+                return amt
+        except ValueError:
+            continue
+    return None
+
+
+_LD_AVAIL_RE = re.compile(r'"availability"\s*:\s*"(?:https?:\\?/\\?/schema\.org\\?/)?(\w+)"', re.I)
+_MAGENTO_OOS_SEL = ".product-info-main .action.alert, .product-info-main .config-notify, .product-info-main .stock.unavailable"
+
+
+def _magento_button_is_static(soup: BeautifulSoup, html: str) -> bool:
+    """A disabled #product-addtocart-button that says nothing: some themes (eshop.asus.com) render it
+    disabled for every product until their JS runs. It is only static there when the page shows no
+    "Notify me" / out-of-stock markup and all its JSON-LD offers say InStock."""
+    if soup.select_one(_MAGENTO_OOS_SEL) is not None:
+        return False
+    avail = {a.lower() for a in _LD_AVAIL_RE.findall(html)}
+    return bool(avail) and avail <= {"instock", "limitedavailability", "onlineonly"}
 
 
 async def check_magento(url: str, html: str, final_url: str, headers: dict, rcfg: RetailerConfig | None) -> CheckResult | None:
@@ -567,6 +589,8 @@ async def check_magento(url: str, html: str, final_url: str, headers: dict, rcfg
         btn = soup.select_one("#product-addtocart-button")
         if isinstance(btn, Tag):
             dis = btn.has_attr("disabled") or "disabled" in " ".join(state_classes(btn))
+            if dis and _magento_button_is_static(soup, html):
+                return None  # the structured data decides (generic checker)
             verdict, st = ("out", "Out of stock") if dis else ("in", "In stock")
             sig = f"magento: add-to-cart button ({'disabled' if dis else 'enabled'})"
     if verdict is None:

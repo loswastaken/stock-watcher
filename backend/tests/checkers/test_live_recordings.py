@@ -496,8 +496,76 @@ async def test_nvidia_marketplace_no_capture_uses_rendered_page(monkeypatch):
     assert res.title == "NVIDIA GeForce RTX 5090" and res.price == "$1,999.00"
     html = body("nvidia/marketplace_rtx5090_browser.html")
     shown = html.replace('style="display: none;" id="form-action-addToCart"',
-                         'style="display: block;" id="form-action-addToCart"')
+                         'style="display: block;" id="form-action-addToCart"').replace(" stock-grey-out", "")
     assert shown != html and electronics.nv_dom_state(shown)[0] == "in"
+
+
+# 2026-09-29 19:53 sweep (sites.local.json from `discover --write`): partner cards on the marketplace. The PNY
+# page's JSON-LD mpn ("VCG5060T8DFXPB1-O") has a dash, no FE SKU exists for a Ti, so the adapter returned None
+# and the generic checker called it in stock from a bare "Add to Cart" button (no price). The MSI page got
+# the RTX 5080 *Founders Edition* SKU guessed for it.
+NV_PNY = ("https://marketplace.nvidia.com/en-us/consumer/graphics-cards/"
+          "pny-geforce-rtx-5060-ti-8gb-overclocked-dual-fan-graphics-card/")
+NV_MSI = "https://marketplace.nvidia.com/en-us/consumer/graphics-cards/msi-geforce-rtx-5080-16g-ventus-3x-oc-black/"
+
+
+def _nv_page(monkeypatch, html: str) -> list:
+    calls: list = []
+
+    async def fake_browser_fetch(url, *, capture=None):
+        calls.append(url)
+        return fetcher.FetchResult(url=url, status=200, via_browser=True, captured=[], text=html)
+
+    monkeypatch.setenv("ENABLE_BROWSER", "true")
+    monkeypatch.setattr(fetcher, "browser_fetch", fake_browser_fetch)
+    electronics._nv_page_cache.clear()
+    return calls
+
+
+async def test_nvidia_partner_card_sold_by_marketplace_reads_the_rendered_page(monkeypatch):
+    _nv_page(monkeypatch, body("nvidia/marketplace_pny_5060ti_browser.html"))
+    with replay({NV_SEARCH: {"body": "nvidia/search_rtx5060ti.json"}, NV_INV: {"status": 403, "body": ""}}) as http:
+        res = await check(NV_PNY)
+    assert res.status == "in_stock" and res.detail["adapter"] == "nvidia"
+    assert res.detail["matched"] == "rendered page: #form-action-addToCart shown (feinventory is_active)"
+    assert res.price == "$499.99" and res.title == "PNY GeForce RTX 5060 Ti 8GB Overclocked Dual Fan Graphics Card"
+    assert res.detail["sku"] == "VCG5060T8DFXPB1-O" and res.detail["fulfilled_by"] == "PNY"
+    assert res.detail["partner_card"] is True and not res.detail.get("sku_guessed")
+    assert not any("feinventory" in c or "api.nvidia.partners" in c for c in http)  # never the FE's answer
+
+
+async def test_nvidia_partner_card_is_never_a_generic_in_stock(monkeypatch):
+    html = body("nvidia/marketplace_pny_5060ti_browser.html")
+    # the same page before / without its inventory answer: the button greyed out, no OOS or retailer box
+    grey = html.replace('style="display: block;" data-wait-message="Checkout" class="productView__button--add-to-cart '
+                        'button button--primary basic__button clearfix cta-button js-add-button"',
+                        'style="display: block;" data-wait-message="Checkout" class="productView__button--add-to-cart '
+                        'button button--primary basic__button clearfix cta-button stock-grey-out"')
+    assert grey != html
+    assert generic.analyze(grey, NV_PNY).status == "in_stock"  # what the generic checker would have said
+    _nv_page(monkeypatch, grey)
+    with replay({NV_SEARCH: {"body": "nvidia/search_rtx5060ti.json"}}):
+        res = await check(NV_PNY)
+    assert res.status == "unknown" and res.status_text == electronics.NV_UNREAD_TEXT
+    assert res.detail["adapter"] == "nvidia" and res.detail["generic_said"] == "in_stock"
+
+
+async def test_nvidia_marketplace_blocked_without_browser_is_not_in_stock():
+    akamai = "<HTML><HEAD><TITLE>Access Denied</TITLE></HEAD><BODY><H1>Access Denied</H1></BODY></HTML>"
+    electronics._nv_page_cache.clear()
+    with replay({NV_SEARCH: {"body": "nvidia/search_rtx5060ti.json"}, NV_PNY: {"status": 403, "body": akamai}}):
+        res = await check(NV_PNY)
+    assert res.status != "in_stock"
+
+
+async def test_nvidia_partner_card_retailer_only_never_gets_the_fe_sku(monkeypatch):
+    _nv_page(monkeypatch, body("nvidia/marketplace_msi_5080_browser.html"))
+    with replay({NV_SEARCH: {"body": "nvidia/search_rtx5080.json"}, NV_INV: {"body": _inv("true")}}) as http:
+        res = await check(NV_MSI)
+    assert res.status == "out_of_stock" and res.status_text == "Retailers only (check availability)"
+    assert res.detail["sku"] == "G5080-16V3CB" and "sku_guessed" not in res.detail
+    assert res.price == "$1,679.99" and res.detail["seller"] is None
+    assert not any("NVGFT580" in c for c in http)
 
 
 # =========================================================================== 2026-09-29 18:0x headed-Chrome run
@@ -725,3 +793,108 @@ async def test_target_shipping_out_but_on_the_shelf_nearby(_target_state):
     assert res.status == "out_of_stock", (res.status_text, res.error, calls.missing)
     assert res.status_text == "Out of stock for shipping (only same-day delivery / store pickup)"
     assert res.price == "$11.39" and res.detail["other_fulfillment"] == ["same-day delivery", "store pickup"]
+
+
+# =========================================================================== 2026-09-29 19:53 sweep audit
+# (headed Chrome on the user's Mac, sample URLs from sites.local.json) — suspicious OK results checked
+# against their recordings.
+
+
+async def test_asus_configurable_product_price_is_not_starting_at_zero():
+    # "Starting at $0.00" (data-price-amount="0") on a configurable laptop; the JSON-LD offer has $4,299.99
+    url = "https://eshop.asus.com/us/rog-strix-scar-18-2026-gaming-laptop.html"
+    with replay({url: {"body": "asus/scar18_configurable_oos.html"}}):
+        res = await check(url)
+    assert res.status == "out_of_stock" and res.price == "$4,299.99"
+    assert "Notify me" in body("asus/scar18_configurable_oos.html")  # really sold out
+
+
+async def test_asus_disabled_add_to_cart_is_static_markup_not_stock():
+    # eshop.asus.com renders #product-addtocart-button disabled for every product until its JS runs; this one's
+    # JSON-LD says InStock and the page has no "Notify me" / out-of-stock markup (the probe said out of stock)
+    url = "https://eshop.asus.com/us/90nx0631-m003t0-asus-chromebook-cm14-cm1402c.html"
+    html = body("asus/cm1402c_in_stock.html")
+    assert 'id="product-addtocart-button" disabled' in html
+    with replay({url: {"body": "asus/cm1402c_in_stock.html"}}):
+        res = await check(url)
+    assert res.status == "in_stock" and res.price == "$299.99"
+
+
+@pytest.mark.parametrize("url,fixture,price", [
+    ("https://www.homedepot.com/p/American-Standard-Rumson-2-Piece-1-28-GPF-Single-Flush-Elongated-Toilet-in-White-"
+     "Seat-is-Included-719AA101-020/323484855", "homedepot/pdp_323484855_toilet.html", "$159.00"),
+    ("https://www.homedepot.com/p/Fire-TV-Stick-HD-Newest-Model-Free-and-Live-TV-Alexa-Voice-Remote-Powered-by-the-"
+     "TV-Effortless-Setup-B0DJGDC3BD/341824384", "homedepot/pdp_341824384_firetv.html", "$15.99"),
+])
+async def test_homedepot_price_from_json_ld_offer_without_availability(url, fixture, price):
+    # the JSON-LD Offer has a price but no availability: the price was dropped with it. Both really are in stock
+    # ("22 in stock" for pickup / "2,846 available" for delivery on the recorded pages)
+    with replay({url: {"body": fixture}}):
+        res = await check(url)
+    assert res.status == "in_stock" and res.price == price
+
+
+async def test_dell_price_shown_without_structured_data():
+    # the monitor's page has no priced JSON-LD, only the rendered "Dell Price $419.99"
+    url = "https://www.dell.com/en-us/shop/monitors/apd/dell-34-plus-usb-c-monitor-s3425dw/s3425dw_monitor/-"
+    with replay({url: {"body": "dell/apd_s3425dw_monitor.html"}}):
+        res = await check(url)
+    assert res.status == "in_stock" and res.price == "$419.99"
+
+
+async def test_verizon_full_retail_price():
+    url = "https://www.verizon.com/smartphones/apple-iphone-17-pro/"
+    with replay({url: {"body": "verizon/iphone17pro_rendered.html"}}):
+        res = await check(url)
+    assert res.status == "in_stock" and res.status_text == "In stock (Ships between Wed, Sep 30 - Tue, Oct 6)"
+    assert res.price == "$1,099.99"  # "Pay in full today, $1,099.99" — the 256 GB model's retail price
+
+
+@pytest.mark.parametrize("tcin,fixture,seller", [
+    ("90253281", "target/pdp_client_90253281_marketplace.json", "The R Group"),
+    ("1008318553", "target/pdp_client_1008318553_marketplace.json", "232 Inc."),
+])
+async def test_target_plus_items_are_third_party(_target_state, tcin, fixture, seller):
+    # both "Third-party sellers only" verdicts are right: pdp_client says fulfillment.is_marketplace = true,
+    # relationship_type_code "SA", product_vendors = the Target Plus partner
+    data = json.loads(body(fixture))
+    assert "is_marketplace\":true" in body(fixture).replace(" ", "")
+    target._key_cache.update(key="9f36aeafbe60771e321a7cc95a78140772ab3e96", exp=9e18,
+                             loc={"store_id": "3363", "zip": "02122", "state": "MA"})
+    with replay({REDSKY + "pdp_client_v1*": {"body": data},
+                 REDSKY + "product_fulfillment_v1*": {"body": TARGET_FULFILLMENT_IN}}):
+        res = await check(f"https://www.target.com/p/-/A-{tcin}")
+    assert res.status == "out_of_stock" and res.status_text == "Third-party sellers only"
+    assert res.detail["seller"] == seller and res.detail["third_party"] is True
+
+
+async def test_walmart_marketplace_only_item():
+    # QQV Official Store sells it (sellerName on every offer); Walmart.com isn't a seller: right verdict
+    url = ("https://www.walmart.com/ip/QQV-PS5-Stand-Cooling-Station-For-PS5-Slim-and-Disc-Digital-editions-Console-"
+           "PS5-Accessories/1098986296")
+    with replay({url: {"body": "walmart/qqv_ps5_stand_marketplace.html"}}):
+        res = await check(url)
+    assert res.status == "out_of_stock" and res.status_text == "Third-party sellers only"
+    assert res.detail["seller"] == "QQV Official Store" and res.price is None
+
+
+async def test_psdirect_code_less_menu_link_reads_the_page_code():
+    # PS Direct's menus (recorded 404 page, 2026-09-29) link code-less pages such as .../playstation5-pro-console-2-tb.
+    # Synthetic page in the recorded markup's shape (data-product-code on the product component) and a
+    # synthetic productList answer in the recorded API's shape.
+    from app.checkers.retailers import games
+
+    real_404 = body("psdirect/page_not_found_404.html")
+    assert 'data-product-code=""' in real_404 and games.psdirect_page_code(real_404) is None  # empty data-product-code="" components don't count
+    url = "https://direct.playstation.com/en-us/buy-consoles/playstation5-pro-console-2-tb"
+    page = ('<html><head><title>PS5 Pro Console 2TB</title></head><body><h1>PlayStation 5 Pro Console</h1>'
+            '<div class="productHero-component" data-product-code="1000045123" data-products-url="https://api.direct.'
+            'playstation.com/commercewebservices/ps-direct-us/users/:userId/products/productList?fields=BASIC&amp;'
+            'productCodes="></div></body></html>')
+    api = {"products": [{"code": "1000045123", "name": "PlayStation 5 Pro Console", "price": {"value": 749.99},
+                         "stock": {"stockLevelStatus": "outOfStock"}}]}
+    with replay({url: {"body": page}, "https://api.direct.playstation.com/commercewebservices/*": {"body": api}}) as calls:
+        res = await check(url)
+    assert res.status == "out_of_stock" and res.price == "$749.99" and res.detail["code_from"] == "page"
+    assert any("productCodes=1000045123" in c for c in calls)
+    assert games.psdirect_page_code(page.replace("</body>", '<div data-product-code="1000099999"></div></body>')) is None

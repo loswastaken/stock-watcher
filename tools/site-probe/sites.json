@@ -1,9 +1,10 @@
 {
   "_README": "SAMPLE product URLs, one or more per supported store (keys match backend/app/checkers/retailers/registry.py). They were written without live access to the sites, so some will be stale, delisted or redirect: run `./run.sh discover --write` to refresh them with current product URLs, or replace any that 404 or point at the wrong product with a current product page you care about (a mix of in-stock and sold-out items is ideal). Each entry is either a URL string or {\"url\": ..., \"retailer_config\": {...}, \"note\": ...}; retailer_config accepts fulfillment (delivery|pickup|any), zip, radius_miles, store_id, official_only, condition.",
+  "_comment": "2026-09-30: AMD's direct-buy pages are retired (AMD now sells from its BigCommerce store, shop-us-en.amd.com; discover looks there). Consutronix no longer sells online (registry `retired`: INFO, not STALE). NextWarehouse's sample is a placeholder item that 404s: run `discover --write` for real ones.",
   "sites": {
     "amd": [
-      "https://www.amd.com/en/direct-buy/5335621300/us",
-      "https://www.amd.com/en/products/processors/desktops/ryzen/9000-series/amd-ryzen-7-9800x3d.html"
+      {"url": "https://www.amd.com/en/products/processors/desktops/ryzen/9000-series/amd-ryzen-7-9800x3d.html",
+       "note": "a spec page (INFO). AMD retired its amd.com/en/direct-buy/<id>/us links (they redirect to the homepage of its store, shop-us-en.amd.com): `discover --write` finds store items"}
     ],
     "asus": ["https://shop.asus.com/us/90mb1ir0-m0aay0-rog-strix-b850-f-gaming-wifi.html"],
     "acegraphics": ["https://acegraphicscards.com/products/msi-geforce-rtx-5070-ventus-2x-oc-12g"],
@@ -13,7 +14,10 @@
       "https://www.amazon.com/PlayStation-5-Pro-Console/dp/B0DGY63Z2H"
     ],
     "antonline": ["https://www.antonline.com/Sony/Electronics/Gaming_Devices/Gaming_Consoles/1520631"],
-    "bhphoto": ["https://www.bhphotovideo.com/c/product/1809440-REG/fujifilm_16821474_x100vi_digital_camera_silver.html"],
+    "bhphoto": [
+      {"url": "https://www.bhphotovideo.com/c/product/49510-REG/Sony_MDR_7506_MDR_7506_Headphone.html",
+       "note": "linked from B&H's own pages on 2026-09-29 (item 1809440, the old X100VI sample, now shows an open-box iPod)"}
+    ],
     "bjs": ["https://www.bjs.com/product/nintendo-switch-2-console/3000000000005530939"],
     "bandai": ["https://p-bandai.com/us/item/N2780424001001"],
     "bestbuy": [
@@ -25,7 +29,10 @@
        "note": "delivery; store pickup needs BESTBUY_API_KEY (add {\"fulfillment\": \"pickup\", \"zip\": ...} when you have one)"}
     ],
     "canon": ["https://www.usa.canon.com/shop/p/imageformula-r10-portable-document-scanner"],
-    "consutronix": ["https://consutronix.com/products/gigabyte-geforce-rtx-5080-windforce-oc-sff-16g"],
+    "consutronix": [
+      {"url": "https://consutronix.com/products/gigabyte-geforce-rtx-5080-windforce-oc-sff-16g",
+       "note": "retired in the registry: consutronix.com no longer runs an online store (every link answers the web host's 404 page), so the probe reports INFO"}
+    ],
     "costco": ["https://www.costco.com/nintendo-switch-2-console-bundle.product.4000362974.html"],
     "dell": ["https://www.dell.com/en-us/shop/laptop-computers/spd/alienware16auroraac16250"],
     "disney": ["https://www.disneystore.com/stitch-plush-lilo-stitch-medium-15-412304478404.html"],
@@ -80,7 +87,10 @@
     "officedepot": ["https://www.officedepot.com/a/products/9690143/Nintendo-Switch-2-Console/"],
     "popmart": ["https://www.popmart.com/us/products/1123/THE-MONSTERS---Big-into-Energy-Series-Vinyl-Plush-Pendant-Blind-Box"],
     "playasia": ["https://www.play-asia.com/mario-kart-world/13/70gk5t"],
-    "psdirect": ["https://direct.playstation.com/en-us/buy-consoles/playstation5-pro-console.3009726"],
+    "psdirect": [
+      {"url": "https://direct.playstation.com/en-us/buy-consoles/playstation5-pro-console-2-tb",
+       "note": "the link PS Direct's own menu carried on 2026-09-29; product code .3009726 is no longer valid"}
+    ],
     "pokemoncenter": ["https://www.pokemoncenter.com/product/10-10185-101/pokemon-tcg-scarlet-and-violet-prismatic-evolutions-elite-trainer-box"],
     "qvc": ["https://www.qvc.com/Nintendo-Switch-2-Console.product.E312345.html"],
     "robertscamera": ["https://www.robertscamera.com/fujifilm-x100vi-digital-camera-silver"],

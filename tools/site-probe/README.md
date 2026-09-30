@@ -81,7 +81,7 @@ was fetched (http, curl or browser), duration, detection signals and a verdict:
 | Verdict | Meaning |
 |---|---|
 | **OK** | The checker got a definite in-stock or out-of-stock answer. Compare it with what you see on the site. |
-| **INFO** | An info page that sells nothing itself ("No direct sales on this page", NVIDIA's www.nvidia.com GPU pages: "Info page — watch the NVIDIA Marketplace listing instead"). Not a failure. |
+| **INFO** | An info page that sells nothing itself ("No direct sales on this page", NVIDIA's www.nvidia.com GPU pages: "Info page — watch the NVIDIA Marketplace listing instead"), or a dead link on a store the registry marks `retired` ("Store no longer sells online"). Not a failure. |
 | **STALE** | The link is stale: 404 / "Listing not found" / "Product page not found", a redirect to the homepage or a non-product page, or the page now shows a different product. A failure: update the link (`discover --write`). Never reported as BLOCKED, even when a challenge page or 403 came up on the way. |
 | **FAIL** | Error, or the page loaded but the checker couldn't tell. |
 | **BLOCKED** | Bot protection (captcha, Akamai, PerimeterX, Cloudflare, …) stopped it. |
@@ -96,16 +96,20 @@ the checks, so bot walls you have passed stay passed. Per store:
 1. `robots.txt` `Sitemap:` lines, plus `/sitemap.xml`, `/sitemap_index.xml` and `/<locale>/sitemap.xml` for
    the samples' locale (`/us/`, `/en-us/`). Indexes are followed (product / pdp sitemaps first, `.xml.gz`
    supported) within a cap on requests and bytes. When plain HTTP is blocked (403, a challenge, or an HTML
-   bot wall from a store that needs the browser), the sitemap is fetched through the real browser.
+   bot wall from a store that needs the browser), the sitemap is fetched through the real browser. Sitemaps get
+   at most 30% of the store's time, so step 3 always gets its turn.
 2. Shopify stores also try `/products.json`.
-3. Failing that, pages in the browser (up to 6): the store's own listing / search pages (`DISCOVER_SEEDS`:
-   eBay's Buy-It-Now search for `nintendo switch 2` and `/deals`, StockX category pages, the NVIDIA
-   Marketplace GPU list, PS Direct's HTML sitemap / accessories, NextWarehouse's `sitemap.cfm`, EVGA's
-   product list), then the current sample pages — even a stale product page links to live products — then
-   the homepage and up to two listing pages it links to (an HTML sitemap first).
+3. Then pages in the browser (up to 6; 2 when the sitemaps already gave plenty): the store's own listing /
+   search pages (`DISCOVER_SEEDS`: eBay's Buy-It-Now search for `nintendo switch 2` and `/deals`, StockX
+   category pages, the NVIDIA Marketplace GPU list, PS Direct's HTML sitemap / accessories, NextWarehouse's
+   `sitemap.cfm`, EVGA's product list, AMD's store at shop-us-en.amd.com), then the current sample pages —
+   even a stale product page links to live products — then the homepage. A page with no product links has up
+   to two listing pages it links to opened next (an HTML sitemap first; category links with a query string
+   count when they come from a listing page). Links found on pages get at least a third of the tries.
 4. Links are filtered with that store's product-URL pattern (`PRODUCT_PATTERNS` in `probe.py`; US locale only,
    no protection plans / warranties / gift cards; NVIDIA only on marketplace.nvidia.com), then up to
-   6 candidates (`--max-tries`) are checked; only definite in-stock / sold-out answers are kept. If a store
+   6 candidates (`--max-tries`) are checked; only definite in-stock / sold-out answers are kept (a
+   discontinued / no-longer-available item only when nothing better turned up). If a store
    only ever answers BLOCKED / QUEUE, those URLs are kept and shown with a `?`. A URL that is FAIL, STALE or
    INFO is never kept.
 
@@ -116,7 +120,10 @@ and a time cap of 90 s per store (`--store-timeout`).
 Without `--write` the result goes to `probe-output/discovered.json` (same format as `sites.json`; try it with
 `sweep --sites probe-output/discovered.json`). With `--write`, the result is saved to `sites.local.json` (git-ignored, so `git pull` never conflicts; `sweep` and `serve` use it whenever it exists — delete it to go back to the shipped `sites.json`): entries with a
 `retailer_config` (Target pickup near a ZIP, Micro Center store 151, ...) keep their config and note on a new
-URL, stores where nothing was found keep their old samples, and `_README` / `_comment` are kept.
+URL, stores where nothing was found keep their old samples, and `_README` / `_comment` are kept. The file
+lists the stores discovery found (`_discovered`); for every other store, `sweep`, `serve` and `discover` use
+the current `sites.json` entries, so a sample fixed in `sites.json` reaches you after `git pull` even with a
+local file. Stores the registry marks `retired` (no longer selling online, e.g. Consutronix) are skipped.
 `sweep --discover` runs a discovery (without writing `sites.json`) and sweeps what it found.
 
 `sites.json` has **sample** URLs for every supported store. They were written without being able to open
@@ -139,7 +146,7 @@ Every check creates `probe-output/<timestamp>-<store>/` containing:
   (`http`/`curl`/`browser`), response headers and timing.
 - `requests/NNN-<host>.html|json|txt`: the response bodies, up to 2 MB each.
 
-`sweep` also writes `probe-output/report.md` (the browser engine and mode in its header, then a table: store, URL,
+`sweep` also writes `probe-output/report.md` (the browser engine and mode and the sample file used — `sites.local.json` or `sites.json` — in its header, then a table: store, URL,
 status, adapter, price, verdict, error) and `report.json`.
 
 ## Privacy

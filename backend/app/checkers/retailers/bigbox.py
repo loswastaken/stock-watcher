@@ -566,7 +566,28 @@ async def verizon(url: str, ctx: AdapterContext) -> CheckResult | None:
     h1 = soup_of(fetched.text).find("h1")
     if h1 is not None and clean_text(h1.get_text(" ", strip=True)):
         res.title = clean_text(h1.get_text(" ", strip=True))  # the <title> is "Buy New …: Price, Colors, Specs"
+    if not res.price:
+        price = verizon_price(fetched.text)
+        if price:
+            res.price = price
+            res.detail["price_value"] = price_value(price)
     return override(res, verdict, text, label="In stock" if verdict == "in" else None, matched=why)
+
+
+_VZ_FRP_RES = (
+    # the selected configuration's "Pay in full today, $1,099.99" option (2026-09-29 recording)
+    re.compile(r'aria-label="Pay in full today,\s*(\$[\d,]+(?:\.\d{2})?)"', re.I),
+    re.compile(r"\bFull retail price\s+(\$[\d,]+(?:\.\d{2})?)", re.I),
+)
+
+
+def verizon_price(html: str) -> str | None:
+    """The device's full retail price. The page has no structured price, only monthly payment options."""
+    for rx in _VZ_FRP_RES:
+        m = rx.search(html or "")
+        if m and price_value(m.group(1)):
+            return m.group(1)
+    return None
 
 
 _MACYS_LINK_RE = re.compile(r"https?://(?:www\.)?macys\.com/shop/product/[^\"'\s<>]*?ID=\d+[^\"'\s<>]*", re.IGNORECASE)

@@ -241,7 +241,12 @@ def _nv_status(s: Any) -> str | None:
 
 NV_INFO_TEXT = "Info page — watch the NVIDIA Marketplace listing instead"
 _NV_FE_SKU_RE = re.compile(r"\bNVGFT\d{3}[A-Z0-9]*\b")
-_NV_MPN_RE = re.compile(r'"mpn"\s*:\s*"([A-Z0-9_]{5,30})"')
+_NV_MPN_RE = re.compile(r'"mpn"\s*:\s*"([A-Z0-9_][A-Z0-9_-]{4,39})"')
+_NV_UPC_RE = re.compile(r"""\bvar\s+upc\s*=\s*["'](\d{8,14})(?:_[A-Z]{2})?["']""")
+# a Founders Edition listing: .../nvidia-geforce-rtx-5090/ (or a bare .../rtx-4080-super/); partner cards are
+# .../pny-geforce-rtx-5060-ti-8gb-.../, .../msi-geforce-rtx-5080-16g-.../
+_NV_FE_SLUG_RE = re.compile(r"^(?:nvidia-)?(?:geforce-)?rtx[-_]?\d{4}(?:[-_](?:ti|super))*$", re.I)
+NV_UNREAD_TEXT = "Couldn't read NVIDIA Marketplace stock"
 _nv_page_cache: dict[str, tuple[float, dict]] = {}
 NV_PAGE_TTL = 12 * 3600
 
@@ -251,6 +256,15 @@ def _nv_is_store_host(url: str) -> bool:
     return host.startswith(("marketplace.", "store.")) and host.endswith("nvidia.com")
 
 
+def _nv_fe_page(url: str) -> bool:
+    """A www.nvidia.com GPU page or an NVIDIA Marketplace Founders Edition listing (never a partner card's
+    page: that one must not report the FE's stock)."""
+    if not _nv_is_store_host(url):
+        return True
+    slug = urlsplit(url).path.rstrip("/").rsplit("/", 1)[-1]
+    return bool(_NV_FE_SLUG_RE.match(slug))
+
+
 def _nv_guess_fe_sku(gpu: str | None) -> str | None:
     """Founders Edition SKUs follow NVGFT + model digits (RTX 5090 → NVGFT590, as the marketplace page's
     JSON-LD ``mpn`` shows). Only plain models have an FE; Ti/Super guesses are not made."""
@@ -258,16 +272,22 @@ def _nv_guess_fe_sku(gpu: str | None) -> str | None:
     return f"NVGFT{m.group(1)}{m.group(2)}" if m else None
 
 
-def _nv_info_from_html(html: str, url: str, final_url: str | None = None) -> dict:
+def _nv_info_from_html(html: str, url: str, final_url: str | None = None, *, rendered: bool = False) -> dict:
     info: dict[str, Any] = {}
     m = _NV_MPN_RE.search(html) or _NV_FE_SKU_RE.search(html)
     if m:
         info["sku"] = (m.group(1) if m.re is _NV_MPN_RE else m.group(0)).upper()
+    m = _NV_UPC_RE.search(html)
+    if m:
+        info["upc"] = m.group(1)  # what the page's own feinventory call asks for (partner cards)
     g = generic.analyze(html, url, None, base_url=final_url or url)
     info.update(title=g.title, image=g.image_url, price=g.price)
-    if not info["price"]:
-        el = rbase.soup_of(html).select_one("span.main-price")
-        info["price"] = soup_text(el) or None
+    el = rbase.soup_of(html).select_one("span.main-price")
+    shown = soup_text(el) if el is not None else ""
+    # the rendered page's own price (its script sets it from the inventory answer; for a retailer-only partner
+    # card, the retailer's $1,679.99 rather than the $1,649.99 MSRP in the JSON-LD)
+    if shown and (not info["price"] or (rendered and re.search(r"\d", shown))):
+        info["price"] = shown
     return info
 
 
@@ -328,7 +348,7 @@ _NV_SHOWN_RE = re.compile(r"display\s*:\s*(?:block|inline|flex)", re.I)
 
 def nv_dom_state(html: str) -> tuple[str | None, str] | None:
     """What the rendered marketplace page shows after its own inventory call: the page's script shows
-    ``#form-action-addToCart`` only when feinventory says ``is_active == "true"``; otherwise the
+    ``#form-action-addToCart`` only when feinventory says ``is_active == "true"`` (and it isn't greyed out); otherwise the
     "Out of Stock" button (``.productView__button--oos``) or the retailer list is displayed."""
     soup = rbase.soup_of(html)
 
@@ -336,7 +356,9 @@ def nv_dom_state(html: str) -> tuple[str | None, str] | None:
         return el is not None and bool(_NV_SHOWN_RE.search(str(el.get("style") or "")))
 
     atc = soup.select_one("#form-action-addToCart")
-    if shown(atc):
+    # the page greys the button out (``stock-grey-out``) for a product that isn't buyable; a shown, live
+    # button is the page's own feinventory is_active branch
+    if shown(atc) and "stock-grey-out" not in (atc.get("class") or []):
         return "in", "#form-action-addToCart shown (feinventory is_active)"
     if shown(soup.select_one(".productView__button--oos")):
         return "out", "'Out of Stock' button shown"
@@ -350,14 +372,21 @@ async def nvidia(url: str, ctx: AdapterContext) -> CheckResult | None:
     """Founders Edition stock from NVIDIA's ``feinventory`` API. The SKU comes from ``?sku=`` / the item's
     store_id, the partner search API, the marketplace page's JSON-LD ``mpn`` (e.g. NVGFT590), or — for a
     www.nvidia.com GPU page — the FE naming scheme. www.nvidia.com pages are spec/marketing pages (their
-    JSON-LD says InStock at MSRP whatever the stock), so they are never judged from the page itself."""
+    JSON-LD says InStock at MSRP whatever the stock), so they are never judged from the page itself.
+
+    Partner cards on the marketplace (sold and "fulfilled by PNY / MSI", or "Check Availability" at a
+    retailer) are read from the page the browser rendered after its own inventory call; they never borrow
+    the FE's SKU or status. No NVIDIA URL is ever handed to the generic checker's in-stock guess: an
+    undecided page answers unknown (the 2026-09-29 run reported a PNY card "in stock" from a bare
+    "Add to Cart" button that way)."""
     locale = _nv_locale(url)
     sku = _nv_sku(url, ctx)
     gpu = nvidia_gpu(url)
     info_page = not _nv_is_store_host(url)
+    fe_page = _nv_fe_page(url)
     product: dict | None = None
     guessed = False
-    if gpu:
+    if gpu and (fe_page or sku):
         try:
             data = await rbase.get_json(NV_SEARCH.format(locale=locale, gpu=quote(gpu)), headers=_NV_HEADERS)
         except FetchError:
@@ -370,18 +399,19 @@ async def nvidia(url: str, ctx: AdapterContext) -> CheckResult | None:
     if not info_page:
         browser = await _nv_browser_page(url)
         if browser is not None:
-            page = _nv_info_from_html(browser.text, url, browser.url)
+            page = _nv_info_from_html(browser.text, url, browser.url, rendered=True)
             _nv_page_cache[url] = (time.monotonic() + NV_PAGE_TTL, page)
     if not sku and not info_page:
         page = page or await _nv_page_info(url)
         sku = page.get("sku")
-    if not sku and gpu:
+    if not sku and gpu and fe_page:
         sku, guessed = _nv_guess_fe_sku(gpu), True
     if not sku:
-        if info_page and gpu:
-            return finish(result(None, NV_INFO_TEXT, detail={"gpu": gpu, "info_only": True,
-                                                              "watch_instead": nv_marketplace_url(gpu)}), ctx)
-        return None
+        if info_page:
+            if gpu:
+                return finish(result(None, NV_INFO_TEXT, detail={"gpu": gpu, "info_only": True,
+                                                                  "watch_instead": nv_marketplace_url(gpu)}), ctx)
+            return await _nv_fallback(url, ctx, browser)
 
     title = (clean_text(product.get("productTitle")) if product else None) or page.get("title")
     image = (product.get("imageURL") if product else None) or page.get("image")
@@ -389,17 +419,22 @@ async def nvidia(url: str, ctx: AdapterContext) -> CheckResult | None:
     detail: dict[str, Any] = {"sku": sku, "gpu": gpu}
     if guessed:
         detail["sku_guessed"] = True
+    if not fe_page:
+        detail["partner_card"] = True
+    inv_skus = [k for k in (sku, page.get("upc")) if k]
     captured = _nv_captured_inventory(browser)
     if captured is not None:
         inv: Any = {"listMap": captured}
         detail["inventory_via"] = "browser"
-    else:
+    elif sku and fe_page:
         try:
             inv = await rbase.get_json(NV_INVENTORY.format(sku=quote(sku), locale=locale), headers=_NV_HEADERS)
         except FetchError:
             inv = None
+    else:
+        inv = None
     rows = [r for r in (dig(inv, "listMap") or []) if isinstance(r, dict)
-            and str(r.get("fe_sku") or sku).upper().startswith(sku)]  # never another SKU's row
+            and any(str(r.get("fe_sku") or k).upper().startswith(k.upper()) for k in inv_skus)]  # never another SKU's row
     if rows:
         active = [r for r in rows if str(r.get("is_active")).strip().lower() == "true"]
         row = (active or rows)[0]
@@ -436,21 +471,64 @@ async def nvidia(url: str, ctx: AdapterContext) -> CheckResult | None:
     dom = nv_dom_state(browser.text) if browser is not None else None
     if dom is not None:
         state, why = dom
+        partner = _nv_partner(browser.text) if not fe_page else None
+        # sold on NVIDIA's marketplace, shipped by the card's maker ("fulfilled by PNY"): not a reseller
         detail.update(matched=f"rendered page: {why}", seller="NVIDIA", third_party=False, source="page")
+        if partner:
+            detail["fulfilled_by"] = partner
         if state == "in":
             res = result("in", "In stock", price=price, title=title, image_url=image, detail=detail)
         elif state == "out":
             res = result("out", "Out of stock", price=price, title=title, image_url=image, detail=detail)
         else:
+            detail.update(seller=None, third_party=None)
             res = result("out", "Retailers only (check availability)", price=price, title=title, image_url=image,
                          detail=detail)
         return finish(res, ctx, product_url=url)
-    if guessed:
-        return None
+    if guessed or not sku or not fe_page:
+        return await _nv_fallback(url, ctx, browser, title=title, image=image, price=price)
     # a known FE SKU (pinned, or the marketplace page's own) whose inventory didn't answer
     detail["matched"] = "feinventory: no answer for this SKU"
     return finish(result(None, "NVIDIA didn't report Founders Edition stock", price=price, title=title,
                          image_url=image, detail=detail), ctx)
+
+
+_NV_FULFILLED_RE = re.compile(r"\bfulfilled\s+by\s+([A-Z][\w&.\- ]{1,30}?)\s*\.", re.I)
+
+
+def _nv_partner(html: str) -> str | None:
+    """"This product is fulfilled by PNY." — the partner that ships a marketplace partner card."""
+    m = _NV_FULFILLED_RE.search(soup_text(rbase.soup_of(html)))
+    name = m.group(1).strip() if m else None
+    return None if not name or name.lower() == "nvidia" else name
+
+
+async def _nv_fallback(url: str, ctx: AdapterContext, browser: FetchResult | None, *, title: Any = None,
+                       image: Any = None, price: Any = None) -> CheckResult | None:
+    """The page itself, when neither the inventory nor the rendered buttons decided. Missing pages, bot walls
+    and waiting rooms keep their verdicts, and so does a clear sold-out; an in-stock guess from a generic
+    signal (an "Add to Cart" button, JSON-LD at MSRP) never counts on an NVIDIA page."""
+    if browser is not None:
+        html, final = browser.text, browser.url
+    else:
+        fetched = await fetch_page(url, ctx)
+        if is_queued(fetched):
+            return queue_result(ctx)
+        status = getattr(fetched, "status", None)
+        if status in (404, 410):
+            return finish(generic.missing_result(f"{generic.NOT_FOUND_TEXT} (HTTP {status})", url, fetched.url), ctx)
+        html, final = fetched.text, fetched.url
+    res = analyze_page(html, url, ctx, final)
+    store = _nv_is_store_host(url)
+    if res is None or res.status == "error":
+        return res
+    if res.status == "out_of_stock" and store:
+        return res
+    info = result(None, NV_UNREAD_TEXT if store else NO_DIRECT_SALES, price=price if store else None,
+                  title=title or res.title, image_url=image or res.image_url,
+                  detail={"signals": res.detail.get("signals", []), "matched": None, "info_only": not store,
+                          "generic_said": res.status})
+    return finish(info, ctx, adapter="nvidia")
 
 
 def _nv_pick(data: Any, gpu: str, sku: str | None) -> dict | None:
