@@ -76,6 +76,18 @@ async def test_pinned_sku_without_purchase_action_is_out():
 
 
 @respx.mock
+async def test_pinned_sku_no_longer_listed_is_unknown():
+    # the link's SKU 0003 is gone from the catalog: SKU 0002 being in stock says nothing about it
+    url = MS_URL + "/0003"
+    respx.get(CATALOG).mock(return_value=httpx.Response(200, json=fxj("ms_displaycatalog_console.json")))
+    inv = respx.get(INV).mock(return_value=httpx.Response(200, json=fxj("ms_inventory_instock.json")))
+    assert ms._pick(fxj("ms_displaycatalog_console.json")["Products"][0]["DisplaySkuAvailabilities"], "0003") == (None, None)
+    res = await ms.check(url, ctx_for(url))
+    assert res.status == "unknown" and res.status_text == "SKU 0003 is no longer listed"
+    assert not inv.called and res.price is None and res.detail["sku_id"] == "0003"
+
+
+@respx.mock
 async def test_inventory_failure_is_unknown():
     respx.get(CATALOG).mock(return_value=httpx.Response(200, json=fxj("ms_displaycatalog_console.json")))
     respx.get(INV).mock(return_value=httpx.Response(500))

@@ -120,8 +120,11 @@ def _newegg_from_api(mi: dict, item: str, ctx: AdapterContext) -> CheckResult:
     img = dig(mi, "Image", "Normal", "ImageName")
     image_url = f"https://c1.neweggimages.com/ProductImage/{img}" if isinstance(img, str) and img else None
     price = mi.get("FinalPrice") if mi.get("FinalPrice") not in (None, "", 0) else mi.get("UnitCost")
-    seller = mi.get("SellerName") or None
-    first_party = _is_newegg_seller(seller, mi.get("SellerId"))
+    # ProductRealtime nests the seller (MainItem.Seller.{SellerId,SellerName}); top level as a fallback
+    sel = mi.get("Seller") if isinstance(mi.get("Seller"), dict) else {}
+    seller = sel.get("SellerName") or mi.get("SellerName") or None
+    seller_id = sel.get("SellerId") if sel.get("SellerId") not in (None, "") else mi.get("SellerId")
+    first_party = _is_newegg_seller(seller, seller_id)
     cart_item = str(mi.get("Item") or item)
     instock = mi.get("Instock")
     stock = mi.get("Stock")
@@ -823,7 +826,7 @@ LEICA_RULES = [
 ]
 
 
-def _leica_shop_link(html: str, base: str) -> str | None:
+def _leica_shop_link(html: str) -> str | None:
     """leica-camera.com product pages are brand pages; their hero "Shop now" button (``a.online-shop``)
     goes to the country's online store (leicacamerausa.com for en-US)."""
     soup = rbase.soup_of(html)
@@ -836,16 +839,14 @@ def _leica_shop_link(html: str, base: str) -> str | None:
 
 
 async def leica(url: str, ctx: AdapterContext) -> CheckResult | None:
-    host = fetcher.host_of(url)
-    if not host.endswith("leica-camera.com"):
-        return await _store_page(url, ctx, rules=LEICA_RULES)
+    # the registry routes only leica-camera.com here (the online store, leicacamerausa.com, is generic)
     fetched = await fetch_page(url, ctx)
     if is_queued(fetched):
         return queue_result(ctx)
     res = analyze_page(fetched.text, url, ctx, fetched.url, rules=LEICA_RULES)
     if res is None or res.status == "error" or (res.status != "unknown" and _sells_here(res)):
         return res
-    shop = _leica_shop_link(fetched.text, fetched.url)
+    shop = _leica_shop_link(fetched.text)
     if shop:
         try:
             followed = await generic.check_generic(shop, ctx.generic_config)
@@ -922,12 +923,14 @@ async def gigabyte(url: str, ctx: AdapterContext) -> CheckResult | None:
 
 def _magento_dom(view: PageView) -> Hit | None:
     s = view.soup
-    price_el = s.select_one("[data-price-type=finalPrice][data-price-amount], [data-price-amount]")
+    # the product's own info column: related / upsell / cross-sell lists mark their sold-out items .stock.unavailable
+    scope = s.select_one(".product-info-main") or s
+    price_el = scope.select_one("[data-price-type=finalPrice][data-price-amount], [data-price-amount]")
     price = price_el.get("data-price-amount") if price_el is not None else None
-    if s.select_one(".stock.unavailable, .product-info-stock-sku .unavailable"):
+    if scope.select_one(".stock.unavailable, .product-info-stock-sku .unavailable"):
         return Hit("out", "Out of stock", "magento: .stock.unavailable", {"seller": "ZOTAC Store", "third_party": False},
                    price=price)
-    if s.select_one(".stock.available"):
+    if scope.select_one(".stock.available"):
         btn = s.select_one("#product-addtocart-button")
         if btn is None or not btn.has_attr("disabled"):
             return Hit("in", "In stock", "magento: .stock.available", {"seller": "ZOTAC Store", "third_party": False},

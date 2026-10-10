@@ -54,6 +54,12 @@ def page(monkeypatch):
 LEGO_URL = "https://www.lego.com/en-us/product/millennium-falcon-75192"
 
 
+def test_lego_state_collects_what_the_check_reads():
+    st = games._lego_state(fx("lego_available.html"), "75192")
+    assert st and st.get("availabilityStatus") and set(st) <= games._LEGO_KEYS
+    assert not {"primaryImage", "baseImgUrl"} & games._LEGO_KEYS  # never read: the page's og:image is used
+
+
 def test_lego_code_and_status_map():
     assert games.lego_code(LEGO_URL) == "75192"
     assert games.lego_code("https://www.lego.com/en-us/product/christmas-2023-40642?icmp=x") == "40642"
@@ -120,6 +126,41 @@ async def test_nintendo_request_invitation_is_invite_only(page):
     assert res.status == "out_of_stock" and res.status_text == "Invite only"
 
 
+NIN_LIVE_URL = "https://www.nintendo.com/us/store/products/nintendo-switch-2-system-123669/"
+
+
+def _nin_live(old: str = "", new: str = "") -> str:
+    import gzip
+    live = Path(__file__).parent.parent / "fixtures" / "live" / "nintendo" / "switch2.html.gz"
+    html = gzip.decompress(live.read_bytes()).decode("utf-8")
+    if old:
+        assert html.count(old) == 1  # only the watched product's full Apollo entry
+        html = html.replace(old, new)
+    return html
+
+
+async def test_nintendo_real_page_reads_the_product_entry(page):
+    # the 2026 store names it "Product" (not StoreProduct), price under prices({"personalized":false})
+    page(_nin_live())
+    res = await games.nintendo(NIN_LIVE_URL, ctx_for(NIN_LIVE_URL))
+    assert res.status == "in_stock" and res.detail["matched"] == "__NEXT_DATA__ Product.isSalableQty=True"
+    assert res.detail["sku"] == "123669" and res.detail["price_value"] == 499.99
+    assert res.title == "Nintendo Switch™ 2 System"
+
+
+@pytest.mark.parametrize("old,new,text", [
+    ('"isSalableQty":true,"upgradeDescription"', '"isSalableQty":false,"upgradeDescription"', "Out of stock"),
+    ('"soldOutPermanent":false', '"soldOutPermanent":true', "Sold out"),
+    ('"inviteRequired":false', '"inviteRequired":true', "Invite only"),
+])
+async def test_nintendo_real_page_not_salable_is_out_of_stock(page, old, new, text):
+    # the page's JSON-LD still says InStock; the product's own state decides
+    page(_nin_live(old, new))
+    res = await games.nintendo(NIN_LIVE_URL, ctx_for(NIN_LIVE_URL))
+    assert (res.status, res.status_text) == ("out_of_stock", text)
+    assert res.detail["sku"] == "123669"
+
+
 # ============================================================ POP MART
 
 
@@ -137,6 +178,15 @@ async def test_popmart_one_sku_in_stock(page):
                                             '"onlineStock":14,"onlineLockStock":0}},\n          {"id":5002'))
     res = await games.popmart(url, ctx_for(url))
     assert res.status == "in_stock" and res.detail["stock_qty"] == 14
+
+
+async def test_popmart_string_stock_counts(page):
+    # onlineStock as a string ("14") used to raise TypeError in the price pick
+    url = "https://www.popmart.com/us/products/3571/THE-MONSTERS-Big-into-Energy-Series"
+    page(fx("popmart_soldout.html").replace('"onlineStock":0,"onlineLockStock":0}},\n          {"id":5002',
+                                            '"onlineStock":"14","onlineLockStock":0}},\n          {"id":5002'))
+    res = await games.popmart(url, ctx_for(url))
+    assert res.status == "in_stock" and res.detail["stock_qty"] == 14 and res.detail["seller"] == "POP MART"
 
 
 async def test_popmart_pinned_sku(page):
