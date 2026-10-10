@@ -9,8 +9,8 @@ is recorded in ``detail["signals"]``):
 2. Meta tags — ``product:availability`` / ``og:availability`` / stray ``itemprop=availability``.
 3. Page heuristics, scoped to the main content (nav/header/footer/scripts/recommendation
    carousels/cart drawers removed): enabled buy button → in stock; "Sold out" / "Notify me"
-   button → out; out-of-stock phrases → out; "in stock" phrase → in; only a disabled buy
-   button → out.
+   button → out; out-of-stock phrases → out; "in stock" phrase (not negated / conditional: "isn't in
+   stock", "notify you when it's in stock") → in; only a disabled buy button → out.
 4. Otherwise ``unknown``.
 
 Before any of that, ``check_generic`` (auto mode) lets the platform recipes in
@@ -41,7 +41,7 @@ from bs4 import BeautifulSoup, Tag
 from .base import Availability, CheckResult
 from .fetcher import fetch_html, has_product_signals, host_of
 from .retailers.platforms import detect_and_check, queue_result
-from .util import absolutize, clean_text, format_price, loads_lenient, parse_amount, state_classes
+from .util import CURRENCY_SYMBOLS, absolutize, clean_text, format_price, loads_lenient, parse_amount, state_classes
 
 log = logging.getLogger("stockwatcher.checkers.generic")
 
@@ -196,6 +196,7 @@ class _Entry:
     offer: dict
     product: dict
     variant: str | None = None
+    in_variant: bool = False  # the product is a ProductGroup's hasVariant child
 
 
 @dataclass
@@ -207,26 +208,45 @@ class StructuredResult:
     name: str | None = None
     image: Any = None
     price: str | None = None
+    product: dict | None = None  # the main product node
+    foreign: bool = False  # only another product than the page's (see ``own``)
+
+
+# a Product inside one of these (or inside another Product: isRelatedTo, isSimilarTo, isAccessoryOrSparePartFor,
+# ...) is a recommendation / listing card, not the page's own product
+_LIST_TYPES = {"itemlist", "listitem", "breadcrumblist", "offercatalog"}
 
 
 class _Graph:
     def __init__(self, roots: list):
         self.nodes: list[dict] = []
         self.by_id: dict[str, dict] = {}
-        stack = list(reversed(roots))
+        self.nested: set[int] = set()  # ids of nodes inside another product / an item list
+        stack = [(r, False) for r in reversed(roots)]
         while stack:
-            cur = stack.pop()
+            cur, nested = stack.pop()
             if isinstance(cur, list):
-                stack.extend(reversed(cur))
+                stack.extend((v, nested) for v in reversed(cur))
             elif isinstance(cur, dict):
                 self.nodes.append(cur)
+                if nested:
+                    self.nested.add(id(cur))
                 nid = cur.get("@id")
                 if isinstance(nid, str) and len(cur) > 1 and nid not in self.by_id:
                     self.by_id[nid] = cur
-                stack.extend(reversed([v for v in cur.values() if isinstance(v, (dict, list))]))
+                inner = nested or _is_product(cur) or bool(_types(cur) & _LIST_TYPES)
+                stack.extend((v, inner) for v in reversed([v for v in cur.values() if isinstance(v, (dict, list))]))
+        # an Offer's itemOffered product owns that offer (a root Offer describing the page's product)
+        self.owned: dict[int, list[dict]] = {}
+        for n in self.nodes:
+            if _is_offer(n):
+                for it in _as_list(n.get("itemOffered")):
+                    it = self.deref(it)
+                    if isinstance(it, dict) and _is_product(it):
+                        self.owned.setdefault(id(it), []).append(n)
 
     def deref(self, v: Any) -> Any:
-        if isinstance(v, dict) and set(v) - {"@type"} == {"@id"}:
+        if isinstance(v, dict) and set(v) - {"@type"} == {"@id"} and isinstance(v["@id"], str):
             return self.by_id.get(v["@id"], v)
         return v
 
@@ -250,12 +270,14 @@ def _collect_entries(g: _Graph, product: dict, depth: int = 0, variant: str | No
         token, verdict = norm_availability(value)
         if token:
             raw = value if isinstance(value, str) else str(value)
-            entries.append(_Entry(token, verdict, raw, offer, product, variant))
+            entries.append(_Entry(token, verdict, raw, offer, product, variant, depth > 0))
 
-    for off in _as_list(product.get("offers")):
+    seen: set[int] = set()
+    for off in _as_list(product.get("offers")) + g.owned.get(id(product), []):
         off = g.deref(off)
-        if not isinstance(off, dict):
+        if not isinstance(off, dict) or id(off) in seen:
             continue
+        seen.add(id(off))
         if off.get("availability") is not None:
             add(off, off.get("availability"))
         for inner in _as_list(off.get("offers")):  # AggregateOffer.offers
@@ -272,17 +294,31 @@ def _collect_entries(g: _Graph, product: dict, depth: int = 0, variant: str | No
     return entries
 
 
-def _entry_matches_hint(e: _Entry, hints: set[str]) -> bool:
+def _entry_matches_hint(e: _Entry, hints: set[str], product_level: bool = False) -> bool:
+    obj = e.product if product_level else e.offer
     for h in hints:
-        for obj in (e.offer, e.product):
-            for k in ("url", "@id"):
-                u = obj.get(k)
-                if isinstance(u, str) and re.search(rf"[=/]{re.escape(h)}(?:$|[&#/?])", u):
-                    return True
-            for k in ("sku", "productID", "gtin", "gtin13", "gtin12", "mpn"):
-                if str(obj.get(k) or "") == h:
-                    return True
+        for k in ("url", "@id"):
+            u = obj.get(k)
+            if isinstance(u, str) and re.search(rf"[=/]{re.escape(h)}(?:$|[&#/?])", u):
+                return True
+        for k in ("sku", "productID", "gtin", "gtin13", "gtin12", "mpn"):
+            if str(obj.get(k) or "") == h:
+                return True
     return False
+
+
+def _pinned(entries: list[_Entry], hints: set[str]) -> list[_Entry]:
+    """The entries the URL's variant hints select. Offer-level identifiers first; a product's own url / sku
+    only pins a hasVariant child or a product with a single offer (a Product's url often carries the
+    selected-or-first variant's ?variant=, which would otherwise pin every offer)."""
+    hits = [e for e in entries if _entry_matches_hint(e, hints)]
+    if not hits:
+        per_product: dict[int, int] = {}
+        for e in entries:
+            per_product[id(e.product)] = per_product.get(id(e.product), 0) + 1
+        hits = [e for e in entries if (e.in_variant or per_product[id(e.product)] == 1)
+                and _entry_matches_hint(e, hints, product_level=True)]
+    return hits
 
 
 _CODE_KEYS = ("sku", "mpn", "productID", "model")
@@ -309,21 +345,24 @@ def _entry_in_path(e: _Entry, page_url: str) -> bool:
     return False
 
 
+def _amount(v: Any) -> Any:
+    """The first non-zero amount of a price value (microdata repeats itemprop="price": the sale price, then the
+    struck-out regular one), or None."""
+    return next((x for x in _as_list(v) if parse_amount(x)), None)
+
+
 def _offer_price(offer: dict, product: dict) -> str | None:
     cur = offer.get("priceCurrency") or product.get("priceCurrency")
-    amount = offer.get("price")
-    if amount in (None, "") or parse_amount(amount) in (None, 0):
-        amount = offer.get("lowPrice")
-    if amount in (None, "") or parse_amount(amount) in (None, 0):
+    amount = _amount(offer.get("price")) or _amount(offer.get("lowPrice"))
+    if amount is None:
         for spec in _as_list(offer.get("priceSpecification")):
-            if isinstance(spec, dict) and parse_amount(spec.get("price")):
-                amount = spec.get("price")
+            if isinstance(spec, dict) and _amount(spec.get("price")) is not None:
+                amount = _amount(spec.get("price"))
                 cur = cur or spec.get("priceCurrency")
                 break
-    d = parse_amount(amount)
-    if d is None or d == 0:
+    if amount is None:
         return None
-    return format_price(amount, cur)
+    return format_price(amount, next((c for c in _as_list(cur) if isinstance(c, str)), None))
 
 
 def _url_path(u: Any) -> str:
@@ -332,14 +371,41 @@ def _url_path(u: Any) -> str:
     return urlsplit(u).path.rstrip("/").lower()
 
 
-def analyze_structured(roots: list, source: str, page_url: str) -> StructuredResult:
+def _first_name(node: dict) -> str | None:
+    return next((n for n in _as_list(node.get("name")) if isinstance(n, str) and clean_text(n)), None)
+
+
+_ID_KEYS = ("sku", "mpn", "productID", "gtin", "gtin8", "gtin12", "gtin13", "gtin14")
+
+
+def _same_product(a: dict, b: dict) -> bool:
+    """``b`` plausibly describes the same product as ``a``: a shared sku / gtin / url path, or one name contains
+    the other ("Widget 3000" / "Widget 3000 - Black"). True when there is nothing to compare."""
+    def ids(n: dict) -> set[str]:
+        return {str(v).strip().lower() for k in _ID_KEYS for v in _as_list(n.get(k))
+                if isinstance(v, (str, int)) and str(v).strip()}
+
+    if ids(a) & ids(b) or (_url_path(a.get("url")) and _url_path(a.get("url")) == _url_path(b.get("url"))):
+        return True
+    na, nb = _norm(clean_text(_first_name(a))), _norm(clean_text(_first_name(b)))
+    if not na or not nb:
+        return not (ids(a) and ids(b))
+    return na in nb or nb in na
+
+
+def analyze_structured(roots: list, source: str, page_url: str, own: dict | None = None) -> StructuredResult:
+    """``own``: the page's product as a higher-precedence source (JSON-LD) found it; a product here that isn't
+    that one is ignored."""
     res = StructuredResult(source=source)
     g = _Graph(roots)
     products = [n for n in g.nodes if _is_product(n)]
     if not products:
-        products = [n for n in g.nodes if _is_offer(n)]
         # treat a bare Offer as a pseudo product holding itself
-        products = [{"offers": n, "name": n.get("name")} for n in products]
+        for n in g.nodes:
+            if _is_offer(n):
+                products.append({"offers": n, "name": n.get("name")})
+                if id(n) in g.nested:
+                    g.nested.add(id(products[-1]))
     if not products:
         return res
 
@@ -350,23 +416,40 @@ def analyze_structured(roots: list, source: str, page_url: str) -> StructuredRes
             variant_ids.add(id(g.deref(v)))
     top = [p for p in products if id(p) not in variant_ids] or products
 
+    # The page's own product: the one whose url is the page's, else the only one, else the first root / @graph
+    # product — never a recommendation nested in it (isRelatedTo, an ItemList) or a later sibling, which
+    # would lend the page another product's stock, title and price
     page_path = _url_path(page_url)
-    ranked = sorted(top, key=lambda p: 0 if page_path and _url_path(p.get("url")) == page_path else 1)
+    url_hits = [p for p in top if page_path and _url_path(p.get("url")) == page_path]
+    primary = [p for p in top if id(p) not in g.nested]
+    candidates = url_hits or (top if len(top) == 1 else (primary or top)[:1])
+    hints = _variant_hints(page_url)
+    if hints:
+        # one top-level Product per variant (separate JSON-LD blocks): the URL's ?variant= / ?sku= picks one
+        for p in url_hits or primary or top:
+            if _pinned(_collect_entries(g, p), hints):
+                candidates = [p]
+                break
 
     main: dict | None = None
     entries: list[_Entry] = []
-    for p in ranked:
+    for p in candidates:
         es = _collect_entries(g, p)
         if es:
             main, entries = p, es
             break
     if main is None:
-        main = ranked[0]
+        main = candidates[0]
+    if own is not None and main is not own and not _same_product(own, main):
+        # microdata / RDFa describing another product than the JSON-LD's (an accessory card)
+        res.signals.append(f"{source}: ignored '{clean_text(_first_name(main))[:40]}' (not the page's product)")
+        res.foreign = True
+        return res
+    res.product = main
 
     # microdata repeats itemprop="name" (Zotac's Magento page: the title and the "[Refurbished]" variant name
     # come back as a list): the first one is the product's own
-    name = next((n for n in _as_list(main.get("name")) if isinstance(n, str) and clean_text(n)), None)
-    res.name = clean_text(name) or None
+    res.name = clean_text(_first_name(main)) or None
     res.image = main.get("image")
     if not res.image:
         for v in _as_list(main.get("hasVariant")):
@@ -379,7 +462,7 @@ def analyze_structured(roots: list, source: str, page_url: str) -> StructuredRes
         # an Offer with a price but no availability (Home Depot's JSON-LD, 2026-09-29): still the product's
         # price, when this Product is unambiguously the page's own
         if len(top) == 1 or (page_path and _url_path(main.get("url")) == page_path):
-            for off in _as_list(main.get("offers")):
+            for off in _as_list(main.get("offers")) + g.owned.get(id(main), []):
                 off = g.deref(off)
                 p = _offer_price(off, main) if isinstance(off, dict) else None
                 if p:
@@ -387,8 +470,7 @@ def analyze_structured(roots: list, source: str, page_url: str) -> StructuredRes
                     break
         return res
 
-    hints = _variant_hints(page_url)
-    pinned = [e for e in entries if _entry_matches_hint(e, hints)] if hints else []
+    pinned = _pinned(entries, hints) if hints else []
     if not pinned and len(entries) > 1:
         # the URL path names one variant's model / SKU (LG ".../lg-oled65c5pua-oled-4k-tv": the ProductGroup
         # lists 42"–83" and only the 77" was InStock on 2026-09-29 — the 65" was OutOfStock)
@@ -510,9 +592,11 @@ _HIDDEN_CLASSES = {"hidden", "hide", "d-none", "is-hidden", "js-hidden", "visual
                    "display-none", "invisible"}
 _HIDDEN_STYLE_RE = re.compile(r"display\s*:\s*none|visibility\s*:\s*hidden", re.I)
 
+# the label must *start* with the action: "Bulk purchase", "See other purchase options", "Add purchase
+# protection" aren't buy buttons, nor is "Buy now, pay later"
 BUY_RE = re.compile(
-    r"\b(?:add(?:ing)?\s+to\s+(?:shopping\s+)?(?:cart|bag|basket|trolley|order)|buy\s+(?:it\s+)?now"
-    r"|pre[\s-]?order(?:\s+now)?|order\s+now|purchase(?:\s+now)?|add\s+to\s+my\s+(?:cart|bag))\b",
+    r"^\W*(?:add(?:ing)?\s+to\s+(?:shopping\s+)?(?:cart|bag|basket|trolley|order)|buy\s+(?:it\s+)?now(?!\W*pay\s+later)"
+    r"|pre[\s-]?order(?:\s+now)?|order\s+now|purchase\s+now|add\s+to\s+my\s+(?:cart|bag))\b",
     re.I,
 )
 OOS_BUTTON_RE = re.compile(
@@ -521,21 +605,42 @@ OOS_BUTTON_RE = re.compile(
     r"|no\s+longer\s+available|discontinued)\W*$",
     re.I,
 )
+# "...when it's back / available / in stock" (not "...when it's ready" / "available for pickup": an in-stock order)
+_WHEN_BACK = (r"(?:(?:it'?s|it\s+is|this\s+(?:item|product)\s+is|they'?re|they\s+are)\s+)?"
+              r"(?:back\b|available\b(?!\s+for\s+(?:in[\s-]store\s+)?(?:pick\s*-?up|collection))"
+              r"|in\s+stock\b|restocked\b)")
 OOS_PHRASES = [
     ("out of stock", re.compile(r"\bout\s+of\s+stock\b", re.I)),
     ("sold out", re.compile(r"\bsold\s*out\b", re.I)),
     ("currently unavailable", re.compile(r"\bcurrently\s+unavailable\b", re.I)),
-    ("notify me when available", re.compile(r"\bnotify\s+me\s+when\s+(?:it'?s\s+|this\s+item\s+is\s+|back\s+in\s+stock|available|in\s+stock)", re.I)),
-    ("email me when available", re.compile(r"\bemail\s+me\s+when\s+(?:available|back\s+in\s+stock|in\s+stock)", re.I)),
+    ("notify me when available", re.compile(
+        r"\bnotify\s+me\s+when\s+(?:it'?s\s+|this\s+item\s+is\s+|back\s+in\s+stock|available|in\s+stock)"
+        rf"|\b(?:(?:notify|alert|text|tell)\s+you|let\s+(?:me|you)\s+know)\s+when\s+{_WHEN_BACK}"
+        rf"|\balert\s+(?:me\s+)?when\s+{_WHEN_BACK}", re.I)),
+    ("email me when available", re.compile(rf"\be-?mail\s+(?:me|you)\s+when\s+{_WHEN_BACK}", re.I)),
     ("coming soon", re.compile(r"\bcoming\s+soon\b", re.I)),
     ("no longer available", re.compile(r"\bno\s+longer\s+available\b", re.I)),
     ("not available for purchase", re.compile(r"\bnot\s+available\s+(?:for\s+purchase|to\s+order|online)\b", re.I)),
 ]
 IN_PHRASE_RE = re.compile(
     r"(?<!not\s)(?<!back\s)(?<!when\s)\bin\s+stock\b(?!\s+(?:alert|notification|soon))|\bready\s+to\s+ship\b"
-    r"|\bavailable\s+now\b|\bonly\s+\d+\s+left\b|\bships\s+(?:today|tomorrow|in\s+\d)",
+    r"|\bavailable\s+now\b|\bonly\s+[1-9]\d*\s+left\b|\bships\s+(?:today|tomorrow|in\s+\d)",
     re.I,
 )
+# a negation / condition shortly before the in-stock wording: "isn't in stock", "no longer in stock", "notify you
+# when this item is in stock", "check if it's in stock at a store near you", "0 in stock"
+_IN_NEGATED_RE = re.compile(
+    r"\b(?:not|no|none|never|when|whenever|once|until|till|if|whether|zero)\b|n['’]t\b|(?<!\S)0(?!\S)", re.I)
+
+
+def _in_stock_phrase(text: str) -> re.Match | None:
+    """The first in-stock wording in ``text`` not negated / made conditional by the (up to) four words before it
+    in the same sentence ("Pick up when ready. In stock" is in stock)."""
+    for m in IN_PHRASE_RE.finditer(text):
+        before = re.split(r"[.!?;|•·](?:\s|$)", text[max(0, m.start() - 80):m.start()])[-1]
+        if not _IN_NEGATED_RE.search(" ".join(before.split()[-4:])):
+            return m
+    return None
 
 
 def _classes(el: Tag) -> list[str]:
@@ -629,8 +734,9 @@ def analyze_heuristics(soup: BeautifulSoup) -> HeuristicResult:
         text = _button_text(el)
         if not text or len(text) > 60:
             continue
-        if OOS_BUTTON_RE.search(text):
-            oos_buttons.append(text)
+        if OOS_BUTTON_RE.search(text) or (BUY_RE.search(text) and any(
+                rx.search(text) for name, rx in OOS_PHRASES if name != "coming soon")):
+            oos_buttons.append(text)  # also "Add to Cart - Sold Out", "Pre-order sold out"
         elif BUY_RE.search(text):
             (disabled_buy if _is_disabled(el) else enabled_buy).append(text)
 
@@ -645,7 +751,7 @@ def analyze_heuristics(soup: BeautifulSoup) -> HeuristicResult:
     oos_found = [name for name, rx in OOS_PHRASES if rx.search(text)]
     for name in oos_found[:3]:
         res.signals.append(f"text: '{name}'")
-    in_m = IN_PHRASE_RE.search(text)
+    in_m = _in_stock_phrase(text)
     if in_m:
         res.signals.append(f"text: '{clean_text(in_m.group(0)).lower()}'")
 
@@ -661,6 +767,8 @@ def analyze_heuristics(soup: BeautifulSoup) -> HeuristicResult:
         res.status_text = "Sold out" if oos_found[0] == "sold out" else "Coming soon" if oos_found[0] == "coming soon" else "Out of stock"
         res.matched = f"text: '{oos_found[0]}'"
     elif in_m:
+        # above a disabled buy button: Magento renders "Add to Cart" disabled until its JS runs (Zotac's
+        # in-stock page, 2026-09-29) — negated / conditional wording never gets here (``_in_stock_phrase``)
         res.verdict, res.status_text = "in", "In stock"
         res.matched = f"text: '{clean_text(in_m.group(0)).lower()}'"
     elif disabled_buy:
@@ -757,6 +865,26 @@ def displayed_price(soup: BeautifulSoup) -> str | None:
     return format_price(parse_amount(f"{whole}.{m.group(3)}"), cur)
 
 
+_DOLLAR_CODES = {c for c, sym in CURRENCY_SYMBOLS.items() if sym.endswith("$")}
+
+
+def _price_currency(price: str) -> str | None:
+    """The currency code of a ``format_price`` string: "CA$1.00" → CAD, "£1.00" → GBP, "1.00 CHF" → CHF."""
+    m = re.match(r"([^\d\s.,]+)", price)
+    if m:
+        return next((c for c, sym in CURRENCY_SYMBOLS.items() if sym == m.group(1)), None)
+    m = re.search(r"\s([A-Z]{3})$", price)
+    return m.group(1) if m else None
+
+
+def _same_currency(shown: str, structured: str) -> bool:
+    a, b = _price_currency(shown), _price_currency(structured)
+    if a == "USD" and b in _DOLLAR_CODES - {"USD"}:
+        # the page's bare "$" is the store's own dollar (CA$, A$, ...) unless the amount was converted
+        return parse_amount(shown) == parse_amount(structured)
+    return a == b
+
+
 def extract_page_meta(soup: BeautifulSoup, url: str, structured: list[StructuredResult]) -> PageMeta:
     site = _meta(soup, "og:site_name", "application-name")
     sd_name = next((s.name for s in structured if s.name), None)
@@ -789,7 +917,7 @@ def extract_page_meta(soup: BeautifulSoup, url: str, structured: list[Structured
         cur = _meta(soup, "product:price:currency", "og:price:currency")
         if amount and parse_amount(amount):
             price = format_price(amount, cur) if (cur or "$" in amount or re.fullmatch(r"[\d.,\s]+", amount)) else None
-    if not price:
+    if not price and not any(s.foreign for s in structured):
         el = soup.find(attrs={"itemprop": "price"})
         if el is not None:
             amount = el.get("content") or el.get_text(" ", strip=True)
@@ -807,10 +935,16 @@ NO_STOCK_INFO_TEXT = "No stock info on the page"
 HOME_REDIRECT_TEXT = "Product page redirects to the homepage — the link may be stale"
 MOVED_TEXT = "Product page redirects to a non-product page — the link may be stale"
 
+# "404" only as a whole path segment ("/404", "/404.cfm"): product slugs carry it ("/t/air-max-90/DH7568-404",
+# "/products/error-404-tee", "/p/hd-404")
 _NF_URL_RE = re.compile(
-    r"(?:^|[/_.=-])(?:404|pageerror|page-?not-?found|not-?found|errorpages?|smarterror)(?:$|[/_.?&=-])", re.I)
+    r"(?:^|/)404(?:\.\w+)?(?:/|$)"
+    r"|(?:^|[/_.=-])(?:pageerror|page-?not-?found|not-?found|errorpages?|smarterror)(?:$|[/_.?&=-])", re.I)
+# "404" with error wording, or alone — not a product named "404 Brand Denim Jacket"
+_NF_404 = (r"(?:error\s*)?404(?:\s*(?:[:!.,(-]\s*)?(?:error\b|page\b|not\s+found\b|this\s+page\b|oops\b|sorry\b"
+           r"|.*\bnot\s+found\b).*)?")
 _NF_TITLE_SEG_RE = re.compile(
-    r"^\W*(?:(?:error\s*)?404\b.*|page\s+(?:not\s+found|cannot\s+be\s+found|could\s+not\s+be\s+found"
+    rf"^\W*(?:{_NF_404}|page\s+(?:not\s+found|cannot\s+be\s+found|could\s+not\s+be\s+found"
     r"|does\s*n[o']t\s+exist)|(?:product|item|page)\s+not\s+found|not\s+found|oops[!.,]*\s+(?:page\s+)?not\s+found"
     r"|this\s+page\s+(?:could\s+not\s+be\s+found|does\s*n[o']t\s+exist))\W*$",
     re.I,
@@ -819,7 +953,7 @@ _NF_HEADING_RE = re.compile(
     r"^\W*(?:we\s+)?(?:could\s*n[o']t|can\s*n[o']t|cannot|were\s+unable\s+to)\s+find\s+(?:anything|that\s+page|the\s+page"
     r"|the\s+product|this\s+(?:page|product))\b|^\W*(?:sorry[,!.]*\s+)?(?:this\s+|the\s+)?page\s+(?:not\s+found|cannot\s+be"
     r"\s+found|could\s+not\s+be\s+found|does\s*n[o']t\s+exist|you\s+(?:are|were)\s+looking\s+for\s+"
-    r"(?:does\s*n[o']t|does\s+not|could\s+not|can\s*n[o']t))|^\W*(?:product|item)\s+not\s+found\W*$|^\W*404\b",
+    rf"(?:does\s*n[o']t|does\s+not|could\s+not|can\s*n[o']t))|^\W*(?:product|item)\s+not\s+found\W*$|^\W*{_NF_404}\W*$",
     re.I,
 )
 _NO_RESULTS_RE = re.compile(r"^\W*(?:no\s+results?(?:\s+found)?|0\s+results?|no\s+products?\s+found)\W*$", re.I)
@@ -864,7 +998,9 @@ def missing_page(url: str, final_url: str | None, html: str | None, status: int 
     final = final_url or url
     same_site = _site(host_of(final)) == _site(host_of(url)) or _same_retailer(url, final)
     fpath = _strip_path(final)
-    if same_site and _NF_URL_RE.search(fpath):
+    # an error-page URL only counts when a redirect led there (the product's own URL may well contain "404")
+    redirected = fpath.rstrip("/").lower() != _strip_path(url).rstrip("/").lower()
+    if same_site and redirected and _NF_URL_RE.search(fpath):
         return NOT_FOUND_TEXT
     head = (html or "")[:400_000]
     m = _TITLE_TAG_RE.search(head)
@@ -901,11 +1037,10 @@ def missing_result(reason: str, url: str, final_url: str | None = None, **detail
 # --------------------------------------------------------------------------- analysis entry points
 
 
-def _result(verdict: str | None, status_text: str | None, meta: PageMeta, detail: dict, label: str | None = None) -> CheckResult:
+def _result(verdict: str | None, status_text: str | None, meta: PageMeta, detail: dict) -> CheckResult:
     if verdict == "in":
         st = status_text or "In stock"
-        return CheckResult(status="in_stock", status_text=st,
-                           available=[Availability(key=STOCK_KEY, label=label or st)],
+        return CheckResult(status="in_stock", status_text=st, available=[Availability(key=STOCK_KEY, label=st)],
                            price=meta.price, title=meta.title, image_url=meta.image_url, detail=detail)
     if verdict == "out":
         return CheckResult(status="out_of_stock", status_text=status_text or "Out of stock", available=[],
@@ -955,13 +1090,14 @@ def analyze(html: str, url: str, config: dict | GenericConfig | None = None, *, 
     structured: list[StructuredResult] = [analyze_structured(extract_json_ld(soup), "json-ld", url)]
     micro, rdfa = extract_micro_rdfa(html or "", base)
     if micro:
-        structured.append(analyze_structured(micro, "microdata", url))
+        structured.append(analyze_structured(micro, "microdata", url, own=structured[0].product))
     if rdfa:
-        structured.append(analyze_structured(rdfa, "rdfa", url))
+        own = next((s.product for s in structured if s.product is not None), None)
+        structured.append(analyze_structured(rdfa, "rdfa", url, own=own))
     meta = extract_page_meta(soup, base, structured)
     detail: dict[str, Any] = {"mode": cfg.mode, "signals": []}
     shown = displayed_price(soup)
-    if shown and meta.price and shown[:1] != meta.price[:1]:
+    if shown and meta.price and not _same_currency(shown, meta.price):
         # structured data in the store's base currency, the page shows the visitor's (NYXI, a Shopline
         # store, 2026-09-29: JSON-LD "GBP 90" from a GB session cookie, rendered "$119.16" to the US viewer)
         detail["structured_price"] = meta.price

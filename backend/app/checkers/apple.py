@@ -118,6 +118,8 @@ def _distance_miles(store: dict) -> float | None:
         if isinstance(v, (int, float)) and not isinstance(v, bool):
             unit_text = str(_get_ci(store, "storeDistanceWithUnit") or "")
             return round(float(v) * (0.621371 if re.search(r"\bkm\b", unit_text, re.I) else 1.0), 1)
+        if isinstance(v, str) and re.fullmatch(r"\s*\d+(?:\.\d+)?\s*", v):
+            return round(float(v), 1)  # "4.5", "2.345" — a distance, never thousands-grouped
         if isinstance(v, str) and parse_amount(v) is not None:
             return round(float(parse_amount(v)), 1)
     for k in ("storeDistanceWithUnit", "storeDistanceVoText"):
@@ -254,7 +256,8 @@ def detect_two_hour(part_delivery: Any) -> tuple[bool, str | None, list[str]]:
       * a key containing "courier" / "twoHour" has a true value (isCourier, courierDelivery, ...), or
       * a type-ish key (type, deliveryType, shippingMethod, ...) has a value like COURIER / TWO_HOUR, or
       * any text (option displayName/date, compact quote, ...) mentions courier / "within 2 hours" /
-        "2-hour delivery" / "Today, 2 hours" — unless the same text says it's not available.
+        "2-hour delivery" / "Today, 2 hours";
+    none of which counts when the same node's text says it's not available ("Not available", "Unavailable").
     """
     quotes: list[str] = []
     two_hour = False
@@ -267,8 +270,11 @@ def detect_two_hour(part_delivery: Any) -> tuple[bool, str | None, list[str]]:
         qtext = _quote_text(node)
         if qtext:
             quotes.append(qtext)
+        if _TWO_HOUR_NEG_RE.search(_dict_text(node)):
+            # the node's own text says it isn't offered ({"deliveryType": "COURIER", "date": "Not available"}):
+            # neither its flags / type nor its texts count
+            continue
         hit = False
-        negated = bool(qtext and _TWO_HOUR_NEG_RE.search(qtext))
         for k, v in node.items():
             if not isinstance(k, str):
                 continue
@@ -277,7 +283,7 @@ def detect_two_hour(part_delivery: Any) -> tuple[bool, str | None, list[str]]:
                 hit = True
             elif kl in _TYPE_KEYS and isinstance(v, str) and _COURIER_TYPE_RE.search(v):
                 hit = True
-            elif not negated and isinstance(v, str) and not _SKIP_TEXT_KEYS.search(k) and _is_two_hour_text(clean_text(v)):
+            elif isinstance(v, str) and not _SKIP_TEXT_KEYS.search(k) and _is_two_hour_text(clean_text(v)):
                 hit = True
         if not hit and qtext and _is_two_hour_text(qtext):
             hit = True
@@ -847,7 +853,7 @@ def _variant_label(node: dict, maps: dict[str, dict[str, str]]) -> str | None:
     return None
 
 
-def _script_blobs(soup: BeautifulSoup, html: str) -> list:
+def _script_blobs(soup: BeautifulSoup) -> list:
     blobs: list = []
     for s in soup.find_all("script"):
         if s.get("src"):
@@ -880,7 +886,7 @@ def _script_blobs(soup: BeautifulSoup, html: str) -> list:
                 data = loads_lenient(_js_to_json(lit))
             if isinstance(data, (dict, list)):
                 blobs.append(data)
-        for m in re.finditer(r"JSON\.parse\(\s*(['\"])((?:\\.|(?!\1).)*)\1\s*\)", text, re.S):
+        for m in re.finditer(r"JSON\.parse\(\s*(['\"])((?:\\.|(?!\1)[^\\])*)\1\s*\)", text, re.S):
             inner = _js_string(m.group(2), m.group(1))
             data = loads_lenient(inner) if inner else None
             if isinstance(data, (dict, list)):
@@ -993,7 +999,7 @@ def parse_product_page(html: str, url: str) -> dict:
     img = meta("og:image", "twitter:image")
     image_url = absolutize(img, url)
 
-    blobs = _script_blobs(soup, html or "")
+    blobs = _script_blobs(soup)
     maps = _collect_display_maps(blobs)
     prices = _collect_price_maps(blobs)
 

@@ -148,12 +148,36 @@ def test_courier_detected_from_flags_and_types():
         ({"regular": {"deliveryOptions": [{"displayName": "Today", "date": "Order by 3pm, delivers within 2 hours"}]}}, True),
         ({"regular": {"deliveryOptions": [{"displayName": "Standard", "date": "Order within 2 hours for delivery Fri"}]}}, False),
         ({"regular": {"courierAvailable": 1}}, False),
+        # the courier option's own text says it isn't offered: its type / flag doesn't count either
+        ({"regular": {"deliveryOptions": [{"displayName": "Courier", "date": "Not available", "deliveryType": "COURIER"}]}}, False),
+        ({"regular": {"deliveryOptions": [{"displayName": "Fast", "status": "Unavailable", "isCourier": True}]}}, False),
         ("garbage", False),
         (None, False),
     ],
 )
 def test_detect_two_hour_variants(payload, expected):
     assert detect_two_hour(payload)[0] is expected
+
+
+def test_json_parse_blob_regex_is_linear_and_still_decodes():
+    import time
+
+    from bs4 import BeautifulSoup
+
+    # an unterminated JSON.parse("\\x\\x...") used to backtrack exponentially (15 pairs took ~5 s)
+    soup = BeautifulSoup('<script>JSON.parse("' + "\\\\x" * 15 + '" + y)</script>', "lxml")
+    t = time.perf_counter()
+    assert apple._script_blobs(soup) == []
+    assert time.perf_counter() - t < 1.0
+    soup = BeautifulSoup('<script>var a = JSON.parse("{\\"k\\":\\"say \\\\\\"hi\\\\\\" padpadpadpadpadpadpadpad\\"}");'
+                         "var b = JSON.parse('{\"s\":\"it\\'s fine, padpadpadpadpadpadpadpadpad\"}');</script>", "lxml")
+    assert apple._script_blobs(soup) == [{"k": 'say "hi" padpadpadpadpadpadpadpad'},
+                                         {"s": "it's fine, padpadpadpadpadpadpadpadpad"}]
+
+
+def test_store_distance_string_is_a_plain_decimal():
+    # "2.345" is miles, not 2,345 (parse_amount reads a lone dot-grouped number as thousands)
+    assert apple._distance_miles({"storedistance": "2.345"}) == 2.3
 
 
 @pytest.mark.parametrize("payload", [{}, {"head": {"status": "503"}}, {"body": {}}, [], "x", None])
