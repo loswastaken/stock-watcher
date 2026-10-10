@@ -3,13 +3,13 @@
 The API is used when ``KROGER_CLIENT_ID`` and ``KROGER_CLIENT_SECRET`` are set (free developer account at
 developer.kroger.com) and the item has a ZIP / store. Otherwise the product page is read: its
 ``__INITIAL_STATE__`` carries Kroger's own server-side product lookup (``calypso.useCases.getProducts
-.pdpSSR``) for the page's default store — an empty lookup is "Not sold at <store>".
+.pdpSSR``) for the page's default store — an empty lookup is "Not sold at <store>". That store is the page's
+(geo-IP) choice, not one near the item's ZIP, so the page answers for delivery only; pickup needs the API.
 Stock is per store: we use the store nearest the item's ZIP (or its pinned ``store_id``).
 """
 from __future__ import annotations
 
 import json
-import logging
 import os
 import re
 import time
@@ -26,8 +26,6 @@ from .base import STOCK_KEY, AdapterContext, dig, get_json, result
 from .bigbox import base_detail, error_result, generic_result, is_queued, queued_result
 from .pagekit import js_assignment
 
-log = logging.getLogger("stockwatcher.checkers.retailers.kroger")
-
 UPC_RE = re.compile(r"/p/[^/?#]+/(\d{13})(?:[/?#]|$)")
 API = "https://api.kroger.com/v1"
 TOKEN_URL = f"{API}/connect/oauth2/token"
@@ -35,6 +33,8 @@ SCOPE = "product.compact"
 IN_LEVELS = {"HIGH": "In stock", "LOW": "Low stock"}
 OUT_LEVELS = {"TEMPORARILY_OUT_OF_STOCK": "Temporarily out of stock"}
 LOCATIONS_TTL = 24 * 3600
+LOCATIONS_EMPTY_TTL = 300  # "no stores" may be a hiccup: re-ask soon
+PICKUP_NEEDS_KEY = "Pickup near your ZIP needs KROGER_CLIENT_ID/SECRET"
 
 _token: dict[str, Any] = {"value": None, "exp": 0.0, "client": None}
 _locations: dict[tuple[str, int], tuple[float, list[dict]]] = {}
@@ -102,7 +102,7 @@ async def nearest_locations(zip_code: str, radius: int, creds: tuple[str, str]) 
         if lid:
             name = clean_text(loc.get("name")) or clean_text(loc.get("chain")) or f"store #{lid}"
             locs.append({"id": str(lid), "name": name, "address": dig(loc, "address", "addressLine1")})
-    _locations[ck] = (time.monotonic() + LOCATIONS_TTL, locs)
+    _locations[ck] = (time.monotonic() + (LOCATIONS_TTL if locs else LOCATIONS_EMPTY_TTL), locs)
     return locs
 
 
@@ -124,10 +124,20 @@ async def check(url: str, ctx: AdapterContext) -> CheckResult | None:
         return None
     rc = ctx.retailer_config
     if not creds or not (rc.zip or rc.store_id):
-        if creds and rc.fulfillment == "pickup":
-            return error_result(ctx, "Set a ZIP code for pickup", upc=upc)
-        # stock is per store; without the API (or a location) the page's own product data is the best we have
-        return await check_page(url, upc, ctx)
+        if rc.fulfillment == "pickup":
+            if not (rc.zip or rc.store_id):
+                return error_result(ctx, "Set a ZIP code for pickup", upc=upc)
+            # the page only knows its own default store (geo-IP: maybe hundreds of miles away), not the ZIP's
+            return result(None, PICKUP_NEEDS_KEY, detail=base_detail(ctx, upc=upc, zip=rc.zip, pickup_unavailable=True))
+        # stock is per store; without the API (or a location) the page's own product data is the best we have —
+        # for delivery only, as the page's default store isn't one near the item's ZIP
+        res = await check_page(url, upc, ctx)
+        if res is not None and rc.wants_pickup:
+            if creds:
+                res.detail["pickup_skipped"] = "Set a ZIP code for pickup"
+            else:
+                res.status_text = f"{res.status_text} · {PICKUP_NEEDS_KEY}"
+        return res
 
     if rc.store_id:
         store = {"id": rc.store_id, "name": f"store #{rc.store_id}"}
@@ -149,8 +159,10 @@ async def check(url: str, ctx: AdapterContext) -> CheckResult | None:
     return product_verdict(product, store, ctx, detail)
 
 
-def product_verdict(product: dict, store: dict, ctx: AdapterContext, detail: dict) -> CheckResult:
-    """Verdict from a Kroger product (the official API's shape, also used by the page's SSR state)."""
+def product_verdict(product: dict, store: dict, ctx: AdapterContext, detail: dict, *,
+                    pickup: bool = True) -> CheckResult:
+    """Verdict from a Kroger product (the official API's shape, also used by the page's SSR state).
+    ``pickup=False``: delivery only (the store isn't one the item's ZIP chose)."""
     rc = ctx.retailer_config
     item = (product.get("items") or [{}])[0] or {}
     level = str(dig(item, "inventory", "stockLevel") or dig(product, "inventory", "stockLevel") or "").upper() or None
@@ -170,7 +182,7 @@ def product_verdict(product: dict, store: dict, ctx: AdapterContext, detail: dic
     available: list[Availability] = []
     texts: list[str] = []
     stock_text = IN_LEVELS[level]
-    if rc.wants_pickup and flags.get("curbside", True) is not False:
+    if pickup and rc.wants_pickup and flags.get("curbside", True) is not False:
         label = f"Pickup · {store['name']}" + (" · low stock" if level == "LOW" else "")
         available.append(Availability(key=f"pickup:{store['id']}", label=label))
         texts.append(label)
@@ -178,7 +190,8 @@ def product_verdict(product: dict, store: dict, ctx: AdapterContext, detail: dic
         available.append(Availability(key=STOCK_KEY, label=f"Delivery · {stock_text}"))
         texts.append(f"{stock_text} for delivery")
     if not available:
-        return result("out", f"Not offered for {rc.fulfillment} at {store['name']}", **common)
+        return result("out", f"Not offered for {rc.fulfillment if pickup else 'delivery'} at {store['name']}",
+                      **common)
     return result("in", " · ".join(texts), available=available, **common)
 
 
@@ -234,4 +247,4 @@ async def check_page(url: str, upc: str, ctx: AdapterContext) -> CheckResult | N
                     str(p.get("upc") or p.get("gtin13") or upc).lstrip("0") == upc.lstrip("0")), None)
     if product is None:
         return generic_result(fetched, url, ctx, upc=upc)
-    return product_verdict(product, store, ctx, {**detail, "matched": "pdpSSR product"})
+    return product_verdict(product, store, ctx, {**detail, "matched": "pdpSSR product"}, pickup=False)

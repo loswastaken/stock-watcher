@@ -108,7 +108,8 @@ async def test_target_delivery_uses_real_store_not_digital_3991(_target_state):
         REDSKY + "product_fulfillment_v1*": {"body": TARGET_FULFILLMENT_IN},
         REDSKY + "pdp_fulfillment_v1*": {"status": 410, "body": ""},
     }) as calls:
-        res = await check(url)
+        # official-only off: the recorded 3991 206 has no seller info (see the test below)
+        res = await check(url, {"official_only": False})
     assert res.status == "in_stock", (res.status_text, res.error, calls.missing)
     assert res.price == "$499.99" and res.title and "Switch 2" in res.title
     assert not any("3991" in c for c in calls)
@@ -150,10 +151,28 @@ async def test_target_legacy_fulfillment_is_fallback_only(_target_state):
         REDSKY + "product_fulfillment_v1*": {"status": 404, "body": ""},
         REDSKY + "pdp_fulfillment_v1*": {"body": TARGET_FULFILLMENT_IN},
     }) as calls:
-        res = await check(url)
+        # official-only off: the recorded 3991 206 has no seller info (see the test below)
+        res = await check(url, {"official_only": False})
     assert res.status == "in_stock"
     assert [c.split("?")[0].rsplit("/", 1)[1] for c in calls if "fulfillment" in c] == [
         "product_fulfillment_v1", "pdp_fulfillment_v1"]
+
+
+async def test_target_partial_pdp_client_without_seller_is_unconfirmed(_target_state):
+    # the recorded 3991 206 (errors, no item.fulfillment / product_vendors) can't tell Target from a Target Plus
+    # partner: with official-only on (the default) it reads "Couldn't confirm the seller", not in stock
+    url = "https://www.target.com/p/nintendo-switch-2-console/-/A-94693225"
+    data = json.loads(body("target/pdp_client_94693225.json"))
+    assert data["errors"] and "fulfillment" not in data["data"]["product"]["item"]
+    with replay({
+        "https://www.target.com/p/-/A-94693225": {"body": "target/pdp_94693225.html"},
+        REDSKY + "pdp_client_v1*": {"status": 206, "body": "target/pdp_client_94693225.json"},
+        REDSKY + "product_fulfillment_v1*": {"body": TARGET_FULFILLMENT_IN},
+    }) as calls:
+        res = await check(url)
+    assert res.status == "unknown" and res.status_text == "Couldn't confirm the seller", calls.missing
+    assert res.available == [] and res.detail["third_party"] is None
+    assert res.price == "$499.99" and "Switch 2" in res.title
 
 
 # =========================================================================== NVIDIA

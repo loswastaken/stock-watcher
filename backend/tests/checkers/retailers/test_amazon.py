@@ -59,8 +59,12 @@ async def test_third_party_buy_box(monkeypatch):
     res = await amazon.check(URL, ctx())
     assert res.status == "out_of_stock" and res.status_text == "Third-party sellers only"
     assert res.detail["seller"] == "CardKingdomDeals" and res.detail["third_party"] is True
+    # the buy-box price is the marketplace seller's, not Amazon's: kept aside, never the item's price
+    assert res.price is None and "price_value" not in res.detail
+    assert res.detail["third_party_price"] == "$129.95"
     res = await amazon.check(URL, ctx(official_only=False))
     assert res.status == "in_stock" and res.status_text == "Only 3 left in stock"
+    assert res.price == "$129.95"
 
 
 def serve_aod(monkeypatch, html: str | None, status: int = 200) -> list:
@@ -87,8 +91,10 @@ async def test_only_see_all_buying_options_unreadable_offer_list(monkeypatch):
     res = await amazon.check(URL, ctx())
     assert res.status == "out_of_stock" and res.status_text == "No featured offer (see all buying options)"
     assert res.detail["third_party"] is None and "aodAjaxMain" in calls[0]
+    # official sellers off: an unreadable list doesn't say any (new) offer is left either — not "in stock"
     res = await amazon.check(URL, ctx(official_only=False))
-    assert res.status == "in_stock" and res.status_text == "Available from other sellers"
+    assert res.status == "unknown" and res.status_text == "No featured offer (see all buying options)"
+    assert res.available == []
 
 
 async def test_only_see_all_buying_options_amazon_offer_is_in_stock(monkeypatch):
@@ -167,3 +173,27 @@ async def test_temporarily_out_of_stock_with_add_to_cart_is_out(monkeypatch):
           .replace("In Stock", "Temporarily out of stock. Order now and we'll deliver when available."))
     res = await amazon.check(URL, ctx())
     assert res.status == "out_of_stock" and res.status_text == "Temporarily out of stock"
+
+
+@pytest.mark.parametrize("old,new", [
+    # a buy button the adapter doesn't know ("-ubb" variant): only the generic checker sees it
+    ('<input id="add-to-cart-button" name="submit.add-to-cart"',
+     '<input id="add-to-cart-button-ubb" name="submit.add-to-cart-ubb"'),
+    # no button at all: the generic checker reads "Only 3 left in stock"
+    ('<input id="add-to-cart-button" name="submit.add-to-cart" type="submit" value="Add to Cart">', ""),
+])
+async def test_generic_fallthrough_respects_the_seller(monkeypatch, old, new):
+    html = fx("amazon_3p_buybox.html")
+    assert old in html
+    serve(monkeypatch, html.replace(old, new))
+    res = await amazon.check(URL, ctx())
+    assert res.status == "out_of_stock" and res.status_text == "Third-party sellers only"
+    assert res.available == [] and res.price is None
+    # no seller on the page at all: unconfirmed, not in stock
+    serve(monkeypatch, html.replace(old, new).replace('value="A2FE3KX7Q9ZZQ1"', 'value=""').replace(
+        ">CardKingdomDeals<", "><"))
+    res = await amazon.check(URL, ctx())
+    assert res.status == "unknown" and res.status_text == "Couldn't confirm the seller"
+    assert res.detail["third_party"] is None
+    res = await amazon.check(URL, ctx(official_only=False))
+    assert res.status == "in_stock"

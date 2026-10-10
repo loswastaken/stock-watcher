@@ -305,3 +305,41 @@ def test_stockx_picks_product_by_url_key():
                 "b": {"product": {"id": "y", "urlKey": "my-shoe", "market": {"lowestAsk": None}}}})
     assert bigbox.stockx_lowest_ask(html, "https://stockx.com/my-shoe") == (True, None)
     assert bigbox.stockx_lowest_ask(html, "https://stockx.com/third-shoe") == (False, None)
+
+
+_SX_SIZED = {"props": {"pageProps": {"product": {
+    "id": "aj1", "urlKey": "air-jordan-1-retro-high-og", "market": {"state": {"lowestAsk": {"amount": 180}}},
+    "variants": [
+        {"id": "v9", "traits": {"size": "9"}, "market": {"state": {"lowestAsk": {"amount": 180}}}},
+        {"id": "v10", "sizeChart": {"baseSize": "10", "displayOptions": [{"size": "US M 10", "type": "us m"}]},
+         "market": {"state": {"lowestAsk": {"amount": 240}}}},
+        {"id": "v11", "traits": {"size": "11"}, "market": {"state": {"lowestAsk": None}}},
+    ]}}}}
+
+
+def test_stockx_size_param_picks_the_variant():
+    html = _nd(_SX_SIZED)
+    url = "https://stockx.com/air-jordan-1-retro-high-og"
+    assert bigbox.stockx_lowest_ask(html, url) == (True, 180.0)  # no size: the lowest of all
+    assert bigbox.stockx_lowest_ask(html, url, size="10") == (True, 240.0)
+    assert bigbox.stockx_lowest_ask(html, url, size="11") == (True, None)
+    assert bigbox.stockx_lowest_ask(html, url, size="12") == (False, None)
+    assert bigbox._sx_variant_sizes({"sizeChart": {"displayOptions": [{"size": "US W 7.5"}]}}) == {"usw7.5", "7.5"}
+
+
+async def test_stockx_size_link_reads_that_sizes_ask(monkeypatch):
+    serve(monkeypatch, _nd(_SX_SIZED))
+    base = "https://stockx.com/air-jordan-1-retro-high-og"
+    res = await bigbox.stockx(f"{base}?size=10", ctx("stockx"))
+    assert res.status == "in_stock" and res.status_text == "Lowest ask $240.00" and res.price == "$240.00"
+    assert res.detail["size"] == "10"
+    res = await bigbox.stockx(f"{base}?size=11", ctx("stockx"))
+    assert res.status == "out_of_stock" and res.status_text == "No asks right now"
+    # a size the page has no variant for: the other sizes' asks don't answer for it
+    res = await bigbox.stockx(f"{base}?size=12", ctx("stockx"))
+    assert res.status == "unknown" and res.status_text == "Couldn't read the asks for size 12"
+    # no per-size data at all (only the product's overall ask): unknown when the link names a size
+    serve(monkeypatch, fx("stockx_product.html"))
+    res = await bigbox.stockx("https://stockx.com/pokemon-tcg-prismatic-evolutions-elite-trainer-box?size=10",
+                              ctx("stockx"))
+    assert res.status == "unknown" and res.available == []

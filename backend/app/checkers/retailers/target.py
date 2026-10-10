@@ -283,12 +283,14 @@ async def check(url: str, ctx: AdapterContext) -> CheckResult | None:
 
     # ---- product info (title/price/seller); failures here are not fatal
     product: dict = {}
+    partial = True  # no complete pdp_client answer (failed, or HTTP 206 with `errors`)
     try:
         pdp = await _redsky("pdp_client_v1", {
             "tcin": tcin, "is_bot": "false", "store_id": store, "pricing_store_id": store,
             "has_pricing_store_id": "true" if store else None,
             "has_financing_options": "true", "channel": "WEB", "page": f"/p/A-{tcin}"}, tcin, page_url)
         product = dig(pdp, "data", "product", default={}) or {}
+        partial = bool(isinstance(pdp, dict) and pdp.get("errors"))
     except FetchError as e:
         if e.status in (401, 403):
             raise
@@ -301,6 +303,9 @@ async def check(url: str, ctx: AdapterContext) -> CheckResult | None:
     price = (dig(product, "price", "current_retail") or dig(product, "price", "current_retail_min")
              or dig(product, "price", "formatted_current_price"))
     seller, third_party = seller_of(item)
+    # a failed or partial pdp_client answer (no item.fulfillment / product_vendors) can't rule out a Target
+    # Plus partner: no seller seen there is "unknown", not first-party
+    seller_unconfirmed = third_party is None and (partial or not isinstance(item.get("fulfillment"), dict))
 
     detail = base_detail(ctx, tcin=tcin, seller=seller, third_party=third_party, fulfillment=rc.fulfillment)
     if rc.zip:
@@ -310,7 +315,12 @@ async def check(url: str, ctx: AdapterContext) -> CheckResult | None:
 
     common = dict(price=price, title=title, image_url=image, detail=detail)
     if third_party and rc.official_only:
-        return result("out", THIRD_PARTY_TEXT, **common)
+        # the price is the Target Plus partner's, not Target's: kept aside so it never reads as the watched price
+        if price is not None:
+            detail["third_party_price"] = price
+        return result("out", THIRD_PARTY_TEXT, **{**common, "price": None})
+    if seller_unconfirmed and rc.official_only:
+        return result(None, "Couldn't confirm the seller", **common)
     if rc.fulfillment == "pickup" and stores_failed:
         return result(None, "Target didn't return nearby stores", **common)
 
@@ -349,6 +359,7 @@ async def check(url: str, ctx: AdapterContext) -> CheckResult | None:
                     by_id.setdefault(str(sid), so)
 
         absorb(ful_json)
+        failed: list[str] = []  # stores whose fulfillment lookup failed: their stock is unknown
         for s in stores[1:]:
             if s["id"] in by_id:
                 continue
@@ -357,6 +368,7 @@ async def check(url: str, ctx: AdapterContext) -> CheckResult | None:
                                          tcin, page_url))
             except FetchError as e:
                 log.info("target fulfillment for store %s failed: %s", s["id"], e)
+                failed.append(s["id"])
         pickup_stores = []
         for s in stores:
             so = by_id.get(s["id"]) or {}
@@ -379,12 +391,19 @@ async def check(url: str, ctx: AdapterContext) -> CheckResult | None:
             texts.append("Couldn't look up nearby stores")
         elif not stores:
             texts.append(f"No Target stores {where}")
+        elif failed:
+            texts.append(f"No pickup {where} (couldn't check {len(failed)} of {len(stores)} stores)")
         else:
             texts.append(f"No pickup {where}")
+        if failed:
+            detail["pickup_failed"] = failed
 
     if available:
         in_texts = [t for t in texts if t in SHIP_IN.values() or t.startswith("Pickup")]
         return result("in", " · ".join(in_texts) or "In stock", available=available, **common)
+    if stores_failed or detail.get("pickup_failed"):
+        # a store we couldn't ask may have it: not a definite "out" (that would reset the alert state)
+        return result(None, " · ".join(texts), **common)
     if rc.wants_delivery and not want_pickup and ship_status == "OUT_OF_STOCK":
         # shipping is out, but the item is on the shelf nearby (2026-09-29, OLIPOP minis: shipping OUT_OF_STOCK,
         # same-day delivery and pickup at the page's store IN_STOCK) — say so rather than a bare "Out of stock"

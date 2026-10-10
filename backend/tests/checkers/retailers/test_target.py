@@ -188,9 +188,11 @@ async def test_target_plus_seller_blocked_when_official_only():
     res = await target.check(URL, ctx())
     assert res.status == "out_of_stock" and res.status_text == "Third-party sellers only"
     assert res.detail["seller"] == "CardCollectorz" and res.detail["third_party"] is True
+    # the partner's price isn't Target's: kept aside, never the item's price
+    assert res.price is None and "price_value" not in res.detail and res.detail["third_party_price"] == 199.0
     assert not ful.called
     res2 = await target.check(URL, ctx(official_only=False))
-    assert res2.status == "in_stock"
+    assert res2.status == "in_stock" and res2.price == "$199.00"
 
 
 @respx.mock
@@ -281,3 +283,84 @@ def test_seller_of_plain_supplier_vendor_is_not_third_party():
     # first-party items list their supplier as vendor_name; that alone is not a marketplace seller
     assert target.seller_of({"fulfillment": {}, "product_vendors": [{"vendor_name": "POKEMON USA INC"}]}) == (None, None)
     assert target.seller_of({"fulfillment": {"is_marketplace": False}}) == ("Target", False)
+
+
+# ------------------------------------------------------------------ pre-release audit fixes
+
+
+@respx.mock
+async def test_pdp_client_failure_is_unconfirmed_seller_not_in_stock():
+    # a Target Plus item reads "Third-party sellers only"; when pdp_client (the only seller source)
+    # fails, the same item must not fall through to the fulfillment's IN_STOCK as if Target sold it
+    mock_common("target_pdp_client_marketplace.json")
+    ful = respx.get(url__startswith=REDSKY + "product_fulfillment_v1").mock(
+        return_value=httpx.Response(200, json=fj("target_fulfillment.json")))
+    assert (await target.check(URL, ctx())).status_text == "Third-party sellers only"
+    respx.get(url__startswith=REDSKY + "pdp_client_v1").mock(return_value=httpx.Response(503))
+    res = await target.check(URL, ctx())
+    assert res.status == "unknown" and res.status_text == "Couldn't confirm the seller"
+    assert res.available == [] and res.detail["third_party"] is None and not ful.called
+    res = await target.check(URL, ctx(official_only=False))
+    assert res.status == "in_stock"
+
+
+@respx.mock
+async def test_pdp_client_partial_206_without_seller_fields_is_unconfirmed():
+    body = fj("target_pdp_client_marketplace.json")
+    item = body["data"]["product"]["item"]
+    item.pop("fulfillment")
+    item.pop("product_vendors")
+    body["errors"] = [{"message": "DataFetchingException", "extensions": {"classification": "DataFetchingException"}}]
+    respx.get(PDP).mock(return_value=httpx.Response(200, text=fx("target_pdp.html")))
+    client = respx.get(url__startswith=REDSKY + "pdp_client_v1").mock(return_value=httpx.Response(206, json=body))
+    respx.get(url__startswith=REDSKY + "product_fulfillment_v1").mock(
+        return_value=httpx.Response(200, json=fj("target_fulfillment.json")))
+    res = await target.check(URL, ctx())
+    assert res.status == "unknown" and res.status_text == "Couldn't confirm the seller"
+    assert res.title == "Booster Box (Target Plus)"  # what pdp_client did return is kept
+    # errors, but is_marketplace false still answered: the seller is confirmed
+    first = fj("target_pdp_client.json")
+    first["errors"] = body["errors"]
+    client.mock(return_value=httpx.Response(206, json=first))
+    assert (await target.check(URL, ctx())).status == "in_stock"
+    # no errors and no is_marketplace flag in a complete item.fulfillment (the recorded OLIPOP shape): first-party
+    del first["errors"], first["data"]["product"]["item"]["fulfillment"]["is_marketplace"]
+    client.mock(return_value=httpx.Response(200, json=first))
+    assert (await target.check(URL, ctx())).status == "in_stock"
+
+
+@respx.mock
+async def test_failed_store_lookup_is_unknown_not_out():
+    mock_common()
+    respx.get(url__startswith=REDSKY + "nearby_stores_v1").mock(
+        return_value=httpx.Response(200, json=fj("target_nearby_stores.json")))
+    state = {"fail": False}
+
+    def ful_side(request):
+        if q(request).get("store_id") == "3456":
+            return httpx.Response(503) if state["fail"] else \
+                httpx.Response(200, json=fj("target_fulfillment_store3.json"))
+        return httpx.Response(200, json=fj("target_fulfillment_oos.json"))
+
+    respx.get(url__startswith=REDSKY + "product_fulfillment_v1").mock(side_effect=ful_side)
+    res = await target.check(URL, ctx(fulfillment="pickup", zip="60302"))
+    assert res.status == "in_stock" and [a.key for a in res.available] == ["pickup:3456"]
+    # the one store that has it can't be asked: unknown (keeps the alert state), not "No pickup"
+    state["fail"] = True
+    res = await target.check(URL, ctx(fulfillment="pickup", zip="60302"))
+    assert res.status == "unknown" and res.available == []
+    assert res.status_text == "No pickup within 25 mi of 60302 (couldn't check 1 of 3 stores)"
+    assert res.detail["pickup_failed"] == ["3456"]
+
+
+@respx.mock
+async def test_any_mode_nearby_stores_failure_with_delivery_out_is_unknown():
+    mock_common()
+    respx.get(url__startswith=REDSKY + "nearby_stores_v1").mock(return_value=httpx.Response(500))
+    respx.get(url__startswith=REDSKY + "product_fulfillment_v1").mock(
+        return_value=httpx.Response(200, json=fj("target_fulfillment_oos.json")))
+    res = await target.check(URL, ctx(fulfillment="any", zip="60302"))
+    assert res.status == "unknown" and res.status_text == "Out of stock · Couldn't look up nearby stores"
+    # delivery-only watches don't depend on the store list
+    res = await target.check(URL, ctx(fulfillment="delivery", zip="60302"))
+    assert res.status == "out_of_stock"
