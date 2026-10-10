@@ -505,7 +505,9 @@ async def stop() -> None:
     global _loop_task, _stop_event
     if _stop_event is not None:
         _stop_event.set()
-    tasks = [t for t in [_loop_task, *list(_background)] if t is not None]
+    loop = asyncio.get_running_loop()
+    # (only this loop's tasks: tests run several loops in one process; production has one)
+    tasks = [t for t in [_loop_task, *list(_background)] if t is not None and t.get_loop() is loop]
     for t in tasks:
         t.cancel()
     if tasks:

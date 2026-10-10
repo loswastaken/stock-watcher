@@ -422,7 +422,11 @@ def analyze_structured(roots: list, source: str, page_url: str, own: dict | None
     page_path = _url_path(page_url)
     url_hits = [p for p in top if page_path and _url_path(p.get("url")) == page_path]
     primary = [p for p in top if id(p) not in g.nested]
-    candidates = url_hits or (top if len(top) == 1 else (primary or top)[:1])
+    roots = primary or top
+    # a review widget's offer-less Product block (Bazaarvoice, Yotpo) may come first: a later root block
+    # describing the same product (same sku / url / name) and carrying the offers is the one to read
+    offered = [p for p in roots if (p is roots[0] or _same_product(roots[0], p)) and _collect_entries(g, p)]
+    candidates = url_hits or (top if len(top) == 1 else (offered or roots)[:1])
     hints = _variant_hints(page_url)
     if hints:
         # one top-level Product per variant (separate JSON-LD blocks): the URL's ?variant= / ?sku= picks one
@@ -595,8 +599,10 @@ _HIDDEN_STYLE_RE = re.compile(r"display\s*:\s*none|visibility\s*:\s*hidden", re.
 # the label must *start* with the action: "Bulk purchase", "See other purchase options", "Add purchase
 # protection" aren't buy buttons, nor is "Buy now, pay later"
 BUY_RE = re.compile(
-    r"^\W*(?:add(?:ing)?\s+to\s+(?:shopping\s+)?(?:cart|bag|basket|trolley|order)|buy\s+(?:it\s+)?now(?!\W*pay\s+later)"
-    r"|pre[\s-]?order(?:\s+now)?|order\s+now|purchase\s+now|add\s+to\s+my\s+(?:cart|bag))\b",
+    # one leading token is allowed: an icon font's ligature text ("add_shopping_cart Add to cart")
+    r"^\W*(?:purchase(?=\W*$)|(?:(?!(?:not|no)\b)[\w-]+\s+)?"
+    r"(?:add(?:ing)?\s+to\s+(?:shopping\s+)?(?:cart|bag|basket|trolley|order)|buy\s+(?:it\s+)?now(?!\W*pay\s+later)"
+    r"|pre[\s-]?order(?:\s+now)?|order\s+now|purchase\s+now|add\s+to\s+my\s+(?:cart|bag)))\b",
     re.I,
 )
 OOS_BUTTON_RE = re.compile(
@@ -623,14 +629,14 @@ OOS_PHRASES = [
     ("not available for purchase", re.compile(r"\bnot\s+available\s+(?:for\s+purchase|to\s+order|online)\b", re.I)),
 ]
 IN_PHRASE_RE = re.compile(
-    r"(?<!not\s)(?<!back\s)(?<!when\s)\bin\s+stock\b(?!\s+(?:alert|notification|soon))|\bready\s+to\s+ship\b"
+    r"(?<!not\s)(?<!back\s)(?<!when\s)(?<!\b0\s)\bin\s+stock\b(?!\s+(?:alert|notification|soon))|\bready\s+to\s+ship\b"
     r"|\bavailable\s+now\b|\bonly\s+[1-9]\d*\s+left\b|\bships\s+(?:today|tomorrow|in\s+\d)",
     re.I,
 )
 # a negation / condition shortly before the in-stock wording: "isn't in stock", "no longer in stock", "notify you
-# when this item is in stock", "check if it's in stock at a store near you", "0 in stock"
+# when this item is in stock", "check if it's in stock at a store near you" ("0 in stock" is in IN_PHRASE_RE)
 _IN_NEGATED_RE = re.compile(
-    r"\b(?:not|no|none|never|when|whenever|once|until|till|if|whether|zero)\b|n['’]t\b|(?<!\S)0(?!\S)", re.I)
+    r"\b(?:not|no|none|never|when|whenever|once|until|till|if|whether|zero)\b|n['’]t\b", re.I)
 
 
 def _in_stock_phrase(text: str) -> re.Match | None:
@@ -935,14 +941,14 @@ NO_STOCK_INFO_TEXT = "No stock info on the page"
 HOME_REDIRECT_TEXT = "Product page redirects to the homepage — the link may be stale"
 MOVED_TEXT = "Product page redirects to a non-product page — the link may be stale"
 
-# "404" only as a whole path segment ("/404", "/404.cfm"): product slugs carry it ("/t/air-max-90/DH7568-404",
-# "/products/error-404-tee", "/p/hd-404")
+# "404" as a path segment or a dashed part of one ("/404.cfm", "/error-404", "/page-404.html"). Product slugs
+# carry it too ("/t/air-max-90/DH7568-404", "/products/error-404-tee"), so it's only used after a redirect.
 _NF_URL_RE = re.compile(
-    r"(?:^|/)404(?:\.\w+)?(?:/|$)"
+    r"(?:^|[/_-])404(?:\.\w+)?(?:[/_-]|$)"
     r"|(?:^|[/_.=-])(?:pageerror|page-?not-?found|not-?found|errorpages?|smarterror)(?:$|[/_.?&=-])", re.I)
 # "404" with error wording, or alone — not a product named "404 Brand Denim Jacket"
-_NF_404 = (r"(?:error\s*)?404(?:\s*(?:[:!.,(-]\s*)?(?:error\b|page\b|not\s+found\b|this\s+page\b|oops\b|sorry\b"
-           r"|.*\bnot\s+found\b).*)?")
+_NF_404 = (r"(?:error\s*)?404(?:\s*[-–—:.!|]\s*\S.*|\s*(?:[,(]\s*)?(?:error\b|page\b|not\s+found\b|this\s+page\b"
+           r"|oops\b|sorry\b|.*\bnot\s+found\b).*)?")
 _NF_TITLE_SEG_RE = re.compile(
     rf"^\W*(?:{_NF_404}|page\s+(?:not\s+found|cannot\s+be\s+found|could\s+not\s+be\s+found"
     r"|does\s*n[o']t\s+exist)|(?:product|item|page)\s+not\s+found|not\s+found|oops[!.,]*\s+(?:page\s+)?not\s+found"

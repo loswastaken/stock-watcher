@@ -303,9 +303,10 @@ async def check(url: str, ctx: AdapterContext) -> CheckResult | None:
     price = (dig(product, "price", "current_retail") or dig(product, "price", "current_retail_min")
              or dig(product, "price", "formatted_current_price"))
     seller, third_party = seller_of(item)
-    # a failed or partial pdp_client answer (no item.fulfillment / product_vendors) can't rule out a Target
-    # Plus partner: no seller seen there is "unknown", not first-party
-    seller_unconfirmed = third_party is None and (partial or not isinstance(item.get("fulfillment"), dict))
+    # a failed or partial pdp_client answer can't rule out a Target Plus partner: no seller seen there is
+    # "unknown", not first-party. (A complete answer without item.fulfillment is normal: a variation
+    # parent's own item has none, only its children do.)
+    seller_unconfirmed = third_party is None and partial
 
     detail = base_detail(ctx, tcin=tcin, seller=seller, third_party=third_party, fulfillment=rc.fulfillment)
     if rc.zip:

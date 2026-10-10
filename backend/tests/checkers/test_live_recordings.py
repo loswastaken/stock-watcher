@@ -158,6 +158,22 @@ async def test_target_legacy_fulfillment_is_fallback_only(_target_state):
         "product_fulfillment_v1", "pdp_fulfillment_v1"]
 
 
+async def test_target_variation_parent_complete_answer_is_first_party(_target_state):
+    # a complete (200) answer for a variation parent: its own item has no fulfillment block (its children
+    # do), which is normal, not an unconfirmed seller, so official-only (the default) still reads in stock
+    url = "https://www.target.com/p/nintendo-switch-2-console/-/A-94693225"
+    data = json.loads(body("target/pdp_client_94693225.json"))
+    data.pop("errors")
+    assert "fulfillment" not in data["data"]["product"]["item"]
+    with replay({
+        "https://www.target.com/p/-/A-94693225": {"body": "target/pdp_94693225.html"},
+        REDSKY + "pdp_client_v1*": {"status": 200, "body": data},
+        REDSKY + "product_fulfillment_v1*": {"body": TARGET_FULFILLMENT_IN},
+    }) as calls:
+        res = await check(url)
+    assert res.status == "in_stock", (res.status_text, calls.missing)
+
+
 async def test_target_partial_pdp_client_without_seller_is_unconfirmed(_target_state):
     # the recorded 3991 206 (errors, no item.fulfillment / product_vendors) can't tell Target from a Target Plus
     # partner: with official-only on (the default) it reads "Couldn't confirm the seller", not in stock

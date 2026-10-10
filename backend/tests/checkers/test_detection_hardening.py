@@ -8,7 +8,7 @@ from decimal import Decimal
 
 import pytest
 
-from app.checkers.generic import analyze, missing_page
+from app.checkers.generic import BUY_RE, _in_stock_phrase, analyze, missing_page
 from app.checkers.util import format_price, parse_amount
 
 URL = "https://shop.example/products/widget-3000"
@@ -247,3 +247,36 @@ def test_redirect_to_a_404_segment_is_an_error_page():
 def test_404_title_needs_error_wording(title, dead):
     html = f"<html><head><title>{title}</title></head><body><h1>{title}</h1></body></html>"
     assert bool(missing_page("https://shop.example/p/x", None, html)) is dead
+
+
+# ------------------------------------------------- final-review regressions (kept from the earlier behaviour)
+def test_review_widget_product_block_first_does_not_hide_the_offers():
+    rev = {"@context": "https://schema.org", "@type": "Product", "name": "Widget 3000",
+           "aggregateRating": {"@type": "AggregateRating", "ratingValue": "4.8", "reviewCount": "120"}}
+    main = {"@context": "https://schema.org", "@type": "Product", "name": "Widget 3000", "sku": "W3000",
+            "url": "https://shop.example.com/products/widget-3000",
+            "offers": {"@type": "Offer", "price": "19.99", "priceCurrency": "USD",
+                       "availability": "https://schema.org/InStock"}}
+    html = "".join(f'<script type="application/ld+json">{json.dumps(b)}</script>' for b in (rev, main))
+    r = analyze(f"<html><head>{html}</head><body><main><h1>Widget 3000</h1></main></body></html>",
+                "https://shop.example.com/collections/gadgets/products/widget-3000")
+    assert (r.status, r.price) == ("in_stock", "$19.99")
+
+
+@pytest.mark.parametrize("final, html", [
+    ("https://shop.example.com/error-404", "<title>Shop Example</title>"),
+    ("https://shop.example.com/page-404.html", "<title>Shop Example</title>"),
+    ("https://shop.example.com/products/widget", "<title>Shop Example</title><h1>404 – We can’t find that page</h1>"),
+    ("https://shop.example.com/products/widget", "<title>Shop Example</title><h1>404. That’s an error.</h1>"),
+])
+def test_soft_404_pages_are_still_dead_links(final, html):
+    assert missing_page("https://shop.example.com/products/widget", final, html, 200) == "Product page not found"
+
+
+@pytest.mark.parametrize("label", ["add_shopping_cart Add to cart", "Purchase"])
+def test_icon_and_bare_purchase_buttons_are_buy_buttons(label):
+    assert BUY_RE.search(label) and not BUY_RE.search("Bulk purchase")
+
+
+def test_zero_reviews_before_in_stock_is_not_a_negation():
+    assert _in_stock_phrase("0 reviews In stock") and not _in_stock_phrase("0 in stock")
