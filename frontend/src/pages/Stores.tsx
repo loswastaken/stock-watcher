@@ -63,7 +63,7 @@ export default function StoresPage() {
   };
 
   if (retailers.isLoading || settings.isLoading) return <PageLoader />;
-  if (retailers.isError)
+  if (retailers.isError && !retailers.data)
     return (
       <EmptyState
         icon={<AlertTriangle />}

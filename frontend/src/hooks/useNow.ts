@@ -8,6 +8,7 @@ let timer: ReturnType<typeof setInterval> | null = null;
 function subscribe(cb: () => void) {
   listeners.add(cb);
   if (!timer) {
+    now = Date.now(); // it stood still while nothing was subscribed
     timer = setInterval(() => {
       now = Date.now();
       listeners.forEach((l) => l());

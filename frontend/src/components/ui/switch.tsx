@@ -29,7 +29,6 @@ export function SwitchRow({
   description,
   checked,
   onCheckedChange,
-  disabled,
   icon,
 }: {
   id: string;
@@ -37,7 +36,6 @@ export function SwitchRow({
   description?: ReactNode;
   checked: boolean;
   onCheckedChange: (v: boolean) => void;
-  disabled?: boolean;
   icon?: ReactNode;
 }) {
   return (
@@ -51,7 +49,7 @@ export function SwitchRow({
           {description && <p className="mt-0.5 text-xs text-zinc-500 dark:text-zinc-400">{description}</p>}
         </div>
       </div>
-      <Switch id={id} checked={checked} onCheckedChange={onCheckedChange} disabled={disabled} className="mt-0.5" />
+      <Switch id={id} checked={checked} onCheckedChange={onCheckedChange} className="mt-0.5" />
     </div>
   );
 }

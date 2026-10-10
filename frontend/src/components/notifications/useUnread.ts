@@ -1,19 +1,30 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useSyncExternalStore } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
 import { api } from '@/lib/api';
 import { browserNotifyEnabled, playAlertSound, primeAlertSound, showBrowserNotification } from '@/lib/browserNotify';
 import { qk } from '@/lib/queryClient';
 
+/** Re-render when browser notifications are toggled (here or in another tab). */
+function subscribeBrowserNotify(cb: () => void) {
+  window.addEventListener('sw-browser-notify', cb);
+  window.addEventListener('storage', cb);
+  return () => {
+    window.removeEventListener('sw-browser-notify', cb);
+    window.removeEventListener('storage', cb);
+  };
+}
+
 /** Polls unread notifications (latest 5) every 30 s. Shared by bell + mobile tab bar. */
 export function useUnread() {
+  const background = useSyncExternalStore(subscribeBrowserNotify, browserNotifyEnabled);
   return useQuery({
     queryKey: qk.unread,
     queryFn: () => api.notifications({ unread_only: true, limit: 5 }),
     refetchInterval: 30_000,
     // Keep polling in a background tab when browser notifications are on.
-    refetchIntervalInBackground: browserNotifyEnabled(),
+    refetchIntervalInBackground: background,
   });
 }
 

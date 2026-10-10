@@ -2,8 +2,8 @@ import { forwardRef, type ButtonHTMLAttributes } from 'react';
 import { Loader2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
-export type ButtonVariant = 'primary' | 'secondary' | 'outline' | 'ghost' | 'danger' | 'subtle';
-export type ButtonSize = 'xs' | 'sm' | 'md' | 'lg' | 'icon' | 'icon-sm';
+export type ButtonVariant = 'primary' | 'secondary' | 'outline' | 'ghost' | 'danger';
+export type ButtonSize = 'xs' | 'sm' | 'md' | 'lg' | 'icon-sm';
 
 const variants: Record<ButtonVariant, string> = {
   primary:
@@ -14,8 +14,6 @@ const variants: Record<ButtonVariant, string> = {
     'border border-zinc-200 bg-white text-zinc-800 shadow-soft hover:bg-zinc-50 hover:border-zinc-300 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-100 dark:hover:bg-zinc-800/70 dark:hover:border-zinc-700',
   ghost:
     'text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800/70 dark:hover:text-zinc-100',
-  subtle:
-    'bg-zinc-100 text-zinc-800 hover:bg-zinc-200 dark:bg-zinc-800/80 dark:text-zinc-100 dark:hover:bg-zinc-800',
   danger:
     'bg-rose-600 text-white shadow-sm hover:bg-rose-500 active:bg-rose-700 dark:bg-rose-600 dark:hover:bg-rose-500',
 };
@@ -25,7 +23,6 @@ const sizes: Record<ButtonSize, string> = {
   sm: 'h-8 px-3 text-sm gap-1.5 rounded-lg',
   md: 'h-9 px-4 text-sm gap-2 rounded-lg',
   lg: 'h-11 px-5 text-[15px] gap-2 rounded-xl',
-  icon: 'h-9 w-9 rounded-lg',
   'icon-sm': 'h-8 w-8 rounded-lg',
 };
 

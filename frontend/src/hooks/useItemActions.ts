@@ -56,7 +56,12 @@ export function useItemActions() {
 
   const toggle = useMutation({
     mutationFn: (item: Item) => api.updateItem(item.id, { enabled: !item.enabled }),
-    onMutate: (item) => {
+    onMutate: async (item) => {
+      // Stop an in-flight poll from overwriting the optimistic value.
+      await Promise.all([
+        qc.cancelQueries({ queryKey: qk.items, exact: true }),
+        qc.cancelQueries({ queryKey: qk.item(item.id), exact: true }),
+      ]);
       upsertItem(qc, { ...item, enabled: !item.enabled });
     },
     onSuccess: (item) => {
@@ -126,6 +131,16 @@ export function useItemActions() {
     onError: (e) => toast.error(errorMessage(e)),
   });
 
+  // Undo of "Mark purchased": only clears the purchase, so it doesn't re-arm alerts.
+  const undoPurchase = useMutation({
+    mutationFn: (item: Item) => api.unpurchaseItem(item.id, false),
+    onSuccess: (item) => {
+      after(item);
+      toast.success('Purchase undone', { description: item.name });
+    },
+    onError: (e) => toast.error(errorMessage(e)),
+  });
+
   const purchase = useMutation({
     mutationFn: (item: Item) => api.purchaseItem(item.id),
     onSuccess: (item) => {
@@ -148,9 +163,9 @@ export function useItemActions() {
         action: {
           label: 'Undo',
           onClick: () => {
-            unpurchase.mutate(item);
+            undoPurchase.mutate(item);
             if (siblings.length)
-              void Promise.allSettled(siblings.map((x) => api.unpurchaseItem(x.id))).then(() =>
+              void Promise.allSettled(siblings.map((x) => api.unpurchaseItem(x.id, false))).then(() =>
                 qc.invalidateQueries({ queryKey: qk.items }),
               );
           },

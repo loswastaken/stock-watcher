@@ -31,10 +31,11 @@ export function useSetAuth() {
 }
 
 export function RequireAuth() {
-  const { data, isLoading, isError, refetch } = useAuthStatus();
+  const { data, isLoading, refetch } = useAuthStatus();
   const location = useLocation();
   if (isLoading) return <FullScreenLoader />;
-  if (isError || !data) return <FullScreenLoader error onRetry={() => refetch()} />;
+  // A failed background refetch keeps the last data: don't tear down the app over it.
+  if (!data) return <FullScreenLoader error onRetry={() => refetch()} />;
   if (data.setup_required) return <Navigate to="/setup" replace />;
   if (!data.user) {
     const next = location.pathname + location.search;
@@ -50,7 +51,14 @@ export function RequireAdmin() {
 }
 
 export function safeNext(next: string | null): string {
-  if (!next || !next.startsWith('/') || next.startsWith('//')) return '/';
+  // Same-origin paths only. Browsers read "/\evil.com" as "//evil.com", so no backslashes
+  // (or control characters) at all.
+  if (!next || !next.startsWith('/') || next.startsWith('//') || /[\\\u0000-\u001f\u007f]/.test(next)) return '/';
+  try {
+    if (new URL(next, window.location.origin).origin !== window.location.origin) return '/';
+  } catch {
+    return '/';
+  }
   if (next.startsWith('/login') || next.startsWith('/setup')) return '/';
   return next;
 }

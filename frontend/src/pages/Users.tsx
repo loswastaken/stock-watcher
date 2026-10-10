@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { AlertTriangle, KeyRound, MoreHorizontal, Shield, ShieldOff, Trash2, UserPlus, Users as UsersIcon } from 'lucide-react';
 import { useState, type FormEvent } from 'react';
+import { Link } from 'react-router-dom';
 import { toast } from 'sonner';
 import { FormError } from '@/components/AuthLayout';
 import { Avatar } from '@/components/layout/UserMenu';
@@ -26,7 +27,8 @@ import { SwitchRow } from '@/components/ui/switch';
 import { api, errorMessage } from '@/lib/api';
 import { useUser } from '@/lib/auth';
 import { qk } from '@/lib/queryClient';
-import type { User } from '@/lib/types';
+import type { AuthStatus, User } from '@/lib/types';
+import { usernameError } from '@/lib/utils';
 
 export default function UsersPage() {
   const me = useUser();
@@ -40,6 +42,8 @@ export default function UsersPage() {
     mutationFn: ({ id, is_admin }: { id: number; is_admin: boolean }) => api.updateUser(id, { is_admin }),
     onSuccess: (u) => {
       qc.setQueryData<User[]>(qk.users, (l) => l?.map((x) => (x.id === u.id ? u : x)));
+      // Your own role: update the session too, so RequireAdmin leaves this page once it's gone.
+      if (u.id === me?.id) qc.setQueryData<AuthStatus>(qk.auth, (a) => (a ? { ...a, user: u } : a));
       toast.success(u.is_admin ? `${u.username} is now an admin` : `${u.username} is no longer an admin`);
     },
     onError: (e) => toast.error("Couldn't update user", { description: errorMessage(e) }),
@@ -77,7 +81,7 @@ export default function UsersPage() {
         }
       />
 
-      {users.isError ? (
+      {users.isError && !users.data ? (
         <EmptyState icon={<AlertTriangle />} title="Couldn't load users" description={errorMessage(users.error)} action={<Button onClick={() => users.refetch()}>Retry</Button>} />
       ) : (
         <Card className="overflow-hidden">
@@ -134,9 +138,18 @@ export default function UsersPage() {
                           </button>
                         </DropdownMenuTrigger>
                         <DropdownMenuContent>
-                          <DropdownMenuItem onSelect={() => setResetting(u)}>
-                            <KeyRound /> Reset password
-                          </DropdownMenuItem>
+                          {self ? (
+                            // A reset signs that user out everywhere: change your own in Settings instead.
+                            <DropdownMenuItem asChild>
+                              <Link to="/settings?tab=account">
+                                <KeyRound /> Change password
+                              </Link>
+                            </DropdownMenuItem>
+                          ) : (
+                            <DropdownMenuItem onSelect={() => setResetting(u)}>
+                              <KeyRound /> Reset password
+                            </DropdownMenuItem>
+                          )}
                           <DropdownMenuItem onSelect={() => update.mutate({ id: u.id, is_admin: !u.is_admin })}>
                             {u.is_admin ? (
                               <>
@@ -194,11 +207,12 @@ function AddUserDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (o
       create.reset();
     }
   };
+  const nameErr = usernameError(username);
   const pwErr = password.length < 8 ? 'At least 8 characters' : undefined;
   const onSubmit = (e: FormEvent) => {
     e.preventDefault();
     setTouched(true);
-    if (!username.trim() || pwErr) return;
+    if (nameErr || pwErr) return;
     create.mutate();
   };
 
@@ -207,8 +221,8 @@ function AddUserDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (o
       <DialogContent title="Add user" description="They can sign in right away with these credentials.">
         <form id="add-user" onSubmit={onSubmit} className="space-y-4 pb-1" noValidate>
           <FormError>{create.error ? errorMessage(create.error) : null}</FormError>
-          <Field label="Username" htmlFor="nu-name" error={touched && !username.trim() ? 'Required' : undefined}>
-            <Input id="nu-name" autoComplete="off" autoCapitalize="none" spellCheck={false} value={username} onChange={(e) => setUsername(e.target.value)} autoFocus />
+          <Field label="Username" htmlFor="nu-name" error={touched ? nameErr : undefined}>
+            <Input id="nu-name" autoComplete="off" autoCapitalize="none" spellCheck={false} maxLength={64} value={username} onChange={(e) => setUsername(e.target.value)} invalid={touched && !!nameErr} autoFocus />
           </Field>
           <Field label="Password" htmlFor="nu-pw" error={touched ? pwErr : undefined} hint="At least 8 characters.">
             <PasswordInput id="nu-pw" autoComplete="new-password" value={password} onChange={(e) => setPassword(e.target.value)} invalid={touched && !!pwErr} />

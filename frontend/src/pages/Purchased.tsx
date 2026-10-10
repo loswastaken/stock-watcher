@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query';
-import { ShoppingBag, Undo2 } from 'lucide-react';
+import { AlertTriangle, ShoppingBag, Undo2 } from 'lucide-react';
 import { useMemo } from 'react';
 import { Link } from 'react-router-dom';
 import { ItemImage } from '@/components/ItemImage';
@@ -11,7 +11,7 @@ import { Card } from '@/components/ui/card';
 import { EmptyState } from '@/components/ui/empty-state';
 import { Skeleton } from '@/components/ui/skeleton';
 import { useItemActions } from '@/hooks/useItemActions';
-import { api } from '@/lib/api';
+import { api, errorMessage } from '@/lib/api';
 import { qk } from '@/lib/queryClient';
 import type { Item } from '@/lib/types';
 import { absoluteTime, hostOf, parseDate } from '@/lib/utils';
@@ -82,6 +82,13 @@ export default function Purchased() {
             </div>
           ))}
         </Card>
+      ) : items.isError && !items.data ? (
+        <EmptyState
+          icon={<AlertTriangle />}
+          title="Couldn't load items"
+          description={errorMessage(items.error)}
+          action={<Button onClick={() => items.refetch()}>Retry</Button>}
+        />
       ) : purchased.length === 0 ? (
         <EmptyState
           icon={<ShoppingBag />}

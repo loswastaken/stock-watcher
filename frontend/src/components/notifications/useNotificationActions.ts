@@ -8,7 +8,7 @@ import type { InfiniteData } from '@tanstack/react-query';
 
 type Cached = NotificationList | InfiniteData<NotificationList> | undefined;
 
-function patchCache(old: Cached, fn: (n: Notification) => Notification | null): Cached {
+function patchCache(old: Cached, fn: (n: Notification) => Notification | null, allRead = false): Cached {
   if (!old) return old;
   const patchList = (l: NotificationList): NotificationList => {
     let unread = l.unread_count;
@@ -24,7 +24,8 @@ function patchCache(old: Cached, fn: (n: Notification) => Notification | null): 
       if (!n.read && next.read) unread -= 1;
       items.push(next);
     }
-    return { items, unread_count: Math.max(0, unread), total: Math.max(0, total) };
+    // "Mark all read" also covers notifications that aren't loaded here.
+    return { items, unread_count: allRead ? 0 : Math.max(0, unread), total: Math.max(0, total) };
   };
   if ('pages' in old) return { ...old, pages: old.pages.map(patchList) };
   return patchList(old);
@@ -39,8 +40,10 @@ export function useNotificationActions() {
     qc.invalidateQueries({ queryKey: qk.stats });
   };
 
-  const optimistic = (fn: (n: Notification) => Notification | null) => {
-    qc.setQueriesData<Cached>({ queryKey: qk.notifications }, (old) => patchCache(old, fn));
+  const optimistic = async (fn: (n: Notification) => Notification | null, allRead = false) => {
+    // An in-flight poll would overwrite this (and its higher unread count would look like a new alert).
+    await qc.cancelQueries({ queryKey: qk.notifications });
+    qc.setQueriesData<Cached>({ queryKey: qk.notifications }, (old) => patchCache(old, fn, allRead));
   };
 
   const markRead = useMutation({
@@ -51,7 +54,7 @@ export function useNotificationActions() {
 
   const markAllRead = useMutation({
     mutationFn: api.markAllRead,
-    onMutate: () => optimistic((n) => ({ ...n, read: true })),
+    onMutate: () => optimistic((n) => ({ ...n, read: true }), true),
     onSuccess: () => toast.success('All notifications marked as read'),
     onError: (e) => toast.error(errorMessage(e)),
     onSettled: refresh,

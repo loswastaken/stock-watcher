@@ -98,7 +98,8 @@ export default function ItemDetail() {
   }, [lastChecked, itemId, qc]);
 
   if (item.isLoading) return <DetailSkeleton />;
-  if (item.isError || !item.data)
+  // A failed background refetch keeps `data`: only show the error when there's nothing to show.
+  if (!item.data)
     return (
       <EmptyState
         icon={<AlertTriangle />}
@@ -139,7 +140,7 @@ export default function ItemDetail() {
           {!it.purchased_at && <StoresPanel item={it} />}
           <RestockPanel item={it} />
         </div>
-        <HistoryPanel events={history.data} loading={history.isLoading} error={history.error} />
+        <HistoryPanel events={history.data} loading={history.isLoading} error={history.data ? null : history.error} />
       </div>
     </div>
   );
