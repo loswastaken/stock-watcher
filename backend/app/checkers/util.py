@@ -19,7 +19,7 @@ def clean_text(s: Any) -> str:
     s = str(s)
     s = re.sub(r"<br\s*/?>", " ", s, flags=re.I)
     s = _TAG_RE.sub("", s)
-    s = html_lib.unescape(s).replace("\xa0", " ").replace("​", "")
+    s = html_lib.unescape(s).replace("\xa0", " ").replace("\u200b", "")
     return _WS_RE.sub(" ", s).strip()
 
 

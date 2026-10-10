@@ -67,7 +67,7 @@ def _collect(node: Any, refs: dict[str, dict], keys: set[str], depth: int = 0, s
                 dv = _deref(v, refs)
                 if k in ("price", "prices") and isinstance(dv, dict) or not isinstance(dv, (dict, list)):
                     out[k] = dv
-        for k, v in node.items():
+        for v in node.values():
             if isinstance(v, (dict, list)):
                 _collect(v, refs, keys, depth + 1, seen, out)
     elif isinstance(node, list):
