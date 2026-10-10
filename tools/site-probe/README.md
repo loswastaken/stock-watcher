@@ -45,7 +45,7 @@ which shows up as STALE for stores that actually work. Refresh them first, then 
 ./run.sh check URL1 URL2 --no-browser          # plain HTTP only, no browser
 ./run.sh sweep --only lego,bjs --chrome         # use your installed Google Chrome
 ./run.sh sweep --headless                       # no browser window
-./run.sh sweep                                  # every store in sites.json (concurrency 3)
+./run.sh sweep                                  # every store in sites.local.json if you have one, else sites.json (concurrency 3)
 ./run.sh sweep --only target,bestbuy,walmart
 ./run.sh discover --only target,lego            # find current product URLs -> probe-output/discovered.json
 ./run.sh discover --write --per-store 3         # ...and save them to sites.local.json
@@ -126,7 +126,7 @@ the current `sites.json` entries, so a sample fixed in `sites.json` reaches you 
 local file. Stores the registry marks `retired` (no longer selling online, e.g. Consutronix) are skipped.
 `sweep --discover` runs a discovery (without writing `sites.json`) and sweeps what it found.
 
-`sites.json` has **sample** URLs for every supported store. They were written without being able to open
+`sites.json` has **sample** URLs for every supported store except NextWarehouse (a placeholder until a real item link is known). They were written without being able to open
 the sites, so some may be stale (`discover --write` refreshes them). If one 404s or shows the wrong product, replace it with a current product
 page. A mix of in-stock and sold-out items is most useful. An entry can be a plain URL or
 `{"url": ..., "retailer_config": {"fulfillment": "pickup", "zip": "60601"}}`.

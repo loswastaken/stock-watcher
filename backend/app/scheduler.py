@@ -81,12 +81,16 @@ class _Outcome:
     actions: tuple[dict, ...] = ()
 
 
+def _snapshot_of(item: Item) -> _Snapshot:
+    return _Snapshot(item.kind, item.url, item.generic_config, item.apple_config, item.retailer_config)
+
+
 def _load_snapshot(item_id: int) -> _Snapshot | None:
     with SessionLocal() as db:
         item = db.get(Item, item_id)
         if item is None:
             return None
-        return _Snapshot(item.kind, item.url, item.generic_config, item.apple_config, item.retailer_config)
+        return _snapshot_of(item)
 
 
 def _normalize(result: Any) -> CheckResult:
@@ -135,11 +139,15 @@ def _retailer_of(item: Item, detail: dict | None):
     return (retailer_by_key(str(key)) if key else None) or match_retailer(item.url or "")
 
 
-def _apply_result(item_id: int, result: CheckResult, duration_ms: int) -> _Outcome | None:
+def _apply_result(item_id: int, snap: _Snapshot, result: CheckResult, duration_ms: int) -> _Outcome | None:
     """Persist a check result: item state, CheckEvent, Notification. Returns delivery info."""
     with SessionLocal() as db:
         item = db.get(Item, item_id)
         if item is None:  # deleted while the check was running
+            return None
+        if _snapshot_of(item) != snap:
+            # Edited while the check was running: the result is about the old URL / settings.
+            # Drop it and leave last_checked_at alone so the edit's recheck still happens.
             return None
         now = utcnow()
         prev_status = item.status
@@ -358,7 +366,7 @@ async def check_item(item_id: int, *, wait: bool = True) -> bool:
             result = CheckResult(status="error", status_text=msg, error=msg)
         duration_ms = int((time.monotonic() - started) * 1000)
 
-        outcome = await asyncio.to_thread(_apply_result, item_id, result, duration_ms)
+        outcome = await asyncio.to_thread(_apply_result, item_id, snap, result, duration_ms)
         if outcome is None:
             return True
 

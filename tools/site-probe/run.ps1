@@ -3,7 +3,7 @@
 # Then forwards every argument to probe.py, e.g.
 #   powershell -ExecutionPolicy Bypass -File .\run.ps1 serve
 #   powershell -ExecutionPolicy Bypass -File .\run.ps1 sweep --only target,bestbuy
-#   powershell -ExecutionPolicy Bypass -File .\run.ps1 discover --write    (refresh sites.json with current product URLs)
+#   powershell -ExecutionPolicy Bypass -File .\run.ps1 discover --write    (save current product URLs to sites.local.json)
 #   powershell -ExecutionPolicy Bypass -File .\run.ps1 sweep --discover
 $ErrorActionPreference = 'Stop'
 
@@ -29,13 +29,19 @@ function Find-Python {
     return $null
 }
 
-if (-not (Test-Path $VPy)) {
+# A venv whose creation failed (e.g. no ensurepip) still has python.exe but no pip: start over.
+$HaveVenv = $false
+if (Test-Path $VPy) {
+    try { & $VPy -m pip --version 2>$null | Out-Null; $HaveVenv = ($LASTEXITCODE -eq 0) } catch { }
+}
+if (-not $HaveVenv) {
     $py = Find-Python
     if (-not $py) {
         Write-Error 'Python 3.11 or newer is required. Install it from https://www.python.org/downloads/ (tick "Add python.exe to PATH").'
         exit 1
     }
     Write-Host "Creating virtual environment in $Venv ..."
+    if (Test-Path $Venv) { Remove-Item -Recurse -Force $Venv }
     $exe = $py[0]; $pre = @($py | Select-Object -Skip 1)
     & $exe @pre -m venv $Venv
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

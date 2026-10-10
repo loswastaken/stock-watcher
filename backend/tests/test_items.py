@@ -325,6 +325,26 @@ def test_purchase_moves_item_out_of_watching(admin, preview_mock):
     assert admin.get("/api/stats").json()["purchased"] == 0
 
 
+def test_undo_purchase_keeps_alert_state(admin, preview_mock):
+    from app import db
+    from app.models import Item
+
+    a = create(admin)
+    with db.SessionLocal() as s:
+        it = s.get(Item, a["id"])
+        it.enabled, it.notify_enabled, it.muted_by_alert, it.available_keys = False, False, True, ["stock"]
+        s.commit()
+    admin.post(f"/api/items/{a['id']}/purchase")
+    u = admin.post(f"/api/items/{a['id']}/unpurchase?rearm=false").json()
+    assert u["purchased_at"] is None and u["enabled"] is False and u["notify_enabled"] is False
+    with db.SessionLocal() as s:
+        it = s.get(Item, a["id"])
+        assert it.available_keys == ["stock"] and it.muted_by_alert is True  # no repeat alert for this restock
+    # not purchased: nothing to undo or re-arm
+    again = admin.post(f"/api/items/{a['id']}/unpurchase").json()
+    assert again["enabled"] is False and again["notify_enabled"] is False
+
+
 def test_purchase_is_scoped_to_owner(admin, preview_mock):
     a = create(admin)
     admin.post("/api/users", json={"username": "eve", "password": "evepassword1", "is_admin": False})

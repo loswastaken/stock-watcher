@@ -312,7 +312,8 @@ async def resolve_apple(url: str) -> dict:
         log.info("resolve_apple failed for %s: %s", url, e)
         part = _apple.part_from_url(url or "")
         return {"product_name": None, "image_url": None,
-                "variants": [{"part_number": part, "label": part, "price": None}] if part else []}
+                "variants": [{"part_number": part, "label": part, "price": None}] if part else [],
+                "selected_part_number": part}
 
 
 async def shutdown() -> None:

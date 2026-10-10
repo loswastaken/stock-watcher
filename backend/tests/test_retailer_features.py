@@ -420,9 +420,17 @@ def test_manual_notify_toggle_clears_muted_by_alert(admin):
     it = create(admin)
     update_item(it["id"], notify_enabled=False, muted_by_alert=True)
     assert admin.get(f"/api/items/{it['id']}").json()["muted_by_alert"] is True
-    got = admin.patch(f"/api/items/{it['id']}", json={"notify_enabled": False}).json()
-    assert got["notify_enabled"] is False and got["muted_by_alert"] is False
+    got = admin.patch(f"/api/items/{it['id']}", json={"notify_enabled": True}).json()
+    assert got["notify_enabled"] is True and got["muted_by_alert"] is False
     assert item(it["id"]).muted_by_alert is False
+
+
+def test_saving_unchanged_notify_keeps_muted_by_alert(admin):
+    # the edit form always sends notify_enabled: an unchanged value isn't a decision, so auto re-arm still applies
+    it = create(admin)
+    update_item(it["id"], notify_enabled=False, muted_by_alert=True)
+    got = admin.patch(f"/api/items/{it['id']}", json={"name": "Renamed", "notify_enabled": False}).json()
+    assert got["notify_enabled"] is False and got["muted_by_alert"] is True
 
 
 async def test_price_limit_ignores_stale_stored_price(world, monkeypatch, respx_mock):

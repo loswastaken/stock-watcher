@@ -2,7 +2,7 @@
 # Stock Watcher site probe launcher (macOS / Linux).
 # First run: creates .venv here, installs the backend's requirements and patchright's Chromium.
 # Then forwards every argument to probe.py, e.g.  ./run.sh serve   ./run.sh sweep --only target
-#   ./run.sh discover --write   (find current product URLs, update sites.json)   ./run.sh sweep --discover
+#   ./run.sh discover --write   (find current product URLs, save them to sites.local.json)   ./run.sh sweep --discover
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -22,12 +22,14 @@ find_python() {
   return 1
 }
 
-if [ ! -x "$VPY" ]; then
+# A venv whose creation failed (e.g. no ensurepip) still has bin/python but no pip: start over.
+if [ ! -x "$VPY" ] || ! "$VPY" -m pip --version >/dev/null 2>&1; then
   PY="$(find_python)" || {
     echo "Python 3.11 or newer is required. Install it from https://www.python.org/downloads/ (macOS: 'brew install python@3.12')." >&2
     exit 1
   }
   echo "Creating virtual environment in $VENV ..."
+  rm -rf "$VENV"
   "$PY" -m venv "$VENV"
 fi
 

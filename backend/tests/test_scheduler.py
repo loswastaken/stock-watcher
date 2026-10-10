@@ -342,3 +342,25 @@ async def test_purchased_item_never_alerts(world, monkeypatch, respx_mock):
     set_checker(monkeypatch, fake_result("in_stock", ("stock",)))
     await scheduler.check_item(iid)  # e.g. a check that was already queued when it was purchased
     assert notifs(uid) == [] and route.call_count == 0
+
+
+async def test_edit_during_check_discards_stale_result(world, monkeypatch, respx_mock):
+    uid, iid = world
+    respx_mock.post(NTFY).respond(200)
+
+    async def fake(kind, url, gc, ac, retailer_config=None):
+        # the user changes the URL while this check of the old URL is running
+        def edit():
+            with db.SessionLocal() as s:
+                it = s.get(Item, iid)
+                it.url = "https://shop.test/new"
+                it.last_checked_at = None  # what PATCH does to request a recheck
+                s.commit()
+        await asyncio.to_thread(edit)
+        return fake_result("in_stock", ("stock",))  # about the OLD url
+
+    monkeypatch.setattr("app.scheduler.run_check", fake)
+    await scheduler.check_item(iid)
+    it = item(iid)
+    assert it.status == "unknown" and it.available_keys == [] and it.last_checked_at is None
+    assert notifs(uid) == [] and iid in scheduler.select_due_items()

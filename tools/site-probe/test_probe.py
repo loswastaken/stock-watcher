@@ -28,7 +28,7 @@ import app.checkers as checkers
 
 
 def test_sites_json_covers_every_registry_retailer():
-    sites = probe.load_sites(probe.DEFAULT_SITES)
+    sites = probe.load_sites_data(probe.read_sites_doc(probe.DEFAULT_SITES))
     keys = {r.key for r in registry.RETAILERS}
     assert keys - set(sites) == set(), "stores without sample URLs"
     assert set(sites) - keys == set(), "sample URLs for unknown stores"
@@ -48,7 +48,7 @@ def test_sites_json_is_marked_as_samples():
 
 
 def test_select_entries_rejects_unknown_keys():
-    sites = probe.load_sites(probe.DEFAULT_SITES)
+    sites = probe.load_sites_data(probe.read_sites_doc(probe.DEFAULT_SITES))
     assert {e["key"] for e in probe.select_entries(sites, ["target", "bestbuy"])} == {"target", "bestbuy"}
     with pytest.raises(probe.ProbeError):
         probe.select_entries(sites, ["nope"])
@@ -228,7 +228,7 @@ def test_probe_one_without_recording_hook_falls_back_to_httpx(tmp_path, monkeypa
 
 def test_sweep_report_from_fake_results(tmp_path, fake_backend):
     entries = [{"key": k, "url": u, "retailer_config": {}, "note": None} for k, u in URLS.items()]
-    entries[0]["retailer_config"] = {"fulfillment": "pickup"}
+    entries[0]["retailer_config"] = {"fulfillment": "pickup", "zip": "99999"}
     seen = []
     results = asyncio.run(probe.run_entries(entries, concurrency=3, base_config={"zip": "60601"}, out_root=tmp_path,
                                             on_result=lambda i, s: seen.append(i)))
@@ -236,7 +236,7 @@ def test_sweep_report_from_fake_results(tmp_path, fake_backend):
     by_store = {r["store"]: r for r in results}
     assert {k: r["verdict"] for k, r in by_store.items()} == {
         "target": "OK", "bestbuy": "BLOCKED", "psdirect": "QUEUE", "lego": "FAIL", "walmart": "OK"}
-    # per-entry retailer_config wins over / merges with the CLI defaults
+    # per-entry retailer_config merges with the CLI flags; a flag the user passed (--zip) wins
     assert (URLS["target"], {"zip": "60601", "fulfillment": "pickup"}) in fake_backend
 
     md, js = probe.write_report(results, tmp_path)
@@ -336,6 +336,40 @@ def test_fixture_from_folder_and_zip(tmp_path, fake_backend):
     assert json.loads((dest / "index.json").read_text())["fixtures"]["walmart_oos"]["observed"]["status"] == "out_of_stock"
 
 
+def _evil_bundle(root: Path, retailer, body_file) -> Path:
+    d = root / "20260101-000000-target"
+    (d / "requests").mkdir(parents=True)
+    (d / "result.json").write_text(json.dumps({"summary": {"retailer": retailer, "url": "https://x.test/"}, "result": {}}))
+    (d / "requests" / "index.json").write_text(json.dumps([{"body_file": body_file, "url": "https://x.test/", "status": 200}]))
+    return d
+
+
+def test_fixture_refuses_path_traversal_from_an_untrusted_bundle(tmp_path):
+    dest_root = tmp_path / "fixtures" / "live"
+    secret = tmp_path / "secret.txt"
+    secret.write_text("LOCAL-SECRET")
+    for i, (retailer, body_file) in enumerate((("../../ESCAPED", "requests/001.html"),  # retailer used as a path segment
+                                               ("target", str(secret)),  # absolute body path
+                                               ("target", "../../../secret.txt"))):  # relative walk out of the bundle
+        bundle = _evil_bundle(tmp_path / f"b{i}", retailer, body_file)
+        with pytest.raises(probe.ProbeError, match="Unsafe"):
+            probe.make_fixture(bundle, "evil_case", dest_root)
+    assert not dest_root.exists() and not (tmp_path / "ESCAPED").exists()  # nothing was written
+    # the same checks apply to a zip, which must also refuse entries that walk out of the extraction folder
+    z = tmp_path / "evil.zip"
+    with zipfile.ZipFile(z, "w") as zf:
+        zf.writestr("../../elsewhere/result.json", "{}")
+    with pytest.raises(probe.ProbeError, match="Unsafe path in zip"):
+        probe.make_fixture(z, "evil_case", dest_root)
+
+
+def test_recorded_body_keeps_its_line_endings(tmp_path, fake_backend):
+    entry = {"method": "GET", "url": "https://www.target.com/p", "status": 200, "via": "http",
+             "headers": {"Content-Type": "text/plain"}, "body": "a\r\nb\nc\r\n"}
+    d = probe.save_bundle(tmp_path, {"retailer": "target", "url": "https://www.target.com/p"}, {}, None, [entry])
+    assert next((d / "requests").glob("001-*")).read_bytes() == b"a\r\nb\nc\r\n"
+
+
 # --------------------------------------------------------------------------- local web UI
 
 
@@ -385,6 +419,81 @@ def test_serve_ui_and_api(tmp_path, fake_backend):
         httpd.server_close()
         with contextlib.suppress(Exception):
             srv.close()
+
+
+def _raw_post(port, headers, body=b"{}"):
+    c = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+    c.request("POST", "/api/run", body=body, headers={"Host": f"127.0.0.1:{port}", **headers})
+    r = c.getresponse()
+    r.read()
+    c.close()
+    return r.status
+
+
+def test_serve_rejects_cross_site_posts(tmp_path, fake_backend):
+    httpd, srv = probe.start_server(0, tmp_path / "out", probe.DEFAULT_SITES, 1)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    port = httpd.server_address[1]
+    body = json.dumps({"urls": [URLS["target"]]}).encode()
+    try:
+        # a no-cors form post can choose any simple Content-Type; "application/json" as a parameter is not JSON
+        assert _raw_post(port, {"Content-Type": "text/plain;application/json"}, body) == 415
+        assert _raw_post(port, {"Content-Type": "text/plain; charset=application/json"}, body) == 415
+        assert _raw_post(port, {}, body) == 415
+        # a page on another origin (or a sandboxed one: "null") is refused even with the right Content-Type
+        for origin in ("https://evil.example", "http://localhost:1", f"http://127.0.0.1:{port + 1}", "null", ""):
+            assert _raw_post(port, {"Content-Type": "application/json", "Origin": origin}, body) == 403, origin
+        assert srv.jobs == {}
+        # the UI itself (same origin, either spelling) and non-browser clients (no Origin) still work
+        for origin in (f"http://127.0.0.1:{port}", f"http://localhost:{port}", None):
+            headers = {"Content-Type": "application/json; charset=utf-8"}
+            if origin:
+                headers["Origin"] = origin
+            assert _raw_post(port, headers, body) == 200
+        assert len(srv.jobs) == 3
+    finally:
+        for _ in range(100):
+            if all(j["state"] == "done" for j in srv.jobs.values()):
+                break
+            threading.Event().wait(0.05)
+        httpd.shutdown()
+        httpd.server_close()
+        with contextlib.suppress(Exception):
+            srv.close()
+
+
+def test_serve_reports_a_failed_job(tmp_path, fake_backend, monkeypatch, capsys):
+    def boom(*a, **kw):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(probe, "write_report", boom)
+    httpd, srv = probe.start_server(0, tmp_path / "out", probe.DEFAULT_SITES, 1)
+    try:
+        job = srv.submit({"urls": [URLS["target"]]})
+        for _ in range(100):
+            state = srv.job(job["id"])
+            if state["state"] == "done":
+                break
+            threading.Event().wait(0.05)
+        assert state["state"] == "done" and state["error"] == "OSError: disk full"
+        assert state["results"][0]["verdict"] == "OK"  # the check itself worked; only the report failed
+        assert "disk full" in capsys.readouterr().err
+    finally:
+        httpd.server_close()
+        with contextlib.suppress(Exception):
+            srv.close()
+
+
+def test_cli_serve_on_a_busy_port_is_a_clear_error(clean_browser_env, capsys):
+    import socket
+
+    with socket.socket() as busy:
+        busy.bind(("127.0.0.1", 0))
+        busy.listen()
+        port = busy.getsockname()[1]
+        assert probe.main(["serve", "--port", str(port), "--no-open"]) == 2
+    err = capsys.readouterr().err
+    assert f"127.0.0.1:{port}" in err and f"--port {port + 1}" in err and "Traceback" not in err
 
 
 # --------------------------------------------------------------------------- browser options
@@ -596,7 +705,7 @@ def test_every_registry_store_has_a_pattern_and_samples_match_it():
     assert set(probe.DISCOVER_SEEDS) <= keys and set(probe.DISCOVER_BASES) <= keys
     # a store the table does not know falls back to generic heuristics
     assert probe.product_pattern("nope-store").search("/products/thing") and probe.product_pattern("x").search("/p/abc")
-    for key, entries in probe.load_sites(probe.DEFAULT_SITES).items():
+    for key, entries in probe.load_sites_data(probe.read_sites_doc(probe.DEFAULT_SITES)).items():
         if key in probe.DISCOVER_SKIP:
             continue
         for e in entries:
@@ -835,7 +944,7 @@ def test_dump_sites_round_trips_and_is_loadable(tmp_path):
     assert json.loads(text) == out
     p = tmp_path / "sites.json"
     p.write_text(text, encoding="utf-8")
-    loaded = probe.load_sites(p)
+    loaded = probe.load_sites_data(probe.read_sites_doc(p))
     assert loaded["target"][0]["retailer_config"]["zip"] == "60601" and "_comment" not in loaded
 
 
@@ -864,6 +973,16 @@ def test_cli_discover_writes_discovered_json_or_sites_in_place(tmp_path, clean_b
     assert written["_README"] == SITES_DOC["_README"] and written["_comment"]
     assert written["sites"]["target"][0]["retailer_config"]["fulfillment"] == "pickup"
     assert written["sites"]["ebay"] == SITES_DOC["sites"]["ebay"] and written["sites"]["walmart"] == SITES_DOC["sites"]["walmart"]
+
+
+def test_cli_discover_hint_names_the_file_write_saves_to(tmp_path, clean_browser_env, fake_checks, capsys):
+    _patch_live(clean_browser_env, _target_net([10000031, 10000042]))
+    local = tmp_path / "sites.local.json"
+    clean_browser_env.setattr(probe, "LOCAL_SITES", local)
+    out = tmp_path / "out"
+    assert probe.main(["discover", "--only", "target", "--out", str(out)]) == 0  # no --sites: --write would use `local`
+    assert f"Use --write to save to {probe._rel(local)}," in capsys.readouterr().out
+    assert not local.exists()
 
 
 def test_cli_sweep_discover_checks_the_discovered_urls(tmp_path, clean_browser_env, fake_checks, capsys):

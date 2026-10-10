@@ -412,7 +412,7 @@ def save_bundle(out_root: Path, summary: dict, result: dict, preview: dict | Non
         host = _slug(urlsplit(e.get("url") or "").hostname or "unknown", 30)
         if e["body"]:
             fname = f"{i:03d}-{host}{_ext_for(e)}"
-            (req_dir / fname).write_text(scrub_text(e["body"]), encoding="utf-8")
+            (req_dir / fname).write_text(scrub_text(e["body"]), encoding="utf-8", newline="")  # keep CRLF as recorded
             rec["body_file"] = f"requests/{fname}"
             rec["body_bytes"] = len(e["body"].encode("utf-8"))
         else:
@@ -569,19 +569,8 @@ def _rel(p: Any) -> Any:
 # --------------------------------------------------------------------------- sites + sweep
 
 
-def load_sites(path: Path = DEFAULT_SITES) -> dict[str, list[dict]]:
-    """→ {retailer_key: [{url, retailer_config, note}]}"""
-    try:
-        data = json.loads(Path(path).read_text(encoding="utf-8"))
-    except FileNotFoundError as e:
-        raise ProbeError(f"sites file not found: {path}") from e
-    except json.JSONDecodeError as e:
-        raise ProbeError(f"{path} is not valid JSON: {e}") from e
-    return load_sites_data(data)
-
-
 def load_sites_data(data: Any) -> dict[str, list[dict]]:
-    """``load_sites`` for an already-parsed sites document."""
+    """A parsed sites document (see ``sites_doc_for``) → {retailer_key: [{url, retailer_config, note}]}"""
     sites = data.get("sites", data) if isinstance(data, dict) else {}
     out: dict[str, list[dict]] = {}
     for key, items in sites.items():
@@ -617,7 +606,7 @@ async def run_entries(entries: list[dict], *, concurrency: int = 3, preview: boo
 
     async def one(i: int, e: dict) -> None:
         async with sem:
-            rc = {**(base_config or {}), **(e.get("retailer_config") or {})}
+            rc = {**(e.get("retailer_config") or {}), **(base_config or {})}  # explicit flags beat a sample's own config
             try:
                 s = await probe_one(e["url"], rc or None, generic_config, preview=preview, out_root=out_root)
             except asyncio.CancelledError:
@@ -808,6 +797,7 @@ def make_bundle(out_root: Path = DEFAULT_OUT, dest_dir: Path = HERE, cap_mb: flo
 # --------------------------------------------------------------------------- fixtures
 
 _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_]{0,63}$")
+_RETAILER_RE = re.compile(r"^[a-z0-9_-]+$")
 
 
 def _find_bundle_dirs(root: Path) -> list[Path]:
@@ -825,8 +815,7 @@ def make_fixture(src: Path, name: str, dest_root: Path = LIVE_FIXTURES, entry: s
             tmp = Path(stack.enter_context(tempfile.TemporaryDirectory()))
             with zipfile.ZipFile(src) as zf:
                 for m in zf.namelist():  # refuse path traversal
-                    target = (tmp / m).resolve()
-                    if not str(target).startswith(str(tmp.resolve())):
+                    if not (tmp / m).resolve().is_relative_to(tmp.resolve()):
                         raise ProbeError(f"Unsafe path in zip: {m}")
                 zf.extractall(tmp)
             dirs = _find_bundle_dirs(tmp)
@@ -845,6 +834,18 @@ def make_fixture(src: Path, name: str, dest_root: Path = LIVE_FIXTURES, entry: s
         index = json.loads(idx_path.read_text(encoding="utf-8")) if idx_path.is_file() else []
         summary = doc.get("summary") or {}
         retailer = summary.get("retailer") or "unknown"
+        if not isinstance(retailer, str) or not _RETAILER_RE.match(retailer):
+            raise ProbeError(f"Unsafe retailer name in the bundle: {retailer!r}")
+        bodies = []  # (index record, recorded body); checked before anything is written
+        for rec in index:
+            bf = rec.get("body_file")
+            if not bf or not isinstance(bf, str):
+                continue
+            body = (bdir / bf).resolve()
+            if not body.is_relative_to(bdir.resolve()):
+                raise ProbeError(f"Unsafe body_file in the bundle: {bf}")
+            if body.is_file():
+                bodies.append((rec, body))
         dest = Path(dest_root) / retailer
         dest.mkdir(parents=True, exist_ok=True)
         fx_index_path = dest / "index.json"
@@ -857,13 +858,10 @@ def make_fixture(src: Path, name: str, dest_root: Path = LIVE_FIXTURES, entry: s
             old.unlink()
         files = []
         n = 0
-        for rec in index:
-            bf = rec.get("body_file")
-            if not bf or not (bdir / bf).is_file():
-                continue
+        for rec, body in bodies:
             n += 1
-            fname = f"{name}__{n:02d}{Path(bf).suffix}"
-            shutil.copyfile(bdir / bf, dest / fname)
+            fname = f"{name}__{n:02d}{body.suffix}"
+            shutil.copyfile(body, dest / fname)
             files.append({"file": fname, **{k: rec.get(k) for k in ("method", "url", "status", "via", "phase", "elapsed_ms")},
                           "content_type": next((v for k, v in (rec.get("headers") or {}).items()
                                                 if k.lower() == "content-type"), None)})
@@ -955,7 +953,7 @@ $('run').onclick=async()=>{const urls=$('urls').value.split(/\s+/).map(s=>s.trim
  $('run').disabled=true;try{const j=await api('/api/run',{urls,keys,options:opts});
  const offset=rows.length;j.entries.forEach(e=>rows.push({url:e.url,key:e.key,result:null}));render();
  const id=j.id;(async()=>{for(;;){const s=await api('/api/job?id='+encodeURIComponent(id));s.results.forEach((x,i)=>{if(x)rows[offset+i].result=x});render();
- const done=s.results.filter(Boolean).length;$('status').textContent=`${done}/${s.results.length} done`+(s.state==='done'?' · report saved to probe-output/report.md':'');
+ const done=s.results.filter(Boolean).length;$('status').textContent=`${done}/${s.results.length} done`+(s.state==='done'?(s.error?' · error: '+s.error:' · report saved to probe-output/report.md'):'');
  if(s.state==='done'){$('run').disabled=false;return}await new Promise(r=>setTimeout(r,1000));}})().catch(e=>{$('status').textContent=e.message;$('run').disabled=false});}
  catch(e){$('status').textContent=e.message;$('run').disabled=false}};
 $('filter').oninput=renderStores;$('all').onclick=()=>document.querySelectorAll('#stores input:not(:disabled)').forEach(i=>i.checked=true);
@@ -1026,7 +1024,9 @@ class ProbeServer:
                     all_results = list(self.session_results)
                 write_report(all_results, self.out_root, sites=self.sites_path)
             except Exception as e:  # noqa: BLE001
+                print(f"error: job {job_id} failed: {type(e).__name__}: {e}", file=sys.stderr)
                 with self.lock:
+                    job["error"] = f"{type(e).__name__}: {e}"
                     for i, r in enumerate(job["results"]):
                         if r is None:
                             job["results"][i] = error_summary(entries[i], e)
@@ -1041,7 +1041,7 @@ class ProbeServer:
             job = self.jobs.get(job_id)
             if job is None:
                 return None
-            return {"id": job_id, "state": job["state"], "results": list(job["results"])}
+            return {"id": job_id, "state": job["state"], "results": list(job["results"]), "error": job.get("error")}
 
     def close(self) -> None:
         checkers, _, _ = backend()
@@ -1063,6 +1063,11 @@ def make_handler(server: ProbeServer, port_ref: list[int]):
             host = (self.headers.get("Host") or "").lower()
             allowed = {f"127.0.0.1:{port_ref[0]}", f"localhost:{port_ref[0]}", "127.0.0.1", "localhost"}
             return host in allowed  # DNS-rebinding guard
+
+        def _origin_ok(self) -> bool:
+            origin = self.headers.get("Origin")  # browsers send it on every cross-site POST
+            return origin is None or origin.lower() in {f"http://127.0.0.1:{port_ref[0]}",
+                                                        f"http://localhost:{port_ref[0]}"}
 
         def _send(self, code: int, body: bytes, ctype: str, extra: dict | None = None) -> None:
             self.send_response(code)
@@ -1106,7 +1111,9 @@ def make_handler(server: ProbeServer, port_ref: list[int]):
         def do_POST(self) -> None:  # noqa: N802
             if not self._host_ok():
                 return self._json(403, {"error": "forbidden host"})
-            if "application/json" not in (self.headers.get("Content-Type") or ""):
+            if not self._origin_ok():
+                return self._json(403, {"error": "forbidden origin"})
+            if self.headers.get_content_type() != "application/json":
                 return self._json(415, {"error": "JSON only"})  # forces a CORS preflight for cross-site posts
             if urlsplit(self.path).path != "/api/run":
                 return self._json(404, {"error": "not found"})
@@ -2013,12 +2020,6 @@ def sites_doc_for(path: Path, *, must_exist: bool = False) -> dict:
     return doc
 
 
-def _sites_of(doc: Any) -> dict:
-    if not isinstance(doc, dict):
-        return {}
-    return doc.get("sites") if isinstance(doc.get("sites"), dict) else {k: v for k, v in doc.items() if not k.startswith("_")}
-
-
 def merge_sites(raw: dict, results: list[StoreResult], *, when: dt.date | None = None) -> dict:
     """A new sites document: discovered URLs replace each found store's sample URLs.
 
@@ -2210,7 +2211,7 @@ def _add_browser_opts(p: argparse.ArgumentParser) -> None:
                    help="use a Chrome you started with --remote-debugging-port, e.g. http://127.0.0.1:9222")
 
 
-def _add_discover_opts(p: argparse.ArgumentParser, with_only: bool = True) -> None:
+def _add_discover_opts(p: argparse.ArgumentParser) -> None:
     p.add_argument("--per-store", type=int, default=DEFAULT_PER_STORE, metavar="N",
                    help=f"product URLs to keep per store (default {DEFAULT_PER_STORE}: one in stock, one sold out when possible)")
     p.add_argument("--max-tries", type=int, default=DEFAULT_MAX_TRIES, metavar="N",
@@ -2291,15 +2292,15 @@ def cmd_discover(a: argparse.Namespace) -> int:
     results = asyncio.run(main())
     _print_discovery(results)
     merged = merge_sites(doc, results)
+    target = Path(a.sites_arg) if a.sites_arg is not None else LOCAL_SITES  # where --write saves
     if a.write:
-        dest = Path(a.sites_arg) if a.sites_arg is not None else LOCAL_SITES
-        dest.write_text(dump_sites(merged), encoding="utf-8")
-        print(f"Updated {_rel(dest)}. Next: ./run.sh sweep")
+        target.write_text(dump_sites(merged), encoding="utf-8")
+        print(f"Updated {_rel(target)}. Next: ./run.sh sweep")
     else:
         Path(a.out).mkdir(parents=True, exist_ok=True)
         dest = Path(a.out) / "discovered.json"
         dest.write_text(dump_sites(merged), encoding="utf-8")
-        print(f"Wrote {_rel(dest)} (sites.json format). Use --write to update {_rel(a.sites)}, or "
+        print(f"Wrote {_rel(dest)} (sites.json format). Use --write to save to {_rel(target)}, or "
               f"`sweep --sites {_rel(dest)}` to try it first.")
     return 0
 
@@ -2366,7 +2367,11 @@ def cmd_bundle(a: argparse.Namespace) -> int:
 def cmd_serve(a: argparse.Namespace) -> int:
     apply_browser_options(a)
     backend()
-    httpd, probe = start_server(a.port, a.out, effective_sites(a.sites), a.concurrency)
+    try:
+        httpd, probe = start_server(a.port, a.out, effective_sites(a.sites), a.concurrency)
+    except OSError as e:
+        raise ProbeError(f"Can't listen on 127.0.0.1:{a.port} ({e.strerror or e}); is another probe already "
+                         f"running? Try --port {a.port + 1}") from e
     url = f"http://127.0.0.1:{httpd.server_address[1]}/"
     print(f"Site probe UI: {url}  (only reachable from this computer; Ctrl+C to stop)")
     if a.open:
@@ -2410,7 +2415,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--preview", action="store_true", help="also run the add-item preview for each URL")
     s.add_argument("--discover", action="store_true",
                    help="first find current product URLs (like `discover`, without --write), then sweep those")
-    _add_discover_opts(s, with_only=False)
+    _add_discover_opts(s)
     _add_check_opts(s)
     s.set_defaults(func=cmd_sweep)
 
