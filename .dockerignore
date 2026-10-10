@@ -4,6 +4,9 @@
 **/*.pyc
 **/.pytest_cache
 **/.venv
+**/venv
+**/.ruff_cache
+backend/tests
 **/node_modules
 frontend/dist
 data
