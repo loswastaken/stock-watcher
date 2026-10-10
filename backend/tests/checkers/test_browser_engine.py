@@ -3,6 +3,8 @@ waiting, XHR capture, CDP / launch paths (mocked) and browser-first routing. The
 drive the real Chromium against a local server (skipped when it can't start)."""
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 import os
 import threading
@@ -107,7 +109,8 @@ def _fake_x(files: set[str], procs: list, ready_after: int = 1, dies: set[int] =
 def test_xvfb_picks_a_free_display_and_stops():
     procs: list = []
     popen, exists, calls = _fake_x({"/tmp/.X99-lock"}, procs, ready_after=2)
-    vd = fetcher.VirtualDisplay("/usr/bin/Xvfb", popen=popen, exists=exists, sleep=lambda s: None)
+    vd = fetcher.VirtualDisplay("/usr/bin/Xvfb", popen=popen, exists=exists, sleep=lambda s: None,
+                                stale_lock=lambda p: False)  # :99's lock is held by a live server
     assert vd.start() == ":100"
     assert calls[0][:2] == ["/usr/bin/Xvfb", ":100"] and "-nolisten" in calls[0]
     assert vd.running()
@@ -128,9 +131,38 @@ def test_xvfb_skips_a_display_whose_server_exits():
 
 def test_xvfb_gives_up_when_nothing_is_free():
     vd = fetcher.VirtualDisplay(popen=lambda *a, **k: pytest.fail("no free display to try"),
-                                exists=lambda p: True, tries=3)
+                                exists=lambda p: True, tries=3, stale_lock=lambda p: False)
     with pytest.raises(RuntimeError, match="no free display"):
         vd.start()
+
+
+def test_xvfb_reuses_a_display_whose_server_died_uncleanly():
+    procs: list = []
+    files = {"/tmp/.X99-lock", "/tmp/.X11-unix/X99", "/tmp/.X100-lock", "/tmp/.X11-unix/X100"}
+    popen, exists, _ = _fake_x(files, procs)
+    unlinked = []
+
+    def unlink(p):
+        unlinked.append(p)
+        files.discard(p)
+
+    vd = fetcher.VirtualDisplay(popen=popen, exists=exists, sleep=lambda s: None, unlink=unlink,
+                                stale_lock=lambda p: p == "/tmp/.X99-lock")  # :100 is held by a live server
+    assert vd.start() == ":99"
+    assert unlinked == ["/tmp/.X99-lock", "/tmp/.X11-unix/X99"] and "/tmp/.X100-lock" in files
+
+
+def test_x_lock_stale(tmp_path):
+    def lock(text):
+        p = tmp_path / "lock"
+        p.write_text(text)
+        return str(p)
+
+    assert not fetcher._x_lock_stale(lock(f"{os.getpid():>10}\n"))  # this process is alive
+    assert fetcher._x_lock_stale(lock(f"{2**22 + 12345:>10}\n"))  # above pid_max: no such process
+    assert fetcher._x_lock_stale(lock("garbage\n"))
+    assert fetcher._x_lock_stale(lock("0\n"))
+    assert fetcher._x_lock_stale(str(tmp_path / "missing"))
 
 
 async def test_launch_falls_back_to_headless_without_a_virtual_display(monkeypatch):
@@ -496,6 +528,96 @@ async def test_cdp_url_connects_instead_of_launching(monkeypatch):
     assert fake.cdp_browser.closed and not ctx.closed  # disconnected; the user's Chrome keeps running
 
 
+class _HangingEngine(_FakeEngine):
+    """Launch / CDP connect never finish (they honour no timeout); counts driver starts / stops."""
+
+    def __init__(self, start_error: Exception | None = None):
+        super().__init__()
+        self.started = 0
+        engine = self
+
+        class Chromium:
+            async def launch_persistent_context(self, user_data_dir, **kw):
+                engine.launches.append(dict(kw, user_data_dir=user_data_dir))
+                await asyncio.sleep(3600)
+
+            async def connect_over_cdp(self, endpoint, **kw):
+                engine.cdp.append(dict(kw, endpoint=endpoint))
+                await asyncio.sleep(3600)
+
+        class PW:
+            chromium = Chromium()
+
+            async def stop(self):
+                engine.stopped += 1
+
+        class Starter:
+            async def start(self):
+                if start_error is not None:
+                    raise start_error
+                engine.started += 1
+                return PW()
+
+        self.factory = lambda: Starter()
+
+
+async def test_launch_timeout_is_bounded_and_follows_the_deadline(monkeypatch):
+    fake = _FakeEngine()
+    _use_engine(monkeypatch, fake)
+    monkeypatch.setenv("BROWSER_MODE", "headless")
+    await fetcher._get_browser()
+    assert fake.launches[0]["timeout"] == fetcher.BROWSER_LAUNCH_TIMEOUT_MS  # not Playwright's 180 s
+    await fetcher.shutdown()
+    with fetcher.deadline(20.0):
+        await fetcher._get_browser()
+    assert 18_000 <= fake.launches[1]["timeout"] <= 19_000
+
+
+async def test_cancelled_launch_stops_the_driver_and_fails_fast(monkeypatch):
+    fake = _HangingEngine()
+    _use_engine(monkeypatch, fake)
+    monkeypatch.setenv("BROWSER_MODE", "headless")
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(fetcher._get_browser(), 0.2)
+    assert fake.started == 1 and fake.stopped == 1  # no driver (and browser) left running
+    with pytest.raises(fetcher.FetchError, match="did not finish in time"):
+        await fetcher._get_browser()
+    assert fake.started == 1  # failed fast: no relaunch
+
+
+async def test_no_launch_without_time_for_a_page(monkeypatch):
+    fake = _FakeEngine()
+    _use_engine(monkeypatch, fake)
+    monkeypatch.setenv("BROWSER_MODE", "headless")
+    with fetcher.deadline(2.0):
+        with pytest.raises(fetcher.FetchError, match="time budget used up"):
+            await fetcher._get_browser()
+    assert fake.launches == []
+    await fetcher._get_browser()  # not cached as a launch failure
+    assert len(fake.launches) == 1
+
+
+async def test_driver_start_failure_falls_back_to_the_next_engine(monkeypatch):
+    broken, good = _HangingEngine(start_error=RuntimeError("driver exited: node binary missing")), _FakeEngine()
+    monkeypatch.setenv("ENABLE_BROWSER", "true")
+    monkeypatch.setenv("BROWSER_MODE", "headless")
+    monkeypatch.setattr(fetcher, "engine_names", lambda: ["patchright", "playwright"])
+    monkeypatch.setattr(fetcher, "_engine_factory",
+                        lambda n: broken.factory if n == "patchright" else good.factory)
+    await fetcher._get_browser()
+    assert fetcher.browser_info()["engine"] == "playwright" and len(good.launches) == 1
+
+
+async def test_cdp_connect_is_bounded_and_cancellation_stops_the_driver(monkeypatch):
+    fake = _HangingEngine()
+    _use_engine(monkeypatch, fake)
+    monkeypatch.setenv("BROWSER_CDP_URL", "http://127.0.0.1:9222")
+    with fetcher.deadline(10.0):
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(fetcher._get_browser(), 0.2)
+    assert fake.cdp[0]["timeout"] <= 9_000 and fake.started == fake.stopped == 1
+
+
 def test_cdp_endpoint_resolution(monkeypatch):
     monkeypatch.setattr(fetcher.socket, "gethostbyname", lambda h: "192.168.1.20")
     assert fetcher._cdp_endpoint("http://192.168.1.10:9222") == "http://192.168.1.10:9222"
@@ -550,6 +672,77 @@ async def test_store_that_works_plain_skips_browser_first_next_time(monkeypatch)
     assert not (await fetcher.fetch_html(url)).via_browser
     assert not (await fetcher.fetch_html(url)).via_browser
     assert calls == [url]  # only the first check tried the browser
+
+
+# ------------------------------------------------------------------ browser document status / in-page fetch (fake page)
+
+# A store's "link is broken" page: Organization JSON-LD and "Add to Cart" product tiles.
+NOT_FOUND = ('<html><head><title>Kohl\'s</title><script type="application/ld+json">{"@context":"https://schema.org",'
+             '"@type":"Organization","name":"Kohl\'s"}</script></head><body><h2>Hmm, that link is broken.</h2>'
+             '<div class="tile">LEGO Botanicals Bouquet <button>Add to Cart</button></div></body></html>')
+
+
+class _DocPage:
+    """Just enough of a Playwright page for browser_fetch / browser_fetch_from_page."""
+
+    main_frame = object()
+
+    def __init__(self, status, html):
+        self.status, self.html, self.url = status, html, "about:blank"
+        self.handlers: list = []
+        self.evaluated: list = []
+        self.context = SimpleNamespace(cookies=self._cookies)
+
+    def on(self, ev, fn):
+        self.handlers.append(fn)
+
+    async def goto(self, url, **kw):
+        self.url = url
+        req = SimpleNamespace(frame=self.main_frame, is_navigation_request=lambda: True)
+        resp = SimpleNamespace(status=self.status, headers={"content-type": "text/html"}, request=req, url=url)
+        for h in self.handlers:
+            h(resp)
+        return resp
+
+    async def wait_for_load_state(self, *a, **kw):
+        return None
+
+    async def content(self):
+        return self.html
+
+    async def evaluate(self, script, args):
+        self.evaluated.append((script, args))
+        return {"status": 200, "text": "{}", "url": args[0], "headers": {}}
+
+    async def _cookies(self, urls):
+        return []
+
+
+def _use_page(monkeypatch, page):
+    @contextlib.asynccontextmanager
+    async def fake_browser_page(block_resources=True, *, h1=False):
+        yield page
+
+    monkeypatch.setattr(fetcher, "browser_page", fake_browser_page)
+
+
+@pytest.mark.parametrize(("status", "expected"), [(404, 404), (410, 410), (403, 200), (503, 200)])
+async def test_browser_status_rewrite_only_after_a_block(monkeypatch, status, expected):
+    # 403/503 then a page with product signals: the challenge was solved. A 404/410 stays a dead link.
+    _use_page(monkeypatch, _DocPage(status, NOT_FOUND if status in (404, 410) else PRODUCT))
+    res = await fetcher.browser_fetch("https://www.kohls.com/product/prd-6589434/lego.jsp")
+    assert res.status == expected
+
+
+async def test_in_page_fetch_is_aborted_within_the_deadline(monkeypatch):
+    page = _DocPage(200, PRODUCT)
+    _use_page(monkeypatch, page)
+    await fetcher.browser_fetch_from_page("https://shop.example/", "https://shop.example/api")
+    script, args = page.evaluated[0]
+    assert "AbortSignal.timeout(timeoutMs)" in script and args[3] == fetcher.BROWSER_NAV_TIMEOUT_MS
+    with fetcher.deadline(12.0):
+        await fetcher.browser_fetch_from_page("https://shop.example/", "https://shop.example/api")
+    assert 9_000 <= page.evaluated[1][1][3] <= 10_000  # 12 s left minus the 2 s reserve
 
 
 # ------------------------------------------------------------------ real browser

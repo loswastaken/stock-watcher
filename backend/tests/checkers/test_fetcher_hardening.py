@@ -3,7 +3,9 @@ Best Buy splash bypass, the fetch recording hook and the browser identity."""
 from __future__ import annotations
 
 import asyncio
+import gzip
 import sys
+import time
 
 import httpx
 import pytest
@@ -361,6 +363,173 @@ def test_recording_nests_and_resets():
             assert fetcher._recording.get() is inner
         assert fetcher._recording.get() is outer
     assert fetcher._recording.get() is None
+
+
+# ------------------------------------------------------------------ response size + total time caps
+
+
+class _Chunks(httpx.AsyncByteStream):
+    """A streamed body without Content-Length, ``delay`` s between chunks (a trickling server)."""
+
+    def __init__(self, chunks, delay=0.0):
+        self.chunks, self.delay, self.sent = list(chunks), delay, 0
+
+    async def __aiter__(self):
+        for c in self.chunks:
+            if self.delay:
+                await asyncio.sleep(self.delay)
+            self.sent += 1
+            yield c
+
+
+@pytest.mark.parametrize("response", [
+    lambda: httpx.Response(200, content=b"a" * 5000),  # Content-Length: refused before reading
+    lambda: httpx.Response(200, stream=_Chunks([b"a" * 400] * 10)),  # chunked: stops at the cap
+    lambda: httpx.Response(200, content=gzip.compress(b"a" * 5000),
+                           headers={"Content-Encoding": "gzip"}),  # the decoded size counts
+])
+@respx.mock
+async def test_oversized_bodies_are_refused(monkeypatch, response):
+    monkeypatch.setattr(fetcher, "MAX_BODY_BYTES", 1000)
+    respx.get("https://shop.example/big").mock(return_value=response())
+    with fetcher.recording() as rec:
+        with pytest.raises(fetcher.FetchError, match="too large"):
+            await fetcher.http_get("https://shop.example/big")
+    assert rec[0]["status"] is None and "too large" in rec[0]["error"]
+    for _ in range(5):  # let the loop finalize httpx's abandoned stream generators before it closes
+        await asyncio.sleep(0)
+
+
+@respx.mock
+async def test_bodies_under_the_cap_are_read_in_full(monkeypatch):
+    monkeypatch.setattr(fetcher, "MAX_BODY_BYTES", 1000)
+    respx.get("https://shop.example/p").mock(return_value=httpx.Response(200, stream=_Chunks([b"<p>x</p>"] * 100)))
+    resp = await fetcher.http_get("https://shop.example/p")
+    assert resp.status_code == 200 and resp.text == "<p>x</p>" * 100
+
+
+@respx.mock
+async def test_trickling_response_is_bounded_as_a_whole(monkeypatch):
+    # Every chunk arrives well within the 15 s read timeout; the whole body would take 5 s.
+    monkeypatch.setattr(fetcher, "HTTP_TOTAL_TIMEOUT", 0.3)
+    stream = _Chunks([b"<p>x</p>"] * 100, delay=0.05)
+    respx.get("https://shop.example/drip").mock(return_value=httpx.Response(200, stream=stream))
+    t0 = time.monotonic()
+    with pytest.raises(fetcher.FetchError, match="Timed out fetching shop.example"):
+        await fetcher.http_get("https://shop.example/drip")
+    assert time.monotonic() - t0 < 1.5 and stream.sent < 100
+
+
+@respx.mock
+async def test_trickling_response_ends_within_the_deadline():
+    stream = _Chunks([b"<p>x</p>"] * 100, delay=0.05)
+    respx.get("https://shop.example/drip").mock(return_value=httpx.Response(200, stream=stream))
+    t0 = time.monotonic()
+    with fetcher.deadline(1.2):
+        with pytest.raises(fetcher.FetchError, match="Timed out"):
+            await fetcher.http_get("https://shop.example/drip")
+    assert time.monotonic() - t0 < 2.0
+
+
+async def test_curl_session_caps_the_body_size(fake_curl):
+    from curl_cffi import CurlOpt
+
+    def too_big(u):
+        raise RuntimeError("Failed to perform, curl: (63) Exceeded the maximum allowed file size (10485760)")
+
+    mod = fake_curl(too_big)
+    with pytest.raises(fetcher.FetchError, match="too large"):
+        await fetcher.http_get("https://www.bestbuy.com/x")
+    assert mod.session_kwargs["curl_options"] == {CurlOpt.MAXFILESIZE_LARGE: fetcher.MAX_BODY_BYTES}
+
+
+# ------------------------------------------------------------------ charset
+
+
+_CP1252_PAGE = ('<html><head><meta charset="windows-1252"><title>Caf\xe9 Espresso™ Machine</title></head>'
+                "<body>Add to cart</body></html>").encode("cp1252")
+
+
+@respx.mock
+async def test_meta_charset_is_honored_without_a_header_charset():
+    respx.get("https://shop.example/p").mock(
+        return_value=httpx.Response(200, content=_CP1252_PAGE, headers={"Content-Type": "text/html"}))
+    res = await fetcher.fetch_html("https://shop.example/p")
+    assert "Caf\xe9 Espresso™ Machine" in res.text
+
+
+@respx.mock
+async def test_header_charset_wins_over_the_meta():
+    body = '<html><head><meta charset="windows-1252"><title>Caf\xe9</title></head></html>'.encode()
+    respx.get("https://shop.example/p").mock(
+        return_value=httpx.Response(200, content=body, headers={"Content-Type": "text/html; charset=utf-8"}))
+    assert "Caf\xe9" in (await fetcher.http_get("https://shop.example/p")).text
+
+
+async def test_meta_charset_on_impersonated_responses(fake_curl):
+    fake_curl(lambda u: _FakeCurlResponse(u, body=_CP1252_PAGE, headers=[("Content-Type", "text/html")]))
+    assert "Espresso™" in (await fetcher.http_get("https://www.bestbuy.com/x")).text
+
+
+@pytest.mark.parametrize(("head", "expected"), [
+    (b'<meta http-equiv="Content-Type" content="text/html; charset=ISO-8859-2">', "ISO-8859-2"),
+    (b"<meta charset=shift_jis>", "shift_jis"),
+    (b'<meta charset="utf-16">', "utf-8"),  # can't be: the meta was readable as ASCII
+    (b'<meta charset="no-such-codec">', "utf-8"),
+    (b"<title>no meta</title>", "utf-8"),
+    (b" " * 3000 + b'<meta charset="windows-1252">', "utf-8"),  # only the first 2 kB count
+])
+def test_sniff_encoding(head, expected):
+    assert fetcher._sniff_encoding(b"<html><head>" + head + b"</head></html>") == expected
+
+
+# ------------------------------------------------------------------ invalid URLs
+
+
+@pytest.mark.parametrize("url", ["https://shop.example/p\x7f", "https://xn--a.com/p"])
+@respx.mock
+async def test_invalid_urls_become_fetch_errors(url):
+    with pytest.raises(fetcher.FetchError, match="Invalid URL"):
+        await fetcher.fetch_html(url)
+
+
+# ------------------------------------------------------------------ Turnstile widget / raw Akamai page
+
+
+def test_turnstile_widget_on_a_small_page_is_not_a_challenge():
+    page = ("<html><head><title>Ceramic Mug</title></head><body><h1>Ceramic Mug</h1><button>Add to cart</button>"
+            "<form><div class='cf-turnstile'><iframe src='https://challenges.cloudflare.com/cdn-cgi/"
+            "challenge-platform/h/b/turnstile/if/ov2/av0/rcv0/0/abc/0x4AAA/auto/fbE/normal/auto/'></iframe>"
+            "<input type='hidden' name='cf-turnstile-response' id='cf-chl-widget-a1b2c_response'></div></form>"
+            "<script src='https://challenges.cloudflare.com/turnstile/v0/api.js' async defer></script>"
+            + "<p>description</p>" * 2000 + "</body></html>")
+    assert len(page) <= fetcher._SMALL_PAGE
+    assert not fetcher.looks_like_challenge(page)
+
+
+def test_cloudflare_interstitial_with_turnstile_is_still_a_challenge():
+    page = ("<html><head><title>Just a moment...</title></head><body><div id='cf-chl-widget-x1'>"
+            "<iframe src='/cdn-cgi/challenge-platform/h/g/turnstile/if/ov2/av0/rcv/x'></iframe></div>"
+            "<script>window._cf_chl_opt={cvId: '3', cType: 'managed'};</script></body></html>")
+    assert fetcher.looks_like_challenge(page)
+    assert fetcher.looks_like_challenge(page.replace("Just a moment...", "shop.example"))  # cf_chl_opt
+
+
+_AKAMAI_RAW = ("<HTML><HEAD>\n<TITLE>Access Denied</TITLE>\n</HEAD><BODY>\n<H1>Access Denied</H1>\n \n"
+               "You don't have permission to access \"http&#58;&#47;&#47;www&#46;homedepot&#46;com&#47;\" "
+               "on this server.<P>\nReference&#32;&#35;18&#46;2f3c1002&#46;1727000000&#46;4a5b6c7\n</BODY>\n</HTML>\n")
+
+
+def test_entity_encoded_akamai_block_page_is_a_challenge():
+    assert fetcher.looks_like_challenge(_AKAMAI_RAW)
+    assert fetcher.challenge_vendor(_AKAMAI_RAW) == "akamai"
+
+
+@respx.mock
+async def test_entity_encoded_akamai_403_is_reported_as_bot_protection():
+    respx.get("https://www.homedepot.com/p/1").mock(return_value=httpx.Response(403, text=_AKAMAI_RAW))
+    with pytest.raises(fetcher.FetchError, match="Blocked by bot protection on www.homedepot.com"):
+        await fetcher.fetch_html("https://www.homedepot.com/p/1")
 
 
 # ------------------------------------------------------------------ browser identity
