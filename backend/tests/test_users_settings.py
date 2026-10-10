@@ -45,6 +45,16 @@ def test_patch_password_logs_user_out_and_delete_cascades(admin, user2):
     assert make_client().post("/api/auth/login", json={"username": "bob", "password": "another-pass-1"}).status_code == 401
 
 
+def test_admin_resetting_own_password_keeps_current_session(admin):
+    me = admin.get("/api/auth/me").json()
+    elsewhere = make_client()
+    assert elsewhere.post("/api/auth/login", json={"username": "admin", "password": PW}).status_code == 200
+    assert admin.patch(f"/api/users/{me['id']}", json={"password": "brand-new-pass"}).status_code == 200
+    assert admin.get("/api/auth/me").status_code == 200  # this session survives
+    assert elsewhere.get("/api/auth/me").status_code == 401  # the others don't
+    assert make_client().post("/api/auth/login", json={"username": "admin", "password": "brand-new-pass"}).status_code == 200
+
+
 def test_settings_defaults_and_token_masking(admin):
     s = admin.get("/api/settings").json()
     assert s == {
@@ -101,3 +111,16 @@ def test_test_notification(admin, respx_mock):
     route.respond(403, text="forbidden")
     r = admin.post("/api/settings/test-notification").json()
     assert r["ok"] is False and "403" in r["error"]
+
+
+def test_test_notification_error_never_echoes_the_response_body(admin, respx_mock):
+    """ntfy_server is user-supplied: pointing it at an internal host must not reveal that host's pages."""
+    admin.put("/api/settings", json={"ntfy_topic": "t1", "ntfy_server": "http://10.0.0.5:8080"})
+    route = respx_mock.post("http://10.0.0.5:8080/")
+    route.respond(404, text="<html>router admin: wifi password hunter2</html>")
+    assert admin.post("/api/settings/test-notification").json() == {"ok": False, "error": "ntfy returned HTTP 404"}
+    route.respond(500, json={"secret": "x", "detail": "internal"})
+    assert admin.post("/api/settings/test-notification").json()["error"] == "ntfy returned HTTP 500"
+    # ntfy's own JSON error is still shown
+    route.respond(401, json={"code": 40101, "http": 401, "error": "unauthorized"})
+    assert admin.post("/api/settings/test-notification").json()["error"] == "ntfy returned HTTP 401: unauthorized"

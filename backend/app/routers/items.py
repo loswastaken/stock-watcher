@@ -164,7 +164,7 @@ def classify_support(data: dict, retailer: dict | None) -> dict:
     platform    a platform recipe (Shopify, SFCC, ...) recognised the store
     generic     generic heuristics — with a definite answer, or unknown (then suggest custom rules)
     blocked     bot protection stopped the checker
-    unsupported the page couldn't be fetched / was not found / errored
+    unsupported the page couldn't be fetched / was not found / errored, or the store no longer sells online
     """
     status = str(data.get("status") or "unknown")
     error = str(data.get("error") or "")
@@ -172,6 +172,11 @@ def classify_support(data: dict, retailer: dict | None) -> dict:
     definite = status in ("in_stock", "out_of_stock")
     store_name = (retailer or {}).get("name")
 
+    entry = retailer_by_key(str((retailer or {}).get("key") or ""))
+    if entry is not None and entry.retired:
+        # even a page that "works" there (e.g. the domain now hosts another shop) says nothing about this store
+        return {"level": "unsupported", "label": "Store no longer sells online",
+                "detail": f"{entry.name} no longer runs an online store, so there is nothing to track here."}
     if data.get("blocked") or (error and _BLOCKED_RE.search(error) and not definite):
         return {"level": "blocked", "label": "Blocked by bot protection", "detail": _BLOCKED_DETAIL}
     if status == "error" or (error and not definite and not data.get("name")):
@@ -210,6 +215,11 @@ def _opt_str(v) -> str | None:
     return str(v) if v not in (None, "") else None
 
 
+def _http_url(v) -> str | None:
+    """Only http(s) links (ItemOut applies the same rule to cart_url)."""
+    return v if isinstance(v, str) and v.startswith(("http://", "https://")) else None
+
+
 def _preview_out(url: str, data: dict) -> PreviewOut:
     retailer = _preview_retailer(url, data.get("retailer"))
     third = data.get("third_party")
@@ -226,7 +236,7 @@ def _preview_out(url: str, data: dict) -> PreviewOut:
         fetched_via=_opt_str(data.get("fetched_via")),
         seller=_opt_str(data.get("seller")),
         third_party=bool(third) if third is not None else None,
-        cart_url=_opt_str(data.get("cart_url")),
+        cart_url=_http_url(data.get("cart_url")),
         signals=[str(x) for x in (data.get("signals") or []) if x][:12],
         blocked=bool(data.get("blocked")),
         queued=bool(data.get("queued")),

@@ -385,14 +385,20 @@ async def check_item(item_id: int, *, wait: bool = True) -> bool:
             await asyncio.to_thread(_record_delivery, outcome.notification_id, ok, err)
 
         if outcome.fetch_image_url:
-            try:
-                await images.attach_image_from_url(item_id, outcome.fetch_image_url)
-            except Exception:  # noqa: BLE001
-                log.exception("auto image fetch failed for item %s", item_id)
+            # In the background: this check may hold a scheduler slot, and a slow image host
+            # must not keep it (or the item's in-flight lock) busy.
+            spawn(_auto_fetch_image(item_id, outcome.fetch_image_url))
         return True
     finally:
         _inflight.pop(item_id, None)
         done.set()
+
+
+async def _auto_fetch_image(item_id: int, url: str) -> None:
+    try:
+        await images.attach_image_from_url(item_id, url)
+    except Exception:  # noqa: BLE001
+        log.exception("auto image fetch failed for item %s", item_id)
 
 
 # ------------------------------------------------------------------------ loop

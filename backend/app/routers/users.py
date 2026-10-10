@@ -1,7 +1,7 @@
 """Admin-only user management."""
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -39,7 +39,11 @@ def create_user(body: UserCreate, _: User = Depends(admin_required), db: Session
 
 @router.patch("/{user_id}", response_model=UserOut)
 def patch_user(
-    user_id: int, body: UserPatch, _: User = Depends(admin_required), db: Session = Depends(get_db)
+    user_id: int,
+    body: UserPatch,
+    request: Request,
+    me: User = Depends(admin_required),
+    db: Session = Depends(get_db),
 ):
     user = _get_user(db, user_id)
     if body.is_admin is False and user.is_admin and _admin_count(db) <= 1:
@@ -48,7 +52,11 @@ def patch_user(
         user.is_admin = body.is_admin
     if body.password is not None:
         user.password_hash = hash_password(body.password)
-        db.query(SessionRow).filter(SessionRow.user_id == user.id).delete(synchronize_session=False)
+        q = db.query(SessionRow).filter(SessionRow.user_id == user.id)
+        keep = getattr(request.state, "session_id", None) if user.id == me.id else None
+        if keep:  # resetting your own password keeps you signed in here (like change-password)
+            q = q.filter(SessionRow.id != keep)
+        q.delete(synchronize_session=False)
     db.commit()
     db.refresh(user)
     return user

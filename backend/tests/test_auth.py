@@ -179,3 +179,122 @@ def test_login_rate_limit_per_username_across_ips():
         lim.check("10.0.0.99", "admin")
     assert e.value.status_code == 429
     lim.check("10.0.0.99", "someone-else")  # other usernames unaffected
+
+
+def test_head_health_for_uptime_monitors(client):
+    r = client.head("/api/health")
+    assert r.status_code == 200 and not r.content
+    # other methods on a known path, and unknown paths, are still JSON 404s
+    assert client.put("/api/health", json={}).json() == {"detail": "Not found"}
+    assert client.head("/api/does-not-exist").status_code == 404
+
+
+def test_spa_odd_paths_fall_back_to_index(client, tmp_path, monkeypatch):
+    from app import config
+
+    static = tmp_path / "static"
+    static.mkdir()
+    (static / "index.html").write_text("<html>spa</html>")
+    monkeypatch.setenv("STATIC_DIR", str(static))
+    config.reload_settings()
+    for path in ("/" + "a" * 300, "/%00", "/x/%00/y"):  # ENAMETOOLONG / embedded NUL
+        r = client.get(path)
+        assert r.status_code == 200 and "spa" in r.text, path
+
+
+@pytest.mark.parametrize(("value", "expected"), [
+    ("True", "true"), ("TRUE", "true"), ("1", "true"), ("yes", "true"), ("On", "true"),
+    ("False", "false"), ("0", "false"), ("no", "false"), ("OFF", "false"), ("Auto", "auto"), (" auto ", "auto"),
+])
+def test_cookie_secure_accepts_common_spellings(monkeypatch, value, expected):
+    from app import config
+
+    monkeypatch.setenv("COOKIE_SECURE", value)
+    assert config.reload_settings().cookie_secure == expected
+
+
+def test_cookie_secure_rejects_unknown_values(monkeypatch):
+    from pydantic import ValidationError
+
+    from app import config
+
+    monkeypatch.setenv("COOKIE_SECURE", "sometimes")
+    with pytest.raises(ValidationError):
+        config.reload_settings()
+    monkeypatch.setenv("COOKIE_SECURE", "false")  # teardown reloads settings before the env is restored
+
+
+def test_oversized_bodies_are_refused_before_parsing(client):
+    from app.security import MAX_JSON_BODY, MAX_MULTIPART_BODY
+
+    # unauthenticated: the body would otherwise be read (and parsed) before the 401
+    r = client.post("/api/items", content=b"[" + b" " * MAX_JSON_BODY + b"]", headers={"Content-Type": "application/json"})
+    assert r.status_code == 413 and r.json()["detail"]
+
+    def chunks():  # no Content-Length (chunked): counted as it arrives
+        yield b'{"url": "'
+        for _ in range(MAX_JSON_BODY // 65536 + 1):
+            yield b"a" * 65536
+        yield b'"}'
+
+    r = client.post("/api/auth/login", content=chunks(), headers={"Content-Type": "application/json"})
+    assert r.status_code == 413
+    big = b"\0" * (MAX_MULTIPART_BODY + 1)
+    assert client.post("/api/items/1/image", files={"file": ("a.png", big, "image/png")}).status_code == 413
+    # an image upload under the multipart cap (but over the JSON one) gets through to auth
+    ok = b"\0" * (MAX_JSON_BODY * 2)
+    assert client.post("/api/items/1/image", files={"file": ("a.png", ok, "image/png")}).status_code == 401
+    assert client.post("/api/auth/login", json={"username": "a", "password": "b"}).status_code == 401
+
+
+def test_password_hashing_concurrency_is_bounded(monkeypatch):
+    """Each argon2 hash/verify takes 64 MiB: a burst of logins must not run them all at once."""
+    import threading
+    import time
+
+    from app import security
+
+    running = peak = 0
+    lock = threading.Lock()
+
+    class SlowHasher:
+        def _work(self):
+            nonlocal running, peak
+            with lock:
+                running += 1
+                peak = max(peak, running)
+            time.sleep(0.05)
+            with lock:
+                running -= 1
+
+        def hash(self, password):
+            self._work()
+            return "hash"
+
+        def verify(self, password_hash, password):
+            self._work()
+            return True
+
+    monkeypatch.setattr(security, "_hasher", SlowHasher())
+    monkeypatch.setattr(security, "_dummy_hash", None)
+    threads = [threading.Thread(target=f, args=a) for f, a in
+               [(security.verify_password, ("h", "p"))] * 6 + [(security.burn_password_check, ("p",))] * 4
+               + [(security.hash_password, ("p",))] * 2]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert 1 <= peak <= 2
+
+
+def test_successful_login_clears_per_username_count():
+    from app.security import LoginLimiter
+
+    lim = LoginLimiter()
+    for i in range(29):  # just under the per-username cap (3 x 10), from many IPs
+        lim.check(f"10.0.0.{i}", "admin")
+        lim.fail(f"10.0.0.{i}", "admin")
+    lim.reset("192.168.1.50", "admin")  # the real admin logs in
+    for i in range(29):  # the earlier failures no longer count towards the cap
+        lim.check(f"10.0.1.{i}", "admin")
+        lim.fail(f"10.0.1.{i}", "admin")

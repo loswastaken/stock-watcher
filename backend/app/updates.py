@@ -77,6 +77,9 @@ async def fetch_latest(client: httpx.AsyncClient | None = None) -> LatestImage:
         return LatestImage(revision=labels.get(REVISION_LABEL), created=cfg.get("created"))
     except httpx.HTTPError as e:
         raise UpdateError(f"Could not reach {registry}: {type(e).__name__}") from e
+    except (ValueError, AttributeError, TypeError) as e:
+        # not JSON / not the expected shape, e.g. a captive portal or filtering proxy's HTML page
+        raise UpdateError(f"{registry} sent an unexpected response ({type(e).__name__})") from e
     finally:
         if own:
             await client.aclose()

@@ -104,3 +104,29 @@ def test_preview_failure_is_unsupported(admin, monkeypatch):
     monkeypatch.setattr("app.routers.items.preview_url", boom)
     b = admin.post("/api/items/preview", json={"url": "https://a.test/"}).json()
     assert b["error"] and b["support"]["level"] == "unsupported"
+
+
+def test_preview_drops_non_http_cart_url(admin, monkeypatch):
+    async def fake_preview(url):
+        return {"name": "X", "status": "in_stock", "cart_url": "javascript:alert(1)"}
+
+    monkeypatch.setattr("app.routers.items.preview_url", fake_preview)
+    b = admin.post("/api/items/preview", json={"url": "https://www.bestbuy.com/site/x/1.p"}).json()
+    assert b["cart_url"] is None
+
+
+@pytest.mark.parametrize("key", ["acegraphics", "consutronix"])
+def test_retired_store_is_not_reported_as_supported(admin, key):
+    retired = retailer_by_key(key)
+    assert retired.retired
+    d = retired.to_dict()
+    assert d["note"] and "no longer sells online" in d["note"].lower()
+    # even a page that checks fine there (acegraphicscards.com now hosts an unrelated shop) is unsupported
+    for data in ({"status": "in_stock", "adapter": "shopify"}, {"status": "in_stock"},
+                 {"status": "error", "error": "Page not found (HTTP 404) — update the link"}):
+        s = classify_support(data, d)
+        assert s["level"] == "unsupported" and s["label"] == "Store no longer sells online"
+        assert retired.name in s["detail"]
+    listed = next(r for r in admin.get("/api/retailers").json() if r["key"] == key)
+    assert listed["note"] == d["note"]
+    assert retailer_by_key("bestbuy").to_dict()["note"] is None  # others keep their own note

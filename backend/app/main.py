@@ -77,8 +77,12 @@ def create_app() -> FastAPI:
             return JSONResponse(status_code=404, content={"detail": "Not found"})
         root = static_dir.resolve()
         if full_path:
-            candidate = (root / full_path).resolve()
-            if candidate.is_file() and candidate.is_relative_to(root):
+            try:
+                candidate = (root / full_path).resolve()
+                is_file = candidate.is_file() and candidate.is_relative_to(root)
+            except (OSError, ValueError):  # name too long, NUL byte, ...: not a static file
+                is_file = False
+            if is_file:
                 headers = {}
                 if full_path.startswith("assets/"):
                     headers["Cache-Control"] = "public, max-age=31536000, immutable"

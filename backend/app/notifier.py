@@ -60,5 +60,13 @@ async def send_ntfy(
         return False, f"ntfy request failed: {e}"[:300]
     if 200 <= resp.status_code < 300:
         return True, None
-    body = (resp.text or "").strip().replace("\n", " ")[:200]
-    return False, f"ntfy returned HTTP {resp.status_code}" + (f": {body}" if body else "")
+    # Only ntfy's own JSON "error" field, never the raw body: the server URL is user-supplied, so
+    # echoing the body would let a user read pages from hosts on the app's network.
+    reason = None
+    try:
+        body = resp.json()
+        if isinstance(body, dict) and isinstance(body.get("error"), str):
+            reason = body["error"].strip().replace("\n", " ")[:200]
+    except ValueError:
+        pass
+    return False, f"ntfy returned HTTP {resp.status_code}" + (f": {reason}" if reason else "")

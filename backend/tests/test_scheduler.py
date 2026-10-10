@@ -312,7 +312,32 @@ async def test_auto_image_fetch_from_result(world, monkeypatch, respx_mock):
     respx_mock.get("https://cdn.test/a.png").respond(200, content=buf.getvalue())
     set_checker(monkeypatch, fake_result("out_of_stock", (), image_url="https://cdn.test/a.png"))
     await scheduler.check_item(iid)
+    await asyncio.gather(*list(scheduler._background))  # the fetch runs in the background
     assert item(iid).image_path.endswith(".webp")
+
+
+async def test_slow_auto_image_fetch_does_not_hold_the_check_slot(world, monkeypatch):
+    """A trickling image host must not keep a scheduler slot (or the item's lock) busy."""
+    uid, iid = world
+    release = asyncio.Event()
+
+    async def slow_attach(item_id, url):
+        await release.wait()
+        return False
+
+    monkeypatch.setattr("app.scheduler.images.attach_image_from_url", slow_attach)
+    set_checker(monkeypatch, fake_result("out_of_stock", (), image_url="https://cdn.test/slow.png"))
+    monkeypatch.setattr(scheduler, "_semaphore", asyncio.Semaphore(1))
+    try:
+        assert scheduler.queue_checks([iid]) == 1
+        await asyncio.wait_for(asyncio.sleep(0.2), 1)
+        # the check finished and gave its slot back while the image download is still running
+        assert not scheduler._queued and not scheduler._inflight
+        assert not scheduler._semaphore.locked()
+        assert item(iid).last_checked_at is not None
+    finally:
+        release.set()
+        await scheduler.stop()
 
 
 async def test_unknown_keeps_previous_keys(world, monkeypatch, respx_mock):

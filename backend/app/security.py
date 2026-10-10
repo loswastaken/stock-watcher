@@ -25,15 +25,20 @@ COOKIE_NAME = "sw_session"
 # ------------------------------------------------------------------ passwords
 _hasher = PasswordHasher()  # argon2id
 _dummy_hash: str | None = None
+# Every hash/verify allocates 64 MiB (argon2-cffi's default, which stored hashes use): cap how many
+# run at once, so a burst of logins (unknown usernames verify too) can't exhaust a small NAS's RAM.
+_hash_slots = threading.BoundedSemaphore(2)
 
 
 def hash_password(password: str) -> str:
-    return _hasher.hash(password)
+    with _hash_slots:
+        return _hasher.hash(password)
 
 
 def verify_password(password_hash: str, password: str) -> bool:
     try:
-        return _hasher.verify(password_hash, password)
+        with _hash_slots:
+            return _hasher.verify(password_hash, password)
     except (VerifyMismatchError, InvalidHashError, VerificationError):
         return False
 
@@ -193,8 +198,10 @@ class LoginLimiter:
             self._fails.setdefault(("*", username), []).append(now)
 
     def reset(self, ip: str, username: str) -> None:
+        """Successful login: clear this client's failures and the username's cross-IP count."""
         with self._lock:
             self._fails.pop((ip, username), None)
+            self._fails.pop(("*", username), None)
 
     def clear(self) -> None:
         with self._lock:
@@ -206,6 +213,10 @@ login_limiter = LoginLimiter()
 
 # ---------------------------------------------------------------- middleware
 _SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+# Body caps for mutating /api requests (bodies are parsed before auth runs). JSON bodies are small;
+# multipart is the image upload (images.MAX_BYTES = 8 MB, plus form overhead).
+MAX_JSON_BODY = 1024 * 1024
+MAX_MULTIPART_BODY = 9 * 1024 * 1024
 
 
 def _origin_host(value: str) -> str | None:
@@ -215,10 +226,27 @@ def _origin_host(value: str) -> str | None:
         return None
 
 
+def _capped_receive(receive, limit: int):
+    """`receive` that refuses the body once more than `limit` bytes arrived (chunked bodies too)."""
+    seen = 0
+
+    async def wrapped():
+        nonlocal seen
+        message = await receive()
+        if message["type"] == "http.request":
+            seen += len(message.get("body", b""))
+            if seen > limit:
+                raise HTTPException(status_code=413, detail="Request body is too large")
+        return message
+
+    return wrapped
+
+
 class SecurityMiddleware:
     """Pure-ASGI CSRF protection for mutating /api requests + baseline security headers.
 
-    - Bodies must be application/json or multipart/form-data.
+    - Bodies must be application/json or multipart/form-data, and at most MAX_JSON_BODY /
+      MAX_MULTIPART_BODY bytes (413 otherwise).
     - If Origin (else Referer) is present, its host must match Host / X-Forwarded-Host.
     """
 
@@ -249,11 +277,17 @@ class SecurityMiddleware:
         if path.startswith("/api/") and method not in _SAFE_METHODS:
             headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope["headers"]}
             has_body = headers.get("content-length", "0") not in ("", "0") or "transfer-encoding" in headers
+            ctype = headers.get("content-type", "").split(";")[0].strip().lower()
             if has_body:
-                ctype = headers.get("content-type", "").split(";")[0].strip().lower()
                 if ctype != "application/json" and ctype != "multipart/form-data":
                     await self._reject(send, 415, "Content-Type must be application/json or multipart/form-data")
                     return
+            limit = MAX_MULTIPART_BODY if ctype == "multipart/form-data" else MAX_JSON_BODY
+            length = headers.get("content-length", "")
+            if length.isdigit() and int(length) > limit:
+                await self._reject(send, 413, "Request body is too large")
+                return
+            receive = _capped_receive(receive, limit)
             source = headers.get("origin") or headers.get("referer")
             if source:
                 src_host = _origin_host(source)

@@ -9,7 +9,7 @@ import asyncio
 import pytest
 from fastapi.testclient import TestClient
 
-from app import config, db, scheduler, security
+from app import config, db, security
 from app.checkers import Availability, CheckResult
 
 PW = "correct horse battery"

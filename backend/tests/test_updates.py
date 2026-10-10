@@ -53,6 +53,21 @@ def test_status_up_to_date_and_errors(admin, respx_mock, monkeypatch):
     assert "public" in r["error"]
 
 
+@pytest.mark.parametrize("token_reply", [
+    {"text": "<html>Sign in to the guest Wi-Fi</html>"},  # captive portal / filtering proxy
+    {"json": ["not", "a", "dict"]},
+])
+def test_status_unexpected_registry_response_is_an_error_not_500(admin, respx_mock, token_reply):
+    respx_mock.get(f"{REG}/token").respond(200, **token_reply)
+    r = admin.get("/api/system/update")
+    assert r.status_code == 200
+    assert "unexpected response" in r.json()["error"] and r.json()["latest_version"] is None
+    # a manifest that isn't JSON fails the same way
+    respx_mock.get(f"{REG}/token").respond(200, json={"token": "t"})
+    respx_mock.get(f"{REG}/v2/{REPO}/manifests/latest").respond(200, text="<html></html>")
+    assert "unexpected response" in admin.post("/api/system/update/check").json()["error"]
+
+
 def test_apply_calls_watchtower_for_this_image_only(admin, respx_mock, monkeypatch):
     from app import config
 

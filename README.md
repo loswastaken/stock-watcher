@@ -87,6 +87,7 @@ If using a reverse proxy (e.g., Synology DSM reverse proxy):
 | `DATA_DIR` | `/data` | SQLite database and images location |
 | `SECRET_KEY` | auto-generated | Persisted to `$DATA_DIR/secret.key` |
 | `COOKIE_SECURE` | `auto` | `auto` = Secure cookie only over HTTPS; `true`/`false` to force |
+| `FORWARDED_ALLOW_IPS` | `*` | Proxies whose `X-Forwarded-For`/`-Proto` headers are trusted. Set it to your reverse proxy's IP/CIDR (e.g. `172.17.0.1` or `192.168.1.0/24`): with `*` any client can claim any IP, which weakens the per-IP login limit |
 | `SESSION_DAYS` | `30` | Session cookie expiry |
 | `MIN_INTERVAL_SECONDS` | `60` | Minimum check interval per item (seconds) |
 | `CHECK_CONCURRENCY` | `4` | Concurrent checks during scheduler loop |
@@ -301,7 +302,29 @@ Frontend dev server runs on `http://localhost:5173` and proxies `/api` requests 
 
 ### Reset admin password
 
-Coming soon: CLI utility to reset credentials. For now, you can connect to the running container and reset via database (details to follow).
+Run this on the NAS (the container keeps running). It asks for the username and the new password, and signs that
+user out everywhere:
+
+```bash
+sudo docker exec -it stock-watcher python -c "
+import getpass
+from app import db
+from app.models import Session, User
+from app.security import hash_password
+db.init_engine()
+with db.SessionLocal() as s:
+    user = s.query(User).filter_by(username_key=input('Username: ').strip().lower()).one_or_none()
+    if user is None:
+        raise SystemExit('No such user. Users: ' + ', '.join(u.username for u in s.query(User)))
+    pw = getpass.getpass('New password (8+ characters): ')
+    if len(pw) < 8:
+        raise SystemExit('Too short; nothing changed.')
+    user.password_hash = hash_password(pw)
+    s.query(Session).filter_by(user_id=user.id).delete()
+    s.commit()
+    print('Password reset for', user.username)
+"
+```
 
 ## License
 

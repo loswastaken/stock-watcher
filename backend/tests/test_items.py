@@ -228,6 +228,95 @@ def test_image_upload_rejects_bad_files(admin, preview_mock, monkeypatch):
     assert r.status_code == 413
 
 
+def broken_png() -> bytes:
+    """IDAT claims fewer bytes than it holds, so the chunk after it is misread: Pillow raises SyntaxError."""
+    import struct
+
+    data = png_bytes((64, 48))
+    i = data.index(b"IDAT")
+    n = struct.unpack(">I", data[i - 4:i])[0]
+    return data[:i - 4] + struct.pack(">I", n - 8) + data[i:]
+
+
+def test_broken_png_upload_is_400_not_500(admin, preview_mock):
+    iid = create(admin)["id"]
+    r = admin.post(f"/api/items/{iid}/image", files={"file": ("a.png", broken_png(), "image/png")})
+    assert r.status_code == 400 and r.json()["detail"] == "File is not a valid image"
+
+
+def _oriented(fmt: str, orientation: int) -> bytes:
+    """1600x800 image, left half red / right half blue, stored with an EXIF Orientation tag."""
+    im = Image.new("RGB", (1600, 800), (220, 0, 0))
+    im.paste((0, 0, 220), (800, 0, 1600, 800))
+    exif = Image.Exif()
+    exif[0x0112] = orientation
+    buf = io.BytesIO()
+    im.save(buf, format=fmt, exif=exif.tobytes())
+    return buf.getvalue()
+
+
+@pytest.mark.parametrize("fmt", ["JPEG", "PNG"])
+def test_process_image_applies_exif_orientation_after_shrinking(fmt):
+    from app import images
+
+    out = Image.open(io.BytesIO(images.process_image(_oriented(fmt, 6))))  # 6 = rotate 90° clockwise to view
+    assert out.size == (400, 800)  # portrait, longest side 800
+    top, bottom = out.convert("RGB").getpixel((200, 100)), out.convert("RGB").getpixel((200, 700))
+    assert top[0] > 150 and top[2] < 80  # the stored left half (red) ends up on top
+    assert bottom[2] > 150 and bottom[0] < 80
+    out = Image.open(io.BytesIO(images.process_image(_oriented(fmt, 1))))
+    assert out.size == (800, 400)
+
+
+def test_process_image_shrinks_palette_and_alpha_images():
+    from app import images
+
+    pal = Image.new("RGB", (2000, 1000), (0, 120, 0)).convert("P")
+    buf = io.BytesIO()
+    pal.save(buf, format="GIF")
+    out = Image.open(io.BytesIO(images.process_image(buf.getvalue())))
+    assert out.size == (800, 400) and out.mode == "RGB"
+    buf = io.BytesIO()
+    Image.new("RGBA", (1000, 2000), (0, 0, 0, 0)).save(buf, format="PNG")
+    out = Image.open(io.BytesIO(images.process_image(buf.getvalue())))
+    assert out.size == (400, 800) and out.mode == "RGBA"
+
+
+@pytest.mark.filterwarnings("ignore::PIL.Image.DecompressionBombWarning")
+def test_process_image_pixel_cap():
+    from app import images
+
+    assert images.MAX_PIXELS <= 25_000_000
+    buf = io.BytesIO()
+    Image.new("L", (5001, 5000)).save(buf, format="PNG")  # tiny file, 25M+ pixels
+    with pytest.raises(images.ImageError, match="dimensions"):
+        images.process_image(buf.getvalue())
+
+
+async def test_download_image_has_an_overall_deadline(respx_mock, monkeypatch):
+    """httpx's timeout is per read: a server trickling bytes must still be cut off."""
+    import asyncio
+    import time
+
+    import httpx
+
+    from app import images
+
+    class Trickle(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            for _ in range(200):
+                await asyncio.sleep(0.05)
+                yield b"x"
+
+    monkeypatch.setattr(images, "DOWNLOAD_TIMEOUT", 0.3)
+    respx_mock.get("https://cdn.test/slow.png").mock(return_value=httpx.Response(200, stream=Trickle()))
+    started = time.monotonic()
+    with pytest.raises(images.ImageError, match="timed out"):
+        await images.download_image("https://cdn.test/slow.png")
+    assert time.monotonic() - started < 2
+    assert await images.fetch_and_store("https://cdn.test/slow.png") is None
+
+
 def test_image_refresh(admin, respx_mock, monkeypatch):
     async def fake_preview(url):
         return {"name": "N", "image_url": "https://cdn.example.com/p.png", "price": None, "status": "unknown", "is_apple": False}

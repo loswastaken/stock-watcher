@@ -39,7 +39,7 @@ class Retailer:
             "color": self.color,
             "pickup": self.pickup,
             "seller_filter": self.seller_filter,
-            "note": self.note,
+            "note": "No longer sells online, so there is nothing to track here" if self.retired else self.note,
         }
 
 
