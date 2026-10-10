@@ -35,7 +35,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardBody, CardFooter, CardHeader } from '@/components/ui/card';
 import { EmptyState } from '@/components/ui/empty-state';
-import { Field, Input } from '@/components/ui/input';
+import { Field, Input, Select } from '@/components/ui/input';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useSaveTheme } from '@/hooks/useSaveTheme';
 import { api, errorMessage } from '@/lib/api';
@@ -58,9 +58,12 @@ const TABS: Tab[] = ['notifications', 'defaults', 'appearance', 'account', 'upda
 
 export default function SettingsPage() {
   const [params, setParams] = useSearchParams();
-  const tab = (TABS.includes(params.get('tab') as Tab) ? params.get('tab') : 'notifications') as Tab;
   const settings = useQuery({ queryKey: qk.settings, queryFn: api.settings });
   const user = useUser();
+  const tabs = user?.is_admin ? TABS : TABS.filter((t) => t !== 'updates');
+  const tab = (tabs.includes(params.get('tab') as Tab) ? params.get('tab') : 'notifications') as Tab;
+  // Kept here: saving from "Send test" remounts the tab (new key), which would drop the result.
+  const [testResult, setTestResult] = useState<TestNotificationResult | null>(null);
 
   return (
     <div className="mx-auto max-w-3xl">
@@ -88,7 +91,7 @@ export default function SettingsPage() {
 
         {settings.isLoading ? (
           <PageLoader />
-        ) : settings.isError || !settings.data ? (
+        ) : !settings.data ? (
           <EmptyState
             className="mt-6"
             icon={<AlertTriangle />}
@@ -101,6 +104,8 @@ export default function SettingsPage() {
             <TabsContent value="notifications">
               <NotificationsTab
                 settings={settings.data}
+                testResult={testResult}
+                onTestResult={setTestResult}
                 key={[
                   settings.data.ntfy_server,
                   settings.data.ntfy_topic,
@@ -156,12 +161,29 @@ function randomTopic() {
 
 type TokenMode = 'keep' | 'replace' | 'clear';
 
-function NotificationsTab({ settings }: { settings: Settings }) {
+/** ntfy priorities (https://docs.ntfy.sh/publish/#message-priority). */
+const PRIORITIES: { value: number; label: string }[] = [
+  { value: 5, label: '5 · Max (urgent)' },
+  { value: 4, label: '4 · High' },
+  { value: 3, label: '3 · Default' },
+  { value: 2, label: '2 · Low' },
+  { value: 1, label: '1 · Min' },
+];
+
+function NotificationsTab({
+  settings,
+  testResult,
+  onTestResult: setTestResult,
+}: {
+  settings: Settings;
+  testResult: TestNotificationResult | null;
+  onTestResult: (r: TestNotificationResult | null) => void;
+}) {
   const [server, setServer] = useState(settings.ntfy_server || 'https://ntfy.sh');
   const [topic, setTopic] = useState(settings.ntfy_topic ?? '');
   const [tokenMode, setTokenMode] = useState<TokenMode>(settings.ntfy_token_set ? 'keep' : 'replace');
   const [token, setToken] = useState('');
-  const [testResult, setTestResult] = useState<TestNotificationResult | null>(null);
+  const [priority, setPriority] = useState(settings.ntfy_priority || 4);
   const save = useSaveSettings();
 
   const serverErr = server.trim() && !isValidUrl(server.trim()) ? 'Enter a valid http(s) URL' : undefined;
@@ -171,6 +193,7 @@ function NotificationsTab({ settings }: { settings: Settings }) {
     const b: SettingsUpdate = {
       ntfy_server: server.trim().replace(/\/+$/, '') || 'https://ntfy.sh',
       ntfy_topic: topic.trim() || null,
+      ntfy_priority: priority,
     };
     if (tokenMode === 'clear') b.ntfy_token = '';
     else if (tokenMode === 'replace' && token.trim()) b.ntfy_token = token.trim();
@@ -180,12 +203,19 @@ function NotificationsTab({ settings }: { settings: Settings }) {
   const dirty =
     server.trim().replace(/\/+$/, '') !== (settings.ntfy_server ?? '').replace(/\/+$/, '') ||
     (topic.trim() || null) !== (settings.ntfy_topic || null) ||
+    priority !== (settings.ntfy_priority || 4) ||
     tokenMode === 'clear' ||
     (tokenMode === 'replace' && !!token.trim());
 
+  // Once saved, the token field shows "Token set" again (otherwise the form stays dirty).
+  const resetToken = (s: Settings) => {
+    setToken('');
+    setTokenMode(s.ntfy_token_set ? 'keep' : 'replace');
+  };
+
   const test = useMutation({
     mutationFn: async () => {
-      if (dirty) await api.updateSettings(body());
+      if (dirty) resetToken(await api.updateSettings(body()));
       return api.testNotification();
     },
     onSuccess: (r) => {
@@ -193,14 +223,17 @@ function NotificationsTab({ settings }: { settings: Settings }) {
       if (r.ok) toast.success('Test notification sent', { description: 'Check your phone!' });
       else toast.error('Test notification failed', { description: r.error ?? undefined });
     },
-    onError: (e) => setTestResult({ ok: false, error: errorMessage(e) }),
+    onError: (e) => {
+      setTestResult({ ok: false, error: errorMessage(e) });
+      toast.error('Test notification failed', { description: errorMessage(e) });
+    },
   });
   const qc = useQueryClient();
 
   const onSubmit = (e: FormEvent) => {
     e.preventDefault();
     if (serverErr || topicErr) return;
-    save.mutate(body());
+    save.mutate(body(), { onSuccess: resetToken });
   };
 
   const effectiveServer = server.trim().replace(/\/+$/, '') || 'https://ntfy.sh';
@@ -318,6 +351,18 @@ function NotificationsTab({ settings }: { settings: Settings }) {
                   )}
                 </div>
               )}
+            </Field>
+
+            <Field label="Priority" htmlFor="ntfy-priority" hint="How loudly ntfy announces alerts on your phone. High (4) is the default.">
+              <div className="sm:w-56">
+                <Select id="ntfy-priority" value={priority} onChange={(e) => setPriority(Number(e.target.value))}>
+                  {PRIORITIES.map((p) => (
+                    <option key={p.value} value={p.value}>
+                      {p.label}
+                    </option>
+                  ))}
+                </Select>
+              </div>
             </Field>
 
             {testResult && (
@@ -487,7 +532,13 @@ function BrowserNotificationsCard() {
     const perm = await enableBrowserNotify();
     setDenied(perm === 'denied');
     if (perm === 'granted') {
-      new Notification('Browser notifications on', { body: "You'll see restock alerts here while Stock Watcher is open.", icon: '/favicon.svg' });
+      try {
+        new Notification('Browser notifications on', { body: "You'll see restock alerts here while Stock Watcher is open.", icon: '/favicon.svg' });
+      } catch {
+        // some browsers (e.g. Android Chrome) only allow notifications from a service worker
+        setBrowserNotify(false);
+        toast.error("This browser doesn't support notifications here", { description: 'Use ntfy for alerts on this device.' });
+      }
     } else toast.error('Notifications are blocked', { description: 'Allow them for this site in your browser settings.' });
   };
 
@@ -643,8 +694,8 @@ function DefaultsTab({ settings }: { settings: Settings }) {
 
   const iNum = Number(interval);
   const dNum = Number(dist);
-  const intervalErr = !Number.isFinite(iNum) || iNum < 1 || iNum > 1440 ? 'Between 1 and 1440 minutes' : undefined;
-  const distErr = !Number.isFinite(dNum) || dNum <= 0 ? 'Enter a positive distance' : undefined;
+  const intervalErr = !Number.isInteger(iNum) || iNum < 1 || iNum > 1440 ? 'Whole minutes between 1 and 1440' : undefined;
+  const distErr = !Number.isInteger(dNum) || dNum < 1 || dNum > 500 ? 'Whole miles between 1 and 500' : undefined;
   const dirty =
     iNum !== settings.default_interval_minutes || (zip.trim() || null) !== (settings.default_zip || null) || dNum !== settings.default_max_distance_miles;
 
@@ -697,6 +748,7 @@ function DefaultsTab({ settings }: { settings: Settings }) {
                   type="number"
                   inputMode="numeric"
                   min={1}
+                  max={500}
                   value={dist}
                   onChange={(e) => setDist(e.target.value)}
                   className="pr-12 tabular-nums"

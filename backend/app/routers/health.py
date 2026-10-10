@@ -8,6 +8,6 @@ from ..schemas import HealthOut
 router = APIRouter(tags=["health"])
 
 
-@router.get("/health", response_model=HealthOut)
+@router.api_route("/health", methods=["GET", "HEAD"], response_model=HealthOut)  # HEAD: uptime monitors
 def health():
     return HealthOut(status="ok", version=get_settings().app_version)

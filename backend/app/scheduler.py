@@ -81,12 +81,16 @@ class _Outcome:
     actions: tuple[dict, ...] = ()
 
 
+def _snapshot_of(item: Item) -> _Snapshot:
+    return _Snapshot(item.kind, item.url, item.generic_config, item.apple_config, item.retailer_config)
+
+
 def _load_snapshot(item_id: int) -> _Snapshot | None:
     with SessionLocal() as db:
         item = db.get(Item, item_id)
         if item is None:
             return None
-        return _Snapshot(item.kind, item.url, item.generic_config, item.apple_config, item.retailer_config)
+        return _snapshot_of(item)
 
 
 def _normalize(result: Any) -> CheckResult:
@@ -135,11 +139,15 @@ def _retailer_of(item: Item, detail: dict | None):
     return (retailer_by_key(str(key)) if key else None) or match_retailer(item.url or "")
 
 
-def _apply_result(item_id: int, result: CheckResult, duration_ms: int) -> _Outcome | None:
+def _apply_result(item_id: int, snap: _Snapshot, result: CheckResult, duration_ms: int) -> _Outcome | None:
     """Persist a check result: item state, CheckEvent, Notification. Returns delivery info."""
     with SessionLocal() as db:
         item = db.get(Item, item_id)
         if item is None:  # deleted while the check was running
+            return None
+        if _snapshot_of(item) != snap:
+            # Edited while the check was running: the result is about the old URL / settings.
+            # Drop it and leave last_checked_at alone so the edit's recheck still happens.
             return None
         now = utcnow()
         prev_status = item.status
@@ -358,7 +366,7 @@ async def check_item(item_id: int, *, wait: bool = True) -> bool:
             result = CheckResult(status="error", status_text=msg, error=msg)
         duration_ms = int((time.monotonic() - started) * 1000)
 
-        outcome = await asyncio.to_thread(_apply_result, item_id, result, duration_ms)
+        outcome = await asyncio.to_thread(_apply_result, item_id, snap, result, duration_ms)
         if outcome is None:
             return True
 
@@ -377,14 +385,20 @@ async def check_item(item_id: int, *, wait: bool = True) -> bool:
             await asyncio.to_thread(_record_delivery, outcome.notification_id, ok, err)
 
         if outcome.fetch_image_url:
-            try:
-                await images.attach_image_from_url(item_id, outcome.fetch_image_url)
-            except Exception:  # noqa: BLE001
-                log.exception("auto image fetch failed for item %s", item_id)
+            # In the background: this check may hold a scheduler slot, and a slow image host
+            # must not keep it (or the item's in-flight lock) busy.
+            spawn(_auto_fetch_image(item_id, outcome.fetch_image_url))
         return True
     finally:
         _inflight.pop(item_id, None)
         done.set()
+
+
+async def _auto_fetch_image(item_id: int, url: str) -> None:
+    try:
+        await images.attach_image_from_url(item_id, url)
+    except Exception:  # noqa: BLE001
+        log.exception("auto image fetch failed for item %s", item_id)
 
 
 # ------------------------------------------------------------------------ loop
@@ -491,7 +505,9 @@ async def stop() -> None:
     global _loop_task, _stop_event
     if _stop_event is not None:
         _stop_event.set()
-    tasks = [t for t in [_loop_task, *list(_background)] if t is not None]
+    loop = asyncio.get_running_loop()
+    # (only this loop's tasks: tests run several loops in one process; production has one)
+    tasks = [t for t in [_loop_task, *list(_background)] if t is not None and t.get_loop() is loop]
     for t in tasks:
         t.cancel()
     if tasks:

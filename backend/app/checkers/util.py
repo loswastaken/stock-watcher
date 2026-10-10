@@ -19,7 +19,7 @@ def clean_text(s: Any) -> str:
     s = str(s)
     s = re.sub(r"<br\s*/?>", " ", s, flags=re.I)
     s = _TAG_RE.sub("", s)
-    s = html_lib.unescape(s).replace("\xa0", " ").replace("​", "")
+    s = html_lib.unescape(s).replace("\xa0", " ").replace("\u200b", "")
     return _WS_RE.sub(" ", s).strip()
 
 
@@ -50,18 +50,27 @@ CURRENCY_SYMBOLS = {
 _ZERO_DECIMAL = {"JPY", "KRW"}
 
 
+# one amount: "1 299,00" / "1'299.00" (grouped by spaces or apostrophes), else "1,099.00" / "1.099,00" / "12.5"
+_AMOUNT_TOKEN_RE = re.compile(r"\d{1,3}(?:[ \u00a0\u2009\u202f'\u2019]\d{3})+(?:[.,]\d+)?(?!\d)|\d+(?:[.,]\d+)*")
+_DOT_THOUSANDS_RE = re.compile(r"[1-9]\d{0,2}(?:\.\d{3})+")
+
+
 def parse_amount(value: Any) -> Decimal | None:
-    """Parse numbers like 1099, "1,099.00", "1.099,00", "$1,099", "USD 12.5"."""
-    if value is None or isinstance(value, bool):
+    """Parse numbers like 1099, "1,099.00", "1.099,00", "1.299" (dot thousands), "$1,099", "USD 12.5".
+    Only the first amount counts ("$1,299 $1,499" is 1299); lists / dicts / NaN / negatives are None."""
+    if value is None or isinstance(value, (bool, list, tuple, dict)):
         return None
     if isinstance(value, (int, float, Decimal)):
         try:
-            return Decimal(str(value))
+            d = Decimal(str(value))
         except InvalidOperation:
             return None
-    s = re.sub(r"[^\d.,-]", "", str(value))
-    if not s or not re.search(r"\d", s):
+        return d if d.is_finite() and d >= 0 else None
+    text = str(value)
+    m = _AMOUNT_TOKEN_RE.search(text)
+    if not m or re.search(r"[-\u2212][^\w\s]{0,4}$", text[: m.start()]):  # "-$5.00" is a negative amount
         return None
+    s = re.sub(r"[^\d.,]", "", m.group(0))
     if "," in s and "." in s:
         if s.rfind(",") > s.rfind("."):  # 1.099,00 (European)
             s = s.replace(".", "").replace(",", ".")
@@ -70,11 +79,13 @@ def parse_amount(value: Any) -> Decimal | None:
     elif "," in s:
         head, _, tail = s.rpartition(",")
         s = s.replace(",", "") if len(tail) == 3 else head.replace(",", "") + "." + tail
+    elif _DOT_THOUSANDS_RE.fullmatch(s):  # 1.299 / 1.299.000 (European thousands, like "1,299")
+        s = s.replace(".", "")
     try:
         d = Decimal(s)
     except InvalidOperation:
         return None
-    return d if d >= 0 else None
+    return d if d.is_finite() and d >= 0 else None
 
 
 def format_price(amount: Any, currency: Any = None) -> str | None:

@@ -9,7 +9,8 @@ import httpx
 import pytest
 import respx
 
-from app.checkers.fetcher import FetchError
+from app.checkers import fetcher
+from app.checkers.fetcher import FetchError, FetchResult
 from app.checkers.retailers import AdapterContext, RetailerConfig, kroger, retailer_by_key
 
 FIX = Path(__file__).parent.parent / "fixtures" / "retailers" / "bigbox"
@@ -66,7 +67,7 @@ def _page_path(monkeypatch) -> list:
 async def test_without_credentials_reads_the_page(monkeypatch):
     monkeypatch.delenv("KROGER_CLIENT_ID")
     calls = _page_path(monkeypatch)
-    assert await kroger.check(URL, ctx(fulfillment="pickup", zip="45209")) == "page" and calls
+    assert await kroger.check(URL, ctx(fulfillment="delivery", zip="45209")) == "page" and calls
 
 
 async def test_without_location_delivery_reads_the_page_pickup_errors(monkeypatch):
@@ -162,3 +163,77 @@ async def test_fulfillment_flags_are_case_insensitive():
     mock_api(body)
     res = await kroger.check(URL, ctx(fulfillment="any", zip="45209"))
     assert res.status == "out_of_stock"
+
+
+# ------------------------------------------------------------------ pre-release audit fixes
+
+UPC = "0004549600051"
+
+
+def _page(store: bool = True) -> str:
+    """A product page whose __INITIAL_STATE__ pdpSSR has the item HIGH at the page's default store."""
+    laf = json.dumps([{"modality": {"handoffLocation": {"storeId": "02900577"},
+                                    "handoffAddress": {"address": {"name": "Hayes Kroger"}}}}])
+    state = {"calypso": {"useCases": {"getProducts": {"pdpSSR": {
+        "async": {"loaded": True, "error": False},
+        "response": {"data": {"products": [{"upc": UPC, "description": "Switch 2", "items": [
+            {"inventory": {"stockLevel": "HIGH"}, "fulfillment": {"curbside": True, "delivery": True},
+             "price": {"regular": 499.99}}]}]}}}}},
+        "domains": {"products": {UPC: {"metadata": {"requestInfo": {"loaded": {"headers": {"x-laf-object": laf}}}}}}
+                    if store else {}}}}
+    return "<html><script>window.__INITIAL_STATE__ = " + json.dumps(state) + ";</script></html>"
+
+
+def _serve(monkeypatch, html: str) -> list:
+    calls: list = []
+
+    async def fake(url, render_js=False, *, needs=None):
+        calls.append(url)
+        return FetchResult(url=url, status=200, text=html)
+
+    monkeypatch.setattr(fetcher, "fetch_html", fake)
+    return calls
+
+
+async def test_without_credentials_pickup_near_zip_is_unknown(monkeypatch):
+    # the page's store is its own geo-IP default (could be far from the ZIP): never a pickup answer
+    monkeypatch.delenv("KROGER_CLIENT_ID")
+    calls = _serve(monkeypatch, _page())
+    res = await kroger.check(URL, ctx(fulfillment="pickup", zip="45209", radius_miles=5))
+    assert res.status == "unknown" and res.status_text == kroger.PICKUP_NEEDS_KEY
+    assert res.status_text == "Pickup near your ZIP needs KROGER_CLIENT_ID/SECRET"
+    assert res.available == [] and not calls
+    res = await kroger.check(URL, ctx(fulfillment="pickup"))
+    assert res.status == "error" and res.status_text == "Set a ZIP code for pickup"
+
+
+@pytest.mark.parametrize("store", [True, False])
+async def test_without_credentials_any_is_delivery_only(monkeypatch, store):
+    monkeypatch.delenv("KROGER_CLIENT_ID")
+    _serve(monkeypatch, _page(store))
+    res = await kroger.check(URL, ctx(fulfillment="any", zip="45209"))
+    assert res.status == "in_stock" and [a.key for a in res.available] == ["stock"]  # never "pickup:None"
+    assert res.status_text == f"In stock for delivery · {kroger.PICKUP_NEEDS_KEY}"
+
+
+async def test_without_location_any_is_delivery_only(monkeypatch):
+    _serve(monkeypatch, _page())
+    res = await kroger.check(URL, ctx(fulfillment="any"))
+    assert res.status == "in_stock" and [a.key for a in res.available] == ["stock"]
+    assert res.status_text == "In stock for delivery"
+    assert res.detail["pickup_skipped"] == "Set a ZIP code for pickup"
+
+
+@respx.mock
+async def test_empty_locations_answer_is_cached_briefly():
+    _, locs, _ = mock_api()
+    locs.mock(return_value=httpx.Response(200, json={"data": []}))
+    res = await kroger.check(URL, ctx(fulfillment="pickup", zip="45209", radius_miles=10))
+    assert res.status == "out_of_stock" and res.status_text == "No Kroger-family stores within 10 mi of 45209"
+    exp, cached = kroger._locations[("45209", 10)]
+    assert cached == [] and exp - kroger.time.monotonic() <= kroger.LOCATIONS_EMPTY_TTL <= 300
+    kroger._locations.clear()
+    locs.mock(return_value=httpx.Response(200, json=fj("kroger_locations.json")))
+    await kroger.check(URL, ctx(fulfillment="pickup", zip="45209", radius_miles=10))
+    exp, cached = kroger._locations[("45209", 10)]
+    assert cached and exp - kroger.time.monotonic() > kroger.LOCATIONS_EMPTY_TTL

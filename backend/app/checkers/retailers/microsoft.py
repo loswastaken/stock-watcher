@@ -51,7 +51,7 @@ def _pick(dsas: list[dict], sku_id: str | None) -> tuple[dict | None, dict | Non
     def sku_of(d: dict) -> str:
         return str(dig(d, "Sku", "SkuId") or "").upper()
 
-    ordered = ([d for d in dsas if sku_of(d) == sku_id] if sku_id else []) or dsas
+    ordered = [d for d in dsas if sku_of(d) == sku_id] if sku_id else dsas
     for d in ordered:
         for a in d.get("Availabilities") or []:
             if isinstance(a, dict) and _purchasable(a):
@@ -102,6 +102,12 @@ async def check(url: str, ctx: AdapterContext) -> CheckResult | None:
     title = clean_text(dig(prod, "LocalizedProperties", 0, "ProductTitle")) or None
     dsas = [d for d in prod.get("DisplaySkuAvailabilities") or [] if isinstance(d, dict)]
     dsa, avail = _pick(dsas, sku_id)
+    if dsa is None and sku_id and dsas:
+        # the link's SKU (a colour / edition) is no longer listed: another SKU's stock is not its stock
+        res = result(None, f"SKU {sku_id} is no longer listed", title=title, image_url=_image(prod),
+                     detail={"big_id": big, "sku_id": sku_id, "market": market,
+                             "matched": f"displaycatalog: SKU {sku_id} not listed"})
+        return finish(res, ctx)
     if dsa is None or avail is None:
         return None
     sku = str(dig(dsa, "Sku", "SkuId") or "")

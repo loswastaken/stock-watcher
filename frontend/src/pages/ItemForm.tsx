@@ -29,6 +29,7 @@ import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { toast } from 'sonner';
 import { ApplePartsPicker } from '@/components/items/ApplePartsPicker';
+import { previewKey } from '@/components/QuickCheck';
 import { ItemImage } from '@/components/ItemImage';
 import { AppleLogo } from '@/components/Logo';
 import { PageHeader } from '@/components/PageHeader';
@@ -86,7 +87,8 @@ export default function ItemFormPage() {
 
   if (itemId != null) {
     if (item.isLoading) return <PageLoader />;
-    if (item.isError || !item.data)
+    // A failed background refetch keeps `data` (and the form's unsaved edits).
+    if (!item.data)
       return (
         <EmptyState
           icon={<AlertTriangle />}
@@ -127,6 +129,7 @@ interface FormState {
 
 type FieldKey =
   | 'url'
+  | 'name'
   | 'interval'
   | 'selector'
   | 'text'
@@ -141,15 +144,19 @@ type FieldKey =
 type FieldErrors = Partial<Record<FieldKey, string>>;
 
 const MAX_RADIUS = 250;
+const MAX_NAME = 200;
+const MAX_DISTANCE = 500;
 /** Radius as sent to the API: a whole number of miles in 1-250. */
 const cleanRadius = (v: number) => Math.min(MAX_RADIUS, Math.max(1, Math.round(Number.isFinite(v) ? v : 25)));
 
-/** Map a request field (FastAPI 422 `loc`, minus "body") to the form field that shows it. */
-function fieldFor(loc: (string | number)[]): FieldKey | null {
-  const [head, sub] = loc.filter((p) => p !== 'body').map(String);
+/** Map a request field (a 422's `errors[].field`, e.g. "apple_config.zip") to the form field that shows it. */
+function fieldFor(field: string): FieldKey | null {
+  const [head, sub] = field.split('.');
   switch (head) {
     case 'url':
       return 'url';
+    case 'name':
+      return 'name';
     case 'interval_minutes':
       return 'interval';
     case 'max_price':
@@ -165,20 +172,19 @@ function fieldFor(loc: (string | number)[]): FieldKey | null {
   }
 }
 
-/** Field-level errors from a backend 422 (validation array or a known plain message). */
+/** Field-level errors from a backend 422 (its `errors` list, or a known plain message). */
 function serverFieldErrors(err: unknown): FieldErrors {
   const out: FieldErrors = {};
   if (!(err instanceof ApiError) || err.status !== 422) return out;
+  for (const e of err.errors) {
+    const f = fieldFor(e.field);
+    if (f && !out[f]) out[f] = e.message;
+  }
   const { detail } = err;
-  if (Array.isArray(detail)) {
-    for (const d of detail as { loc?: (string | number)[]; msg?: string }[]) {
-      const f = fieldFor(d.loc ?? []);
-      if (f && !out[f]) out[f] = (d.msg ?? 'Invalid value').replace(/^Value error, /, '');
-    }
-  } else if (typeof detail === 'string') {
+  if (!err.errors.length && typeof detail === 'string') {
     if (/^Pickup needs/i.test(detail)) out.storeZip = detail;
-    else if (/interval_minutes/.test(detail)) out.interval = detail;
-    else if (/apple_config/.test(detail)) out.parts = detail;
+    else if (/^interval_minutes/.test(detail)) out.interval = detail;
+    else if (/^apple_config needs at least one part/.test(detail)) out.parts = detail;
   }
   return out;
 }
@@ -254,19 +260,34 @@ function ItemFormInner({
 
   // --- Preview (autofill) -------------------------------------------------
   const preview = useQuery({
-    queryKey: ['preview', debouncedUrl],
+    queryKey: previewKey(debouncedUrl),
     queryFn: ({ signal }) => api.preview(debouncedUrl, signal),
     enabled: isValidUrl(debouncedUrl) && urlChanged,
     staleTime: 5 * 60_000,
     retry: false,
   });
 
+  // The URL the name was auto-filled from: once the link changes, that name no longer applies.
+  const autoNameUrl = useRef<string | null>(null);
+  useEffect(() => {
+    if (autoNameUrl.current === null || autoNameUrl.current === url) return;
+    autoNameUrl.current = null;
+    if (!nameTouched) setS((prev) => ({ ...prev, name: '' }));
+  }, [url]);
+  const autoName = (name: string | null | undefined) => {
+    if (nameTouched || !name || debouncedUrl !== url) return;
+    autoNameUrl.current = url;
+    setS((prev) => ({ ...prev, name: name.slice(0, MAX_NAME) }));
+  };
+
+  // Only apply a preview of the link that's in the field now (not one from before the debounce).
+  const previewFresh = debouncedUrl === url;
   useEffect(() => {
     const p = preview.data;
-    if (!p) return;
-    if (!nameTouched && p.name) setS((prev) => ({ ...prev, name: p.name ?? prev.name }));
+    if (!p || !previewFresh) return;
+    autoName(p.name);
     if (!kindTouched && p.is_apple) setS((prev) => ({ ...prev, kind: 'apple' }));
-  }, [preview.data]);
+  }, [preview.data, previewFresh]);
 
   // --- Store (retailer) detection ------------------------------------------
   const retailers = useRetailers();
@@ -280,7 +301,8 @@ function ItemFormInner({
   const byStoreId = retailer?.key === 'microcenter';
 
   const appleUrl = isAppleUrl(url);
-  const showKindToggle = appleUrl || s.kind === 'apple' || !!preview.data?.is_apple;
+  // The watch mode is fixed once the item exists (PATCH can't change it).
+  const showKindToggle = !isEdit && (appleUrl || s.kind === 'apple' || !!preview.data?.is_apple);
 
   // --- Apple variants -----------------------------------------------------
   const resolve = useQuery({
@@ -291,18 +313,16 @@ function ItemFormInner({
     retry: false,
   });
 
+  // Parts pre-selected from a link (not picked by hand): a new link's model replaces them.
+  const autoParts = useRef<string[]>([]);
   useEffect(() => {
-    if (!nameTouched && resolve.data?.product_name && !s.name)
-      setS((prev) => ({ ...prev, name: resolve.data?.product_name ?? prev.name }));
-    // Pre-select the model the link points to, unless the user already picked some.
+    if (!s.name) autoName(resolve.data?.product_name);
+    // Pre-select the model the link points to, unless the user picked some themselves.
     const sel = resolve.data?.selected_part_number;
     const variant = sel ? resolve.data?.variants.find((v) => v.part_number === sel) : undefined;
-    if (variant)
-      setS((prev) =>
-        prev.apple.parts.length
-          ? prev
-          : { ...prev, apple: { ...prev.apple, parts: [{ part_number: variant.part_number, label: variant.label }] } },
-      );
+    if (!variant || s.apple.parts.some((p) => !autoParts.current.includes(p.part_number))) return;
+    autoParts.current = [variant.part_number];
+    setApple({ parts: [{ part_number: variant.part_number, label: variant.label }] });
   }, [resolve.data]);
 
   // --- Photo ---------------------------------------------------------------
@@ -316,7 +336,7 @@ function ItemFormInner({
     return () => URL.revokeObjectURL(u);
   }, [file]);
 
-  const autoImage = urlChanged ? preview.data?.image_url ?? resolve.data?.image_url ?? null : null;
+  const autoImage = urlChanged && previewFresh ? preview.data?.image_url ?? resolve.data?.image_url ?? null : null;
   const shownImage = filePreview ?? (isEdit && !urlChanged ? item?.image_url : autoImage) ?? item?.image_url ?? null;
 
   const onPickFile = (f: File | undefined) => {
@@ -340,6 +360,7 @@ function ItemFormInner({
     else if (!urlValid) e.url = 'Enter a valid http(s) URL';
     if (!Number.isFinite(intervalNum) || intervalNum < 1) e.interval = 'Minimum is 1 minute';
     else if (intervalNum > 1440) e.interval = 'Maximum is 1440 minutes (24 h)';
+    else if (!Number.isInteger(intervalNum)) e.interval = 'Use whole minutes';
     if (s.kind === 'generic') {
       if (s.generic.mode === 'selector' && !s.generic.selector?.trim()) e.selector = 'Enter a CSS selector';
       if (s.generic.mode === 'text' && !s.generic.in_stock_text?.trim() && !s.generic.out_of_stock_text?.trim())
@@ -357,7 +378,8 @@ function ItemFormInner({
       if (!s.apple.parts.length) e.parts = 'Select at least one model';
       if (!s.apple.zip.trim()) e.zip = 'ZIP code is required for store availability';
       if (!s.apple.watch_pickup && !s.apple.watch_delivery) e.watch = 'Watch pickup, delivery, or both';
-      if (!(s.apple.max_distance_miles > 0)) e.distance = 'Enter a distance';
+      const d = s.apple.max_distance_miles;
+      if (!(d >= 1 && d <= MAX_DISTANCE)) e.distance = `Between 1 and ${MAX_DISTANCE} miles`;
     }
     if (s.maxPrice.trim() && !(Number(s.maxPrice) > 0)) e.maxPrice = 'Enter a price above 0, or leave blank';
     return e;
@@ -412,7 +434,6 @@ function ItemFormInner({
         saved = await api.updateItem(item.id, {
           name: s.name.trim() || item.name,
           url,
-          kind: s.kind,
           interval_minutes: intervalNum,
           notify_enabled: s.notify,
           max_price: maxPrice,
@@ -546,10 +567,12 @@ function ItemFormInner({
                 </div>
               )}
 
-              <Field label="Name" htmlFor="name" hint={!isEdit ? 'Leave blank to use the page title.' : undefined}>
+              <Field label="Name" htmlFor="name" error={show('name')} hint={!isEdit ? 'Leave blank to use the page title.' : undefined}>
                 <Input
                   id="name"
                   placeholder={preview.isFetching ? 'Detecting…' : 'e.g. PlayStation 5 Pro'}
+                  maxLength={MAX_NAME}
+                  invalid={!!show('name')}
                   value={s.name}
                   onChange={(e) => {
                     setNameTouched(true);
@@ -641,7 +664,7 @@ function ItemFormInner({
                       <Input
                         type="number"
                         min={1}
-                        max={500}
+                        max={MAX_DISTANCE}
                         aria-label="Max distance in miles"
                         value={s.apple.max_distance_miles}
                         onChange={(e) => setApple({ max_distance_miles: Number(e.target.value) })}
@@ -1063,7 +1086,7 @@ function ItemFormInner({
               <AlertTriangle className="size-4" /> Fix the highlighted fields
             </span>
           )}
-          <Button variant="ghost" onClick={() => navigate(-1)}>
+          <Button variant="ghost" onClick={() => navigate(isEdit ? `/items/${item!.id}` : '/')}>
             Cancel
           </Button>
           <Button type="submit" variant="primary" loading={save.isPending}>

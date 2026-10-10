@@ -18,7 +18,8 @@ router = APIRouter(prefix="/apple", tags=["apple"])
 @router.post("/resolve", response_model=AppleResolveOut)
 async def resolve(body: UrlRequest, user: User = Depends(current_user)):
     try:
-        data = await asyncio.wait_for(resolve_apple(body.url), 45)
+        # just above checkers.PREVIEW_TIMEOUT, so its own fallback (the part number in the URL) answers first
+        data = await asyncio.wait_for(resolve_apple(body.url), 65)
     except Exception as e:  # noqa: BLE001 - best effort; UI falls back to manual entry
         log.info("apple resolve failed for %s: %s", body.url, e)
         return AppleResolveOut(error=f"Could not read the Apple page ({type(e).__name__})")

@@ -164,7 +164,7 @@ def classify_support(data: dict, retailer: dict | None) -> dict:
     platform    a platform recipe (Shopify, SFCC, ...) recognised the store
     generic     generic heuristics — with a definite answer, or unknown (then suggest custom rules)
     blocked     bot protection stopped the checker
-    unsupported the page couldn't be fetched / was not found / errored
+    unsupported the page couldn't be fetched / was not found / errored, or the store no longer sells online
     """
     status = str(data.get("status") or "unknown")
     error = str(data.get("error") or "")
@@ -172,6 +172,11 @@ def classify_support(data: dict, retailer: dict | None) -> dict:
     definite = status in ("in_stock", "out_of_stock")
     store_name = (retailer or {}).get("name")
 
+    entry = retailer_by_key(str((retailer or {}).get("key") or ""))
+    if entry is not None and entry.retired:
+        # even a page that "works" there (e.g. the domain now hosts another shop) says nothing about this store
+        return {"level": "unsupported", "label": "Store no longer sells online",
+                "detail": f"{entry.name} no longer runs an online store, so there is nothing to track here."}
     if data.get("blocked") or (error and _BLOCKED_RE.search(error) and not definite):
         return {"level": "blocked", "label": "Blocked by bot protection", "detail": _BLOCKED_DETAIL}
     if status == "error" or (error and not definite and not data.get("name")):
@@ -210,6 +215,11 @@ def _opt_str(v) -> str | None:
     return str(v) if v not in (None, "") else None
 
 
+def _http_url(v) -> str | None:
+    """Only http(s) links (ItemOut applies the same rule to cart_url)."""
+    return v if isinstance(v, str) and v.startswith(("http://", "https://")) else None
+
+
 def _preview_out(url: str, data: dict) -> PreviewOut:
     retailer = _preview_retailer(url, data.get("retailer"))
     third = data.get("third_party")
@@ -226,7 +236,7 @@ def _preview_out(url: str, data: dict) -> PreviewOut:
         fetched_via=_opt_str(data.get("fetched_via")),
         seller=_opt_str(data.get("seller")),
         third_party=bool(third) if third is not None else None,
-        cart_url=_opt_str(data.get("cart_url")),
+        cart_url=_http_url(data.get("cart_url")),
         signals=[str(x) for x in (data.get("signals") or []) if x][:12],
         blocked=bool(data.get("blocked")),
         queued=bool(data.get("queued")),
@@ -349,7 +359,7 @@ def update_item(
                 item.retailer_config, old_url, item.url, get_or_create_settings(db, user.id))
     if data.get("enabled") is not None:
         item.enabled = data["enabled"]
-    if data.get("notify_enabled") is not None:
+    if data.get("notify_enabled") is not None and data["notify_enabled"] != item.notify_enabled:
         item.notify_enabled = data["notify_enabled"]
         item.muted_by_alert = False  # the user decided; auto re-arm leaves it alone
     if "generic_config" in data and data["generic_config"] is not None:
@@ -426,19 +436,29 @@ def mark_purchased(item_id: int, user: User = Depends(current_user), db: Session
 
 
 @router.post("/{item_id}/unpurchase", response_model=ItemOut)
-def unmark_purchased(item_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
+def unmark_purchased(
+    item_id: int,
+    rearm: bool = Query(True),
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
     """Back to the watch list: checking resumes right away with alerts armed.
 
     Only this item is restored; purchased siblings in its product group stay purchased.
+    rearm=false (the "Undo" of Mark purchased) only clears the purchase, keeping the item's
+    paused / muted state and its current alert state, so it doesn't re-alert on the same restock.
     """
     item = _owned_item(db, user, item_id)
+    if item.purchased_at is None:
+        return ItemOut.model_validate(item)
     item.purchased_at = None
     item.purchased_price = None
-    item.enabled = True
-    item.notify_enabled = True
-    item.muted_by_alert = False
-    item.available_keys = []  # the next in-stock result alerts again
-    item.last_checked_at = None
+    if rearm:
+        item.enabled = True
+        item.notify_enabled = True
+        item.muted_by_alert = False
+        item.available_keys = []  # the next in-stock result alerts again
+        item.last_checked_at = None
     db.commit()
     db.refresh(item)
     return ItemOut.model_validate(item)
@@ -522,9 +542,16 @@ def list_stores(item_id: int, user: User = Depends(current_user), db: Session = 
 
 
 @router.post("/{item_id}/stores", response_model=ItemOut, status_code=201)
-def add_store(item_id: int, body: StoreCreate, user: User = Depends(current_user),
-              db: Session = Depends(get_db)):
+async def add_store(item_id: int, body: StoreCreate, user: User = Depends(current_user)):
     """Track the same product at another store: a sibling item in the same product_group."""
+    # async (like create_item): scheduler.spawn needs the event loop, which a sync route's thread lacks
+    with SessionLocal() as db:
+        out = _add_store(db, user, item_id, body)
+    scheduler.spawn(_post_create(out.id, None))
+    return out
+
+
+def _add_store(db: Session, user: User, item_id: int, body: StoreCreate) -> ItemOut:
     item = _owned_item(db, user, item_id)
     if item.purchased_at is not None:
         raise HTTPException(status_code=409,
@@ -561,9 +588,7 @@ def add_store(item_id: int, body: StoreCreate, user: User = Depends(current_user
     db.add(sibling)
     db.commit()
     db.refresh(sibling)
-    out = ItemOut.model_validate(sibling)
-    scheduler.spawn(_post_create(sibling.id, None))
-    return out
+    return ItemOut.model_validate(sibling)
 
 
 @router.post("/{item_id}/image", response_model=ItemOut)

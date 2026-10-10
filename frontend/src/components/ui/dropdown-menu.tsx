@@ -4,7 +4,6 @@ import { cn } from '@/lib/utils';
 
 export const DropdownMenu = DM.Root;
 export const DropdownMenuTrigger = DM.Trigger;
-export const DropdownMenuGroup = DM.Group;
 
 export const DropdownMenuContent = forwardRef<
   React.ElementRef<typeof DM.Content>,

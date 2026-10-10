@@ -102,6 +102,14 @@ async def test_shopify_pinned_variant_in_stock_label():
 
 
 @respx.mock
+async def test_shopify_unknown_pinned_variant_is_not_answered_with_another_variant():
+    # the URL's variant was deleted / re-created by the shop: White (40002) being in stock says nothing about it
+    url = SHOP + "?variant=49999"
+    respx.get(SHOP_JS).mock(return_value=httpx.Response(200, json=fxj("shopify_product.js.json")))
+    assert await platforms.check_shopify(url, fx("shopify_product.html"), url, {}, None) is None
+
+
+@respx.mock
 async def test_shopify_all_sold_out():
     url = "https://nyxigame.com/products/wizard"
     respx.get(url).mock(return_value=httpx.Response(200, text=fx("shopify_product.html")))
@@ -330,7 +338,6 @@ async def test_magento(fixture, status):
 @pytest.mark.parametrize(("fixture", "status", "text"), [
     ("opencart_in.html", "in_stock", "In stock"),
     ("opencart_out.html", "out_of_stock", "Out of stock"),
-    ("opencart_custom_status.html", "in_stock", "In stock"),
 ])
 async def test_opencart(fixture, status, text):
     url = "https://us-store.msi.com/index.php?route=product/product&product_id=42"
@@ -338,6 +345,40 @@ async def test_opencart(fixture, status, text):
     r = await generic.check_generic(url, {"mode": "auto"})
     assert r.status == status and r.status_text == text and r.detail["adapter"] == "opencart"
     assert r.price == "$899.99" and r.title == "MSI Claw 8 AI+"
+
+
+OC_URL = "https://shop.example/index.php?route=product/product&product_id=42"
+
+
+@pytest.mark.parametrize(("label", "text"), [
+    ("Out-of-Stock", "Out of stock"), ("Not in stock", "Out of stock"), ("Currently not in stock", "Out of stock"),
+    ("No longer in stock", "Out of stock"), ("0 in stock", "Out of stock"), ("Not yet available", "Coming soon"),
+    ("Available soon", "Coming soon"),
+])
+async def test_opencart_negated_or_hyphenated_label_is_out_of_stock(label, text):
+    # the in-stock words inside these labels used to win; the cart button stays enabled on OpenCart regardless
+    html = fx("opencart_custom_status.html").replace("2-3 Days", label)
+    r = await platforms.check_opencart(OC_URL, html, OC_URL, {}, None)
+    assert (r.status, r.status_text) == ("out_of_stock", text)
+
+
+async def test_opencart_unrecognised_label_is_not_called_in_stock():
+    # OpenCart prints a custom stock status only at quantity 0 and never disables its cart button for it
+    for label in ("2-3 Days", "Ausverkauft"):
+        html = fx("opencart_custom_status.html").replace("2-3 Days", label)
+        assert await platforms.check_opencart(OC_URL, html, OC_URL, {}, None) is None
+    r = await platforms.check_opencart(OC_URL, fx("opencart_custom_status.html").replace("2-3 Days", "12"), OC_URL, {}, None)
+    assert r.status == "in_stock"  # config_stock_display: the quantity itself
+
+
+@pytest.mark.parametrize(("text", "verdict"), [
+    ("Not in stock", "out"), ("Currently not in stock", "out"), ("No longer in stock", "out"), ("0 in stock", "out"),
+    ("Not yet available", "out"), ("Available soon", "out"), ("Out-of-Stock", "out"), ("Sold-out", "out"),
+    ("In Stock", "in"), ("10 in stock", "in"), ("Available", "in"), ("Only 3 left", "in"), ("Pre-Order", "in"),
+    ("Available for pre-order", "in"), ("1,000 available", "in"), ("2-3 Days", None),
+])
+def test_classify_text_negations(text, verdict):
+    assert platforms.classify_text(text)[0] == verdict
 
 
 # ------------------------------------------------------------------ robustness / helpers

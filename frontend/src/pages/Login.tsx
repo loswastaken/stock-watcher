@@ -28,7 +28,7 @@ export default function Login() {
   });
 
   if (isLoading) return <FullScreenLoader />;
-  if (isError) return <FullScreenLoader error onRetry={() => refetch()} />;
+  if (isError && !data) return <FullScreenLoader error onRetry={() => refetch()} />;
   if (data?.setup_required) return <Navigate to="/setup" replace />;
   if (data?.user && !login.isPending) return <Navigate to={next} replace />;
 

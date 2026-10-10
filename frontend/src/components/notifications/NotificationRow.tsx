@@ -5,13 +5,13 @@ import { ItemImage } from '../ItemImage';
 import { RelativeTime } from '../RelativeTime';
 import { Tooltip } from '../ui/tooltip';
 
-export function DeliveryStatus({ n, compact }: { n: Notification; compact?: boolean }) {
+export function DeliveryStatus({ n }: { n: Notification }) {
   if (n.delivered) {
     return (
       <Tooltip content="Delivered via ntfy">
         <span className="inline-flex items-center gap-1 text-xs text-emerald-600 dark:text-emerald-400">
           <Send className="size-3" />
-          {!compact && 'Sent'}
+          Sent
         </span>
       </Tooltip>
     );
@@ -21,7 +21,7 @@ export function DeliveryStatus({ n, compact }: { n: Notification; compact?: bool
       <Tooltip content={`ntfy delivery failed: ${n.delivery_error}`}>
         <span className="inline-flex cursor-help items-center gap-1 text-xs text-amber-600 dark:text-amber-400">
           <AlertCircle className="size-3" />
-          {!compact && 'Failed'}
+          Failed
         </span>
       </Tooltip>
     );
@@ -30,7 +30,7 @@ export function DeliveryStatus({ n, compact }: { n: Notification; compact?: bool
     <Tooltip content="Not pushed (ntfy not configured or notifications off for this item)">
       <span className="inline-flex items-center gap-1 text-xs text-zinc-400 dark:text-zinc-500">
         <BellOff className="size-3" />
-        {!compact && 'Not sent'}
+        Not sent
       </span>
     </Tooltip>
   );

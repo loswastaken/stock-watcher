@@ -156,7 +156,7 @@ async def check(url: str, ctx: AdapterContext) -> CheckResult | None:
         return override(res, "out", "Temporarily out of stock", matched="#availability")
     if has_buy:
         if third and official:
-            return override(res, "out", THIRD_PARTY_TEXT, matched=f"buy box seller: {seller}")
+            return _third_party(res, f"buy box seller: {seller}")
         if third is None and official:
             # a buy button whose seller we can't see could be any marketplace seller
             return override(res, None, "Couldn't confirm the seller", matched="buy box seller unknown")
@@ -200,10 +200,27 @@ async def check(url: str, ctx: AdapterContext) -> CheckResult | None:
             return override(res, "out", "No offers", matched="aod: no offers")
         if official:
             return override(res, "out", NO_FEATURED_TEXT, matched="only 'See all buying options'")
-        return override(res, "in", "Available from other sellers", matched="'See all buying options'")
+        # the offer list couldn't be read: no telling whether any (new) offer is left
+        return override(res, None, NO_FEATURED_TEXT, matched="only 'See all buying options', offer list unreadable")
     if re.search(r"temporarily\s+out\s+of\s+stock|out\s+of\s+stock", availability, re.IGNORECASE):
         return override(res, "out", "Out of stock", matched="#availability")
+    if res.status == "in_stock" and official:
+        # the generic verdict (JSON-LD, "Only 3 left" text, an unrecognised buy button) knows nothing of the seller
+        if third:
+            return _third_party(res, f"seller: {seller}")
+        if third is None:
+            return override(res, None, "Couldn't confirm the seller", matched="seller unknown")
     return res
+
+
+def _third_party(res: CheckResult, matched: str) -> CheckResult:
+    """"Third-party sellers only": the page's price is the marketplace seller's, not Amazon's — kept aside
+    so it never reads as the watched price."""
+    if res.price is not None:
+        res.detail["third_party_price"] = res.price
+    res.price = None
+    res.detail.pop("price_value", None)
+    return override(res, "out", THIRD_PARTY_TEXT, matched=matched)
 
 
 _AOD_BLOCK_SEL = "#aod-pinned-offer, #aod-offer, [id^='aod-offer-'][class*='aod-information-block'], .aod-information-block"

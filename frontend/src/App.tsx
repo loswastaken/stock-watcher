@@ -2,6 +2,7 @@ import { QueryClientProvider, useQueryClient } from '@tanstack/react-query';
 import { lazy, Suspense, useEffect } from 'react';
 import { BrowserRouter, Route, Routes } from 'react-router-dom';
 import { Toaster } from 'sonner';
+import { ErrorBoundary } from './components/ErrorBoundary';
 import { AppShell } from './components/layout/AppShell';
 import { PageLoader } from './components/PageLoader';
 import { ConfirmProvider } from './components/ui/confirm';
@@ -56,39 +57,41 @@ function ThemedToaster() {
 
 export function App() {
   return (
-    <QueryClientProvider client={queryClient}>
-      <ThemeProvider>
-        <TooltipProvider delayDuration={300}>
-          <ConfirmProvider>
-            <BrowserRouter>
-              <UnauthorizedBridge />
-              <Suspense fallback={<PageLoader />}>
-                <Routes>
-                  <Route path="/login" element={<Login />} />
-                  <Route path="/setup" element={<Setup />} />
-                  <Route element={<RequireAuth />}>
-                    <Route element={<AppShell />}>
-                      <Route index element={<Dashboard />} />
-                      <Route path="items/new" element={<ItemForm />} />
-                      <Route path="items/:id" element={<ItemDetail />} />
-                      <Route path="items/:id/edit" element={<ItemForm />} />
-                      <Route path="notifications" element={<Notifications />} />
-                      <Route path="purchased" element={<Purchased />} />
-                      <Route path="stores" element={<Stores />} />
-                      <Route path="settings" element={<SettingsPage />} />
-                      <Route element={<RequireAdmin />}>
-                        <Route path="admin/users" element={<UsersPage />} />
+    <ErrorBoundary>
+      <QueryClientProvider client={queryClient}>
+        <ThemeProvider>
+          <TooltipProvider delayDuration={300}>
+            <ConfirmProvider>
+              <BrowserRouter>
+                <UnauthorizedBridge />
+                <Suspense fallback={<PageLoader />}>
+                  <Routes>
+                    <Route path="/login" element={<Login />} />
+                    <Route path="/setup" element={<Setup />} />
+                    <Route element={<RequireAuth />}>
+                      <Route element={<AppShell />}>
+                        <Route index element={<Dashboard />} />
+                        <Route path="items/new" element={<ItemForm />} />
+                        <Route path="items/:id" element={<ItemDetail />} />
+                        <Route path="items/:id/edit" element={<ItemForm />} />
+                        <Route path="notifications" element={<Notifications />} />
+                        <Route path="purchased" element={<Purchased />} />
+                        <Route path="stores" element={<Stores />} />
+                        <Route path="settings" element={<SettingsPage />} />
+                        <Route element={<RequireAdmin />}>
+                          <Route path="admin/users" element={<UsersPage />} />
+                        </Route>
+                        <Route path="*" element={<NotFound />} />
                       </Route>
-                      <Route path="*" element={<NotFound />} />
                     </Route>
-                  </Route>
-                </Routes>
-              </Suspense>
-            </BrowserRouter>
-            <ThemedToaster />
-          </ConfirmProvider>
-        </TooltipProvider>
-      </ThemeProvider>
-    </QueryClientProvider>
+                  </Routes>
+                </Suspense>
+              </BrowserRouter>
+              <ThemedToaster />
+            </ConfirmProvider>
+          </TooltipProvider>
+        </ThemeProvider>
+      </QueryClientProvider>
+    </ErrorBoundary>
   );
 }

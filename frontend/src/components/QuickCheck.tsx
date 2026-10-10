@@ -49,7 +49,7 @@ interface Checked {
 }
 
 /** Pull a URL out of whatever was typed/pasted; add https:// to a bare "shop.com/…". */
-export function normalizeUrl(raw: string): string {
+function normalizeUrl(raw: string): string {
   const t = raw.trim();
   const m = t.match(/https?:\/\/[^\s<>"']+/i);
   if (m) return m[0];
@@ -100,8 +100,21 @@ function asStatus(s: string | null | undefined): ItemStatus {
   return s && s in statusMeta ? (s as ItemStatus) : 'unknown';
 }
 
+/** History from localStorage: drop malformed entries (a bad checkedAt would throw in toISOString). */
 function loadHistory(v: unknown): Checked[] {
-  return Array.isArray(v) ? v.filter((h): h is Checked => !!h && typeof h.url === 'string' && !!h.data).slice(0, HISTORY_MAX) : [];
+  return Array.isArray(v)
+    ? v
+        .filter(
+          (h): h is Checked =>
+            !!h &&
+            typeof h.url === 'string' &&
+            !!h.data &&
+            typeof h.data === 'object' &&
+            typeof h.checkedAt === 'number' &&
+            !Number.isNaN(new Date(h.checkedAt).getTime()),
+        )
+        .slice(0, HISTORY_MAX)
+    : [];
 }
 
 export function QuickCheck({ className }: { className?: string }) {
@@ -195,7 +208,8 @@ export function QuickCheck({ className }: { className?: string }) {
     setShown(h);
   };
 
-  // Deep links: "/?check" opens + focuses the card, "/?check=<url>" runs a check straight away.
+  // Deep links: "/?check" opens + focuses the card, "/?check=<url>" also fills in the link. The
+  // check itself waits for a click / Enter: any site could link here, and it makes the server fetch the page.
   const deepLink = params.get('check');
   useEffect(() => {
     if (deepLink === null) return;
@@ -204,7 +218,10 @@ export function QuickCheck({ className }: { className?: string }) {
     setParams(p, { replace: true });
     setCollapsed(false);
     setFocusReq((n) => n + 1);
-    if (deepLink) void check(deepLink);
+    if (deepLink) {
+      setInput(normalizeUrl(deepLink));
+      setInvalid(false);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [deepLink]);
   // Runs after the expanded body has rendered, so the input exists.
@@ -568,7 +585,7 @@ function ResultCard({
           >
             <ExternalLink /> Open page
           </a>
-          {data.cart_url && (
+          {data.cart_url && isValidUrl(data.cart_url) && (
             <a
               href={data.cart_url}
               target="_blank"

@@ -76,9 +76,12 @@ _IN_WORDS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\bin\s+stock\b|\bavailable\b|\bonly\s+\d+\s+left\b|\blimited\s+(?:stock|quantit)|\bships\b", re.I),
      "In stock"),
 ]
+_SOON_RE = re.compile(r"coming\s+soon|\b(?:in\s+stock|available)\s+soon\b|\bnot\s+yet\s+available\b", re.I)
+# checked before _IN_WORDS: negated / zero / future forms ("Not in stock", "0 in stock", "Available soon")
 _OUT_WORDS = re.compile(
-    r"out\s+of\s+stock|sold\s*out|\bunavailable\b|not\s+available|no\s+longer\s+available|discontinued"
-    r"|coming\s+soon|notify\s+me",
+    r"out[\s-]+of[\s-]+stock|sold[\s-]*out|\bunavailable\b|not\s+available|no\s+longer\s+available|discontinued"
+    r"|notify\s+me|\b(?:not|no\s+longer)\s+(?:(?:currently|yet)\s+)?(?:in\s+stock|available)\b"
+    r"|(?<![\w.,])0+\s+(?:in\s+stock|available|left)\b|" + _SOON_RE.pattern,
     re.I,
 )
 
@@ -89,8 +92,8 @@ def classify_text(text: str | None) -> tuple[str | None, str | None]:
     if not t:
         return None, None
     if _OUT_WORDS.search(t):
-        return "out", ("Sold out" if re.search(r"sold\s*out", t, re.I)
-                       else "Coming soon" if re.search(r"coming\s+soon", t, re.I) else "Out of stock")
+        return "out", ("Sold out" if re.search(r"sold[\s-]*out", t, re.I)
+                       else "Coming soon" if _SOON_RE.search(t) else "Out of stock")
     for rx, label in _IN_WORDS:
         if rx.search(t):
             return "in", label
@@ -225,6 +228,8 @@ async def check_shopify(url: str, html: str, final_url: str, headers: dict, rcfg
 
     pin = (_query(url).get("variant") or _query(final_url).get("variant") or [None])[0]
     pinned = next((v for v in variants if str(v.get("id")) == str(pin)), None) if pin else None
+    if pin and pinned is None:
+        return None  # the URL's variant is gone: another variant's stock isn't its; let the generic checker decide
     signals: list[str] = []
     multi = len(variants) > 1
 
@@ -236,8 +241,6 @@ async def check_shopify(url: str, html: str, final_url: str, headers: dict, rcfg
         avail = [v for v in variants if v.get("available")]
         in_stock = bool(data.get("available")) if data.get("available") is not None else bool(avail)
         chosen = (avail[0] if avail else (variants[0] if variants else None))
-        if pin:
-            signals.append(f"shopify: variant {pin} not found; using the whole product")
     vtitle = clean_text(chosen.get("title")) if chosen else ""
     vlabel = vtitle if vtitle and vtitle != "Default Title" else None
     n_avail = sum(1 for v in variants if v.get("available"))
@@ -626,9 +629,10 @@ async def check_opencart(url: str, html: str, final_url: str, headers: dict, rcf
         verdict, st = "out", tt
     elif tv == "in" and not btn_disabled:
         verdict, st = "in", tt
-    elif isinstance(btn, Tag) and not btn_disabled and avail:
-        # Custom stock statuses such as "2-3 Days" still let you order.
-        verdict, st = "in", "In stock"
+    elif avail and not btn_disabled:
+        # OpenCart prints a custom stock status ("2-3 Days", a translated "Out of stock") only when the
+        # quantity is 0, and its cart button stays enabled regardless: not proof of stock, generic decides
+        return None
     elif btn_disabled:
         verdict, st, sig = "out", "Out of stock", "opencart: add-to-cart button disabled"
     else:

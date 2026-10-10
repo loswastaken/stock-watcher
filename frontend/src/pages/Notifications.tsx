@@ -84,7 +84,7 @@ export default function Notifications() {
         />
       </div>
 
-      {q.isError ? (
+      {q.isError && !q.data ? (
         <EmptyState
           icon={<AlertTriangle />}
           title="Couldn't load notifications"

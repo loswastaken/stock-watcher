@@ -10,7 +10,6 @@ import type {
   Preview,
   Restock,
   Retailer,
-  RetailerConfig,
   Settings,
   StoreRow,
   SettingsUpdate,
@@ -19,31 +18,29 @@ import type {
   User,
 } from './types';
 
-type ValidationIssue = { loc?: (string | number)[]; msg?: string; type?: string };
+/** One entry of a 422's `errors` list (the backend also joins them into `detail`). */
+export interface FieldError {
+  field: string;
+  message: string;
+}
 
 export class ApiError extends Error {
   status: number;
   detail: unknown;
-  constructor(status: number, detail: unknown) {
+  errors: FieldError[];
+  constructor(status: number, detail: unknown, errors: FieldError[] = []) {
     super(formatDetail(detail, status));
     this.name = 'ApiError';
     this.status = status;
     this.detail = detail;
+    this.errors = errors;
   }
 }
 
-/** Render FastAPI `detail` (string or validation array) as human text. */
-export function formatDetail(detail: unknown, status?: number): string {
+/** Render FastAPI `detail` as human text. */
+function formatDetail(detail: unknown, status?: number): string {
   if (typeof detail === 'string' && detail.trim()) return detail;
   if (status === 413) return 'File too large (max 8 MB).';
-  if (Array.isArray(detail)) {
-    const parts = (detail as ValidationIssue[]).map((d) => {
-      const loc = (d.loc ?? []).filter((p) => p !== 'body' && p !== 'query' && p !== 'path');
-      const field = loc.length ? `${loc.join('.')}: ` : '';
-      return `${field}${d.msg ?? 'invalid value'}`;
-    });
-    if (parts.length) return parts.join('; ');
-  }
   if (detail && typeof detail === 'object' && 'message' in detail) {
     return String((detail as { message: unknown }).message);
   }
@@ -105,18 +102,26 @@ export async function request<T>(path: string, opts: RequestOptions = {}): Promi
 
   const text = await res.text();
   let data: unknown = null;
+  let json = false;
   if (text) {
     try {
       data = JSON.parse(text);
+      json = true;
     } catch {
       data = text;
     }
   }
 
   if (!res.ok) {
-    const detail = data && typeof data === 'object' && 'detail' in data ? (data as { detail: unknown }).detail : data;
+    // Only a JSON body has a usable detail: a reverse proxy's HTML error page (413, 502, …)
+    // falls through to the status-based message instead of becoming the toast text.
+    const obj = json && data && typeof data === 'object' ? (data as { detail?: unknown; errors?: unknown }) : null;
+    const detail = obj ? obj.detail : json ? data : null;
+    const errors = Array.isArray(obj?.errors)
+      ? (obj.errors as FieldError[]).filter((e) => e && typeof e.field === 'string' && typeof e.message === 'string')
+      : [];
     if (res.status === 401 && !opts.skipAuthRedirect) onUnauthorized?.();
-    throw new ApiError(res.status, detail);
+    throw new ApiError(res.status, detail, errors);
   }
   return data as T;
 }
@@ -136,7 +141,6 @@ export const api = {
   login: (username: string, password: string) =>
     request<User>('/auth/login', { method: 'POST', body: { username, password }, skipAuthRedirect: true }),
   logout: () => request<void>('/auth/logout', { method: 'POST', skipAuthRedirect: true }),
-  me: () => request<User>('/auth/me'),
   changePassword: (current_password: string, new_password: string) =>
     request<void>('/auth/change-password', { method: 'POST', body: { current_password, new_password } }),
 
@@ -160,7 +164,9 @@ export const api = {
   updateItem: (id: number, body: ItemUpdate) => request<Item>(`/items/${id}`, { method: 'PATCH', body }),
   deleteItem: (id: number) => request<void>(`/items/${id}`, { method: 'DELETE' }),
   purchaseItem: (id: number) => request<Item>(`/items/${id}/purchase`, { method: 'POST' }),
-  unpurchaseItem: (id: number) => request<Item>(`/items/${id}/unpurchase`, { method: 'POST' }),
+  /** rearm=false (Undo of "Mark purchased") only clears the purchase, keeping alert state. */
+  unpurchaseItem: (id: number, rearm = true) =>
+    request<Item>(`/items/${id}/unpurchase${rearm ? '' : '?rearm=false'}`, { method: 'POST' }),
   checkItem: (id: number) => request<Item>(`/items/${id}/check`, { method: 'POST' }),
   health: () => request<{ status: string; version: string }>('/health'),
   updateStatus: () => request<UpdateStatus>('/system/update'),
@@ -174,8 +180,7 @@ export const api = {
   },
   refreshImage: (id: number) => request<Item>(`/items/${id}/image/refresh`, { method: 'POST' }),
   stores: (id: number) => request<StoreRow[]>(`/items/${id}/stores`),
-  addStore: (id: number, url: string, retailer_config?: RetailerConfig) =>
-    request<Item>(`/items/${id}/stores`, { method: 'POST', body: { url, ...(retailer_config ? { retailer_config } : {}) } }),
+  addStore: (id: number, url: string) => request<Item>(`/items/${id}/stores`, { method: 'POST', body: { url } }),
   restocks: (id: number, limit = 20) => request<Restock[]>(`/items/${id}/restocks${q({ limit })}`),
   retailers: () => request<Retailer[]>('/retailers'),
   history: (id: number, limit = 50) => request<CheckEvent[]>(`/items/${id}/history${q({ limit })}`),

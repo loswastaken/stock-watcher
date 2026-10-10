@@ -68,6 +68,15 @@ export function isValidUrl(url: string): boolean {
   }
 }
 
+/** Same rule as the backend's check_username: 1-64 of letters, digits and _ . @ + - */
+export function usernameError(name: string): string | undefined {
+  const v = name.trim();
+  if (!v) return 'Username is required';
+  if (v.length > 64) return 'At most 64 characters';
+  if (!/^[A-Za-z0-9_.@+-]+$/.test(v)) return 'Letters, digits and _ . @ + - only';
+  return undefined;
+}
+
 export function formatInterval(minutes: number): string {
   if (minutes < 1) return `${Math.round(minutes * 60)}s`;
   if (minutes < 60) return `${minutes} min`;

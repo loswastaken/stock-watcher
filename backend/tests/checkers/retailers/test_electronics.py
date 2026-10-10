@@ -76,7 +76,8 @@ async def test_newegg_api_first_party_in_stock():
     assert res.status == "in_stock" and res.available[0].key == "stock"
     assert res.title.startswith("GIGABYTE AORUS GeForce RTX 5090")
     assert res.detail["price_value"] == 2599.99 and res.price == "$2,599.99"
-    assert res.detail["seller"] == "Newegg" and res.detail["third_party"] is False
+    # Newegg's own listings answer with an empty Seller block (as recorded): seller unknown, not filtered
+    assert res.detail["seller"] is None and res.detail["third_party"] is None
     assert res.detail["cart_url"] == "https://secure.newegg.com/Shopping/AddtoCart.aspx?Submit=ADD&ItemList=N82E16814932744"
     assert res.detail["retailer"] == "newegg" and res.detail["stock_qty"] == 12
     assert res.image_url == "https://c1.neweggimages.com/ProductImage/14-932-744-01.png"
@@ -106,6 +107,36 @@ async def test_newegg_marketplace_seller_allowed():
     res = await el.newegg(url, ctx_for(url, official_only=False))
     assert res.status == "in_stock" and "GPU Deals Direct" in res.status_text
     assert res.detail["cart_url"].endswith("ItemList=9SIA4REK4R6437")
+
+
+def _ne_live_main_item() -> dict:
+    import gzip
+    live = Path(__file__).parent.parent / "fixtures" / "live" / "newegg" / "realtime_14-137-917.json.gz"
+    return json.loads(gzip.decompress(live.read_bytes()))["MainItem"]
+
+
+def test_newegg_recorded_answer_nests_the_seller():
+    # the real ProductRealtime answer carries the seller under MainItem.Seller, not at the top level
+    mi = _ne_live_main_item()
+    mi.update(Instock=True, Stock=3, Item="9SIA4REK4R6437")
+    mi["Seller"].update(SellerId="A4RE", SellerName="GPU Deals Direct")
+    url = "https://www.newegg.com/p/9SIA4REK4R6437"
+    res = el._newegg_from_api(mi, "9SIA4REK4R6437", ctx_for(url))
+    assert res.status == "out_of_stock" and res.status_text == "Third-party sellers only"
+    assert res.detail["seller"] == "GPU Deals Direct" and res.detail["third_party"] is True
+    assert "cart_url" not in res.detail
+    res = el._newegg_from_api(mi, "9SIA4REK4R6437", ctx_for(url, official_only=False))
+    assert res.status == "in_stock" and res.status_text == "In stock (sold by GPU Deals Direct)"
+
+
+def test_newegg_flat_seller_fields_still_read():
+    mi = {"Item": "9SIA4REK4R6437", "Instock": True, "Stock": 2, "SellerId": "A4RE", "SellerName": "GPU Deals Direct"}
+    url = "https://www.newegg.com/p/9SIA4REK4R6437"
+    res = el._newegg_from_api(mi, "9SIA4REK4R6437", ctx_for(url))
+    assert res.status == "out_of_stock" and res.detail["third_party"] is True
+    mi = {"Item": "N82E16814932744", "Instock": True, "Stock": 2, "Seller": {"SellerId": "", "SellerName": "Newegg"}}
+    res = el._newegg_from_api(mi, "N82E16814932744", ctx_for(NE_URL))
+    assert res.status == "in_stock" and res.detail["seller"] == "Newegg" and res.detail["third_party"] is False
 
 
 @respx.mock
@@ -441,11 +472,37 @@ async def test_zotac_store_magento_stock(page):
     assert res.status == "in_stock" and res.detail["price_value"] == 1199.99
 
 
+async def test_zotac_store_sold_out_related_product_is_not_ours(page):
+    # Magento's related / upsell lists mark their sold-out items .stock.unavailable too
+    url = "https://www.zotacstore.com/us/zt-b50800j-10p"
+    related = ('<div class="block related"><ol class="products list items product-items"><li class="item product">'
+               '<strong class="product-item-name"><a href="/us/zt-a30610h-10m">ZOTAC GAMING GeForce RTX 3060</a></strong>'
+               '<span data-price-amount="279.99" data-price-type="finalPrice"></span>'
+               '<div class="stock unavailable"><span>Out of stock</span></div></li></ol></div>')
+    html = fx("zotacstore_instock.html").replace("</main>", related + "</main>")
+    hit = el._magento_dom(el.page_view(html))
+    assert hit is not None and hit.verdict == "in" and hit.price == "1199.99"
+    page(html)
+    res = await el.zotac(url, ctx_for(url))
+    assert res.status == "in_stock" and res.detail["price_value"] == 1199.99
+    sold_out = fx("zotacstore_instock.html").replace('class="stock available"', 'class="stock unavailable"')
+    assert el._magento_dom(el.page_view(sold_out)).verdict == "out"
+
+
 async def test_zotac_brand_site_is_info_only(page):
     url = "https://www.zotac.com/us/product/graphics_card/zotac-gaming-geforce-rtx-5080-solid-oc"
     page(fx("gigabyte_info.html").replace("GIGABYTE", "ZOTAC"))
     res = await el.zotac(url, ctx_for(url))
     assert res.status == "unknown" and res.status_text == "No direct sales on this page"
+
+
+def test_leica_adapter_only_sees_the_brand_site():
+    assert match_retailer("https://leica-camera.com/en-US/photography/cameras/q/q3-black").adapter == "electronics:leica"
+    shop = match_retailer("https://leicacamerausa.com/leica-q3-black.html")
+    assert shop is None or shop.adapter != "electronics:leica"
+    html = ('<a class="online-shop" href="/en-US/stores">Stores</a>'
+            '<a class="online-shop" href="https://leicacamerausa.com/leica-q3-black.html">Shop now</a>')
+    assert el._leica_shop_link(html) == "https://leicacamerausa.com/leica-q3-black.html"
 
 
 @pytest.mark.parametrize("fn,url,html,status,text", [

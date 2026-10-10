@@ -335,7 +335,7 @@ export default function Dashboard() {
           </div>
         </div>
 
-        {items.isError ? (
+        {items.isError && !items.data ? (
           <EmptyState
             icon={<AlertTriangle />}
             title="Couldn't load items"

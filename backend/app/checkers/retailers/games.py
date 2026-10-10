@@ -67,7 +67,7 @@ def _collect(node: Any, refs: dict[str, dict], keys: set[str], depth: int = 0, s
                 dv = _deref(v, refs)
                 if k in ("price", "prices") and isinstance(dv, dict) or not isinstance(dv, (dict, list)):
                     out[k] = dv
-        for k, v in node.items():
+        for v in node.values():
             if isinstance(v, (dict, list)):
                 _collect(v, refs, keys, depth + 1, seen, out)
     elif isinstance(node, list):
@@ -79,7 +79,7 @@ def _collect(node: Any, refs: dict[str, dict], keys: set[str], depth: int = 0, s
 # =========================================================================== LEGO
 
 _LEGO_CODE_RE = re.compile(r"/product/[^/?#]*?-?(\d{4,8})(?:[/?#]|$)", re.I)
-_LEGO_KEYS = {"availabilityStatus", "canAddToBag", "availabilityText", "price", "name", "primaryImage", "baseImgUrl"}
+_LEGO_KEYS = {"availabilityStatus", "canAddToBag", "availabilityText", "price", "name"}
 
 
 def lego_code(url: str) -> str | None:
@@ -190,19 +190,33 @@ def _nin_product(html: str, url: str) -> dict | None:
     if nd is None:
         return None
     refs = _apollo_refs(nd)
-    prods = [d for d in iter_dicts(nd) if d.get("__typename") == "StoreProduct"]
+    # "StoreProduct" (older store) / "Product" (the 2026 store: Apollo 'Product:{"sku":...}' entries)
+    prods = [d for d in iter_dicts(nd) if d.get("__typename") in ("StoreProduct", "Product")]
     if not prods:
         return None
     segs = [s.lower() for s in urlsplit(url).path.split("/") if s]
     slug = segs[-1] if segs else ""
-    # only the StoreProduct this URL names (urlKey = last path segment, or its SKU in the path);
-    # bundles / "related" products on the page never stand in for it
-    p = next((d for d in prods if slug and str(d.get("urlKey") or "").strip("/").lower() == slug), None)
-    if p is None:
-        p = next((d for d in prods if d.get("sku") and str(d["sku"]).lower() in segs), None)
-    if p is None:
+    # only the product this URL names (urlKey = last path segment, or its SKU in the path);
+    # bundles / cross-sell / upsell products on the page never stand in for it. Inline partial copies
+    # of the same product can sit beside its full cache entry: the fullest one wins.
+    hits = [d for d in prods if slug and str(d.get("urlKey") or "").strip("/").lower() == slug]
+    if not hits:
+        hits = [d for d in prods if d.get("sku") and str(d["sku"]).lower() in segs]
+    if not hits:
         return None
+    p = max(hits, key=len)
     return {k: _deref(v, refs) for k, v in p.items()}
+
+
+def _nin_price(prod: dict) -> Any:
+    """``prices.minimum.finalPrice`` (StoreProduct) or ``prices({"personalized":false}).finalPrice`` (Product)."""
+    for k, v in prod.items():
+        if (k == "prices" or k.startswith("prices(")) and isinstance(v, dict):
+            p = v.get("minimum") if isinstance(v.get("minimum"), dict) else v
+            price = p.get("finalPrice") or p.get("regularPrice")
+            if price:
+                return price
+    return None
 
 
 async def nintendo(url: str, ctx: AdapterContext) -> CheckResult | None:
@@ -219,21 +233,25 @@ async def nintendo(url: str, ctx: AdapterContext) -> CheckResult | None:
             return Hit("out", "Invite only", inv[1], seller_detail(ctx, "Nintendo"))
         if not prod:
             return None
-        price = dig(prod, "prices", "minimum", "finalPrice") or dig(prod, "prices", "minimum", "regularPrice")
+        price = _nin_price(prod)
         det = {"sku": prod.get("sku"), **seller_detail(ctx, "Nintendo")}
+        name = clean_text(prod.get("name")) or None
+        typename = prod.get("__typename") or "StoreProduct"
+        if prod.get("soldOutPermanent") is True:
+            return Hit("out", "Sold out", f"__NEXT_DATA__ {typename}.soldOutPermanent=True", det, price=price, title=name)
+        if prod.get("inviteRequired") is True:
+            return Hit("out", "Invite only", f"__NEXT_DATA__ {typename}.inviteRequired=True", det, price=price, title=name)
         for f in _NIN_STRING_FIELDS:
             v = prod.get(f)
             if isinstance(v, str) and v:
                 verdict, text = _nin_enum(v)
                 if verdict:
-                    return Hit(verdict, text, f"__NEXT_DATA__ StoreProduct.{f}={v}", det, price=price,
-                               title=clean_text(prod.get("name")) or None)
+                    return Hit(verdict, text, f"__NEXT_DATA__ {typename}.{f}={v}", det, price=price, title=name)
         for f in _NIN_BOOL_FIELDS:
             v = prod.get(f)
             if isinstance(v, bool):
-                return Hit("in" if v else "out", "In stock" if v else "Out of stock",
-                           f"__NEXT_DATA__ StoreProduct.{f}={v}", det, price=price,
-                           title=clean_text(prod.get("name")) or None)
+                text = ("Pre-order" if prod.get("prePurchase") is True else "In stock") if v else "Out of stock"
+                return Hit("in" if v else "out", text, f"__NEXT_DATA__ {typename}.{f}={v}", det, price=price, title=name)
         return None
 
     return analyze_page(fetched.text, url, ctx, fetched.url, dom=dom, rules=NINTENDO_RULES)
@@ -297,17 +315,21 @@ async def popmart(url: str, ctx: AdapterContext) -> CheckResult | None:
             return None
         considered = [s for s in skus if pin and str(s.get("id")) == pin] or skus
         counts = []
+        pick = None  # the first SKU with stock (its price is shown)
         for s in considered:
             n = dig(s, "stock", "onlineStock")
             try:
-                counts.append(int(n))
+                c = int(n)
             except (TypeError, ValueError):
                 continue
+            counts.append(c)
+            if c > 0 and pick is None:
+                pick = s
         if not counts:
             return None
         total = sum(c for c in counts if c > 0)
         det = {"sku_count": len(considered), "stock_qty": total, **seller_detail(ctx, "POP MART")}
-        pick = next((s for s in considered if (dig(s, "stock", "onlineStock") or 0) > 0), considered[0])
+        pick = pick or considered[0]
         price = _popmart_price(pick)
         sig = f"__NEXT_DATA__ skus[].stock.onlineStock={counts}"
         if total > 0:

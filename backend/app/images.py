@@ -21,7 +21,8 @@ log = logging.getLogger("stockwatcher.images")
 
 MAX_BYTES = 8 * 1024 * 1024
 MAX_DIMENSION = 800
-MAX_PIXELS = 50_000_000
+MAX_PIXELS = 25_000_000
+DOWNLOAD_TIMEOUT = 30  # whole download; httpx's timeout is per read, so a trickling server could hold it far longer
 ALLOWED_FORMATS = {"JPEG", "PNG", "WEBP", "GIF"}
 FILENAME_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}\.(webp|jpg|jpeg|png|gif)$")
 USER_AGENT = (
@@ -67,17 +68,24 @@ def process_image(data: bytes) -> bytes:
                 raise ImageError("Unsupported image type (use JPG, PNG, WebP or GIF)")
             if im.width * im.height > MAX_PIXELS:
                 raise ImageError("Image dimensions are too large")
+            # Shrink first, then rotate / convert the small copy: each of those copies the whole
+            # bitmap, which at full size cost hundreds of MB for one large image.
+            if im.format == "JPEG":
+                im.draft("RGB", (MAX_DIMENSION, MAX_DIMENSION))  # decode at 1/2 .. 1/8 scale
             im.load()  # first frame for animated images
-            im = ImageOps.exif_transpose(im)
             has_alpha = im.mode in ("RGBA", "LA", "PA") or "transparency" in im.info
-            im = im.convert("RGBA" if has_alpha else "RGB")
+            mode = "RGBA" if has_alpha else "RGB"
+            if im.mode not in ("RGB", "RGBA", "L", "LA") or "transparency" in im.info:
+                im = im.convert(mode)  # palette etc.: resizing those directly is nearest-neighbour
             im.thumbnail((MAX_DIMENSION, MAX_DIMENSION), Image.Resampling.LANCZOS)
+            im = ImageOps.exif_transpose(im).convert(mode)
             out = io.BytesIO()
             im.save(out, format="WEBP", quality=85, method=4)
             return out.getvalue()
     except ImageError:
         raise
-    except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError) as e:
+    # (Pillow raises SyntaxError for some corrupt files, e.g. "broken PNG file")
+    except (UnidentifiedImageError, OSError, ValueError, SyntaxError, Image.DecompressionBombError) as e:
         raise ImageError("File is not a valid image") from e
 
 
@@ -125,6 +133,13 @@ async def download_image(url: str) -> bytes:
     parts = urlsplit(url)
     if parts.scheme.lower() not in ("http", "https") or not parts.hostname:
         raise ImageError("Image URL must be http(s)")
+    try:
+        return await asyncio.wait_for(_download(url), DOWNLOAD_TIMEOUT)
+    except asyncio.TimeoutError:
+        raise ImageError("Image download timed out") from None
+
+
+async def _download(url: str) -> bytes:
     async with httpx.AsyncClient(
         timeout=15, follow_redirects=True, headers={"User-Agent": USER_AGENT, "Accept": "image/*,*/*;q=0.5"}
     ) as client:

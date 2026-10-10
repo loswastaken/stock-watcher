@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import atexit
+import codecs
 import contextlib
 import contextvars
 import importlib
@@ -71,12 +72,20 @@ DOCUMENT_HEADERS: dict[str, str] = {
 }
 
 TIMEOUT = httpx.Timeout(15.0, connect=8.0)
+# httpx's TIMEOUT bounds each connect / read, so a server trickling bytes could hold a request
+# for minutes: the whole exchange (headers + body) is also capped at this many seconds.
+HTTP_TOTAL_TIMEOUT = 15.0
+# Bodies (decoded) larger than this are refused instead of buffered (no product page is near it).
+MAX_BODY_BYTES = 10 * 1024 * 1024
 PER_HOST_CONCURRENCY = 2
 # Minimum gap between request *starts* to the same host (seconds). Tests set this to 0.
 HOST_MIN_GAP = 0.4
 BROWSER_CONCURRENCY = 2
 BROWSER_NAV_TIMEOUT_MS = 30_000
 BROWSER_IDLE_TIMEOUT_MS = 8_000
+# Launching / connecting to the browser (Playwright's own default is 180 s per attempt).
+BROWSER_LAUNCH_TIMEOUT_MS = 30_000
+BROWSER_CDP_TIMEOUT_MS = 15_000
 # Hosts that recently needed the browser go straight to it for this long.
 BROWSER_HOST_TTL = 30 * 60
 
@@ -133,6 +142,9 @@ def host_of(url: str) -> str:
 
 # --------------------------------------------------------------------------- challenge / signal sniffing
 
+# Akamai's "Reference #18.2f3c..." line, also as served raw ("Reference&#32;&#35;18&#46;...").
+_AKAMAI_REFERENCE = r"reference(?:\s|&#32;)*(?:#|&#35;)"
+_AKAMAI_REFERENCE_RE = re.compile(_AKAMAI_REFERENCE, re.I)
 # Markers that only appear on bot-challenge / block pages (checked in the first 60 kB).
 _CHALLENGE_MARKERS = [
     re.compile(p, re.I)
@@ -142,7 +154,7 @@ _CHALLENGE_MARKERS = [
         r"<title>\s*attention required!?\s*\|\s*cloudflare",
         r"incapsula incident id",
         r"captcha-delivery\.com|geo\.captcha-delivery",  # DataDome
-        r"<title>\s*access denied\s*</title>[\s\S]{0,4000}reference\s*#",  # Akamai
+        r"<title>\s*access denied\s*</title>[\s\S]{0,4000}" + _AKAMAI_REFERENCE,  # Akamai
         r"<title>\s*robot or human\?\s*</title>",  # Walmart / Sam's Club (PerimeterX)
         r"<title>\s*pardon our interruption",
         r"sec-if-cpt-container|_sec/cp_challenge",  # Akamai bot manager
@@ -170,9 +182,11 @@ _SMALL_PAGE_MARKERS = [
         r"/splashui/challenge",  # eBay
         r"/areyouahuman",  # Newegg
         # Cloudflare challenge assets. Normal pages of CF sites load the passive bot-detection
-        # script ``/cdn-cgi/challenge-platform/[h/<x>/]scripts/jsd/main.js``: never a challenge.
-        r"/cdn-cgi/challenge-platform/(?!(?:h/\w+/)?scripts/jsd/)",
-        r"\bcf-chl-",
+        # script ``/cdn-cgi/challenge-platform/[h/<x>/]scripts/jsd/main.js``, and forms embed a
+        # Turnstile widget (``.../challenge-platform/h/<x>/turnstile/...`` iframe, ``cf-chl-widget-*``
+        # input): never a challenge. The real interstitial is caught by cf_chl_opt / "Just a moment".
+        r"/cdn-cgi/challenge-platform/(?!(?:h/\w+/)?(?:scripts/jsd/|turnstile/))",
+        r"\bcf-chl-(?!widget)",
     )
 ]
 _CHALLENGE_PATH_RE = re.compile(
@@ -327,6 +341,21 @@ except ImportError:  # pragma: no cover - depends on environment
     _HTTP2 = False
 
 
+_META_CHARSET_RE = re.compile(rb"<meta[^>]+charset\s*=\s*[\"']?\s*([\w.:-]+)", re.I)
+
+
+def _sniff_encoding(content: bytes) -> str:
+    """Encoding for a body whose Content-Type has no charset: the page's own ``<meta charset>``
+    (or http-equiv Content-Type) in its first 2 kB, like a browser, else UTF-8."""
+    m = _META_CHARSET_RE.search(content[:2048])
+    if m:
+        name = m.group(1).decode("ascii", "ignore")
+        with contextlib.suppress(LookupError):
+            # A page whose meta could be read as ASCII isn't UTF-16, whatever it says (WHATWG).
+            return "utf-8" if codecs.lookup(name).name.startswith("utf-16") else name
+    return "utf-8"
+
+
 def make_client(**kwargs: Any) -> httpx.AsyncClient:
     """A new AsyncClient with our defaults (callers own and must close it)."""
     opts: dict[str, Any] = dict(
@@ -335,6 +364,7 @@ def make_client(**kwargs: Any) -> httpx.AsyncClient:
         follow_redirects=True,
         http2=_HTTP2,
         limits=httpx.Limits(max_connections=20, max_keepalive_connections=10, keepalive_expiry=60),
+        default_encoding=_sniff_encoding,
     )
     opts.update(kwargs)
     return httpx.AsyncClient(**opts)
@@ -534,12 +564,27 @@ def _curl_headers(extra: dict[str, str | None] | None) -> dict[str, str | None]:
     return merged
 
 
+def _curl_size_cap() -> dict:
+    """curl options refusing bodies over MAX_BODY_BYTES (curl error 63; curl >= 8.4 also stops a
+    transfer of unknown size once it gets there)."""
+    try:
+        from curl_cffi import CurlOpt  # type: ignore
+
+        return {CurlOpt.MAXFILESIZE_LARGE: MAX_BODY_BYTES}
+    except Exception:  # noqa: BLE001 - older curl_cffi / fake module in tests
+        return {}
+
+
+def _too_large(url: str) -> FetchError:
+    return FetchError(f"Response from {host_of(url)} is too large (over {MAX_BODY_BYTES // 2**20} MB)")
+
+
 def _get_curl_session() -> Any:
     st = _st()
     if st.curl is None:
         cr = _curl_requests()
         st.curl = cr.AsyncSession(impersonate=IMPERSONATE_TARGET, timeout=CURL_TIMEOUT, allow_redirects=True,
-                                  max_redirects=10, max_clients=10)
+                                  max_redirects=10, max_clients=10, curl_options=_curl_size_cap())
     return st.curl
 
 
@@ -555,7 +600,7 @@ def _curl_to_httpx(r: Any, url: str) -> httpx.Response:
     items = [(k, v) for k, v in items if k and k.lower() not in _STRIP_RESPONSE_HEADERS and v is not None]
     final = str(getattr(r, "url", None) or url)
     return httpx.Response(int(r.status_code), headers=items, content=bytes(r.content or b""),
-                          request=httpx.Request("GET", final))
+                          request=httpx.Request("GET", final), default_encoding=_sniff_encoding)
 
 
 # Akamai answers bot-fingerprinted clients with an HTTP/2 stream reset instead of a 403
@@ -619,6 +664,8 @@ async def _curl_get(url: str, headers: dict[str, str | None] | None) -> httpx.Re
             if (timeout_exc and isinstance(e, timeout_exc)) or "timed out" in msg.lower() \
                     or "timeout" in type(e).__name__.lower():
                 raise FetchError(f"Timed out fetching {host_of(url)}") from e
+            if "curl: (63)" in msg:  # CURLE_FILESIZE_EXCEEDED (MAX_BODY_BYTES)
+                raise _too_large(url) from e
             if not h1 and is_http2_reset(msg) and (time_left() is None or time_left() > _MIN_REQUEST_TIME):
                 log.info("HTTP/2 reset from %s (%s): retrying over HTTP/1.1", host_of(url), msg)
                 h1 = True
@@ -647,6 +694,32 @@ def _httpx_request(client: httpx.AsyncClient, url: str, headers: dict[str, str |
     return req
 
 
+async def _send(client: httpx.AsyncClient, req: httpx.Request, url: str) -> httpx.Response:
+    """``client.send(req)`` with the whole exchange bounded by HTTP_TOTAL_TIMEOUT (or what's left
+    of the deadline) and the body read only up to MAX_BODY_BYTES (decoded); FetchError otherwise."""
+    left = time_left()
+    total = HTTP_TOTAL_TIMEOUT if left is None else max(0.0, min(HTTP_TOTAL_TIMEOUT, left))
+    try:
+        async with asyncio.timeout(total):
+            resp = await client.send(req, stream=True)
+            try:
+                with contextlib.suppress(ValueError):
+                    if int(resp.headers.get("content-length") or 0) > MAX_BODY_BYTES:
+                        raise _too_large(url)
+                body = bytearray()
+                async with contextlib.aclosing(resp.aiter_bytes()) as chunks:
+                    async for chunk in chunks:
+                        body += chunk
+                        if len(body) > MAX_BODY_BYTES:
+                            raise _too_large(url)
+                resp._content = bytes(body)  # what Response.aread() stores
+            finally:
+                await resp.aclose()
+    except TimeoutError as e:
+        raise FetchError(f"Timed out fetching {host_of(url)}") from e
+    return resp
+
+
 async def http_get(url: str, *, headers: dict[str, str | None] | None = None,
                    client: httpx.AsyncClient | None = None) -> httpx.Response:
     """GET ``url`` politely (per-host slot + gap). Hosts in ``IMPERSONATE_HOSTS`` go through
@@ -667,10 +740,12 @@ async def http_get(url: str, *, headers: dict[str, str | None] | None = None,
                 while True:
                     try:
                         cl = client or (_get_client_h1() if h1 else get_client())
-                        resp = await cl.send(_httpx_request(cl, url, headers))
+                        resp = await _send(cl, _httpx_request(cl, url, headers), url)
                         break
                     except httpx.TimeoutException as e:
                         raise FetchError(f"Timed out fetching {host_of(url)}") from e
+                    except (httpx.InvalidURL, UnicodeError) as e:  # not HTTPErrors (UnicodeError: bad IDNA host)
+                        raise FetchError(f"Invalid URL: {e}") from e
                     except httpx.HTTPError as e:
                         msg = f"{type(e).__name__}: {e}"
                         if client is None and _HTTP2 and not h1 and is_http2_reset(msg):
@@ -871,7 +946,6 @@ _BASE_ARGS = [
 ]
 # Plain Playwright only (patchright already hides these).
 _PLAYWRIGHT_ARGS = ["--disable-blink-features=AutomationControlled"]
-_LAUNCH_ARGS = _BASE_ARGS + _PLAYWRIGHT_ARGS  # kept for compatibility
 _WINDOW = (1440, 900)
 _XVFB_SCREEN = "1920x1080x24"
 
@@ -973,15 +1047,36 @@ def chrome_installed() -> bool:
 # --------------------------------------------------------------------------- virtual display
 
 
+def _x_lock_stale(path: str) -> bool:
+    """Whether an X server lock file (the server's pid as text) was left by a server that is gone:
+    its pid is dead, or the file can't be read or parsed."""
+    try:
+        with open(path, "rb") as fh:
+            pid = int(fh.read(64).strip())
+    except (OSError, ValueError):
+        return True
+    if pid <= 0:
+        return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except OSError:  # EPERM: alive, another user's
+        return False
+    return False
+
+
 class VirtualDisplay:
     """An Xvfb server on the first free display number (from :99), started on first use and
     stopped by ``shutdown()`` (or at exit)."""
 
     def __init__(self, binary: str = "Xvfb", *, screen: str = _XVFB_SCREEN, first: int = 99, tries: int = 20,
                  popen: Callable[..., Any] = subprocess.Popen, exists: Callable[[str], bool] = os.path.lexists,
-                 sleep: Callable[[float], Any] = time.sleep, ready_timeout: float = 5.0) -> None:
+                 sleep: Callable[[float], Any] = time.sleep, ready_timeout: float = 5.0,
+                 stale_lock: Callable[[str], bool] = _x_lock_stale, unlink: Callable[[str], Any] = os.unlink) -> None:
         self.binary, self.screen, self.first, self.tries = binary, screen, first, tries
         self._popen, self._exists, self._sleep, self.ready_timeout = popen, exists, sleep, ready_timeout
+        self._stale_lock, self._unlink = stale_lock, unlink
         self.proc: Any = None
         self.display: str | None = None
         self._atexit = False
@@ -990,7 +1085,14 @@ class VirtualDisplay:
         return self.proc is not None and self.proc.poll() is None
 
     def _free(self, n: int) -> bool:
-        return not self._exists(f"/tmp/.X{n}-lock") and not self._exists(f"/tmp/.X11-unix/X{n}")
+        lock, sock = f"/tmp/.X{n}-lock", f"/tmp/.X11-unix/X{n}"
+        if self._exists(lock) and self._stale_lock(lock):
+            # Left by a server that died uncleanly: clear it (and its socket, which would pass for
+            # "ready" below), or after enough unclean exits the browser silently goes headless.
+            for p in (lock, sock):
+                with contextlib.suppress(OSError):
+                    self._unlink(p)
+        return not self._exists(lock) and not self._exists(sock)
 
     def start(self) -> str:
         if self.running():
@@ -1172,6 +1274,18 @@ def _cdp_endpoint(url: str) -> str:
     return urlunsplit(parts._replace(netloc=netloc))
 
 
+def _launch_timeout_ms(default_ms: int = BROWSER_LAUNCH_TIMEOUT_MS) -> int:
+    """Playwright's launch / connect timeout within the current deadline (0 would mean none)."""
+    return max(1, _clamp_ms(default_ms, reserve=1.0))
+
+
+async def _stop_driver(pw: Any) -> None:
+    """Stop a started engine driver (which takes the browser it launched down with it). Shielded:
+    a launch cancelled by the caller's time cap must not leave it running."""
+    with contextlib.suppress(Exception):
+        await asyncio.shield(pw.stop())
+
+
 async def _connect_cdp(st: _State, url: str) -> None:
     engines = engine_names()
     if not engines:
@@ -1179,16 +1293,19 @@ async def _connect_cdp(st: _State, url: str) -> None:
     endpoint = await asyncio.to_thread(_cdp_endpoint, url)
     last: Exception | None = None
     for name in engines:
-        pw = await _engine_factory(name)().start()
+        pw = None
         try:
-            browser = await pw.chromium.connect_over_cdp(endpoint, timeout=15_000)
-        except Exception as e:  # noqa: BLE001
+            pw = await _engine_factory(name)().start()
+            browser = await pw.chromium.connect_over_cdp(endpoint, timeout=_launch_timeout_ms(BROWSER_CDP_TIMEOUT_MS))
+            # The Chrome's own (default) context: its cookies are what a hand-solved captcha left.
+            ctx = browser.contexts[0] if browser.contexts else await browser.new_context()
+        except BaseException as e:  # incl. cancellation: stop the driver either way
+            if pw is not None:
+                await _stop_driver(pw)
+            if not isinstance(e, Exception):
+                raise
             last = e
-            with contextlib.suppress(Exception):
-                await pw.stop()
             continue
-        # The Chrome's own (default) context: its cookies are what a hand-solved captcha left.
-        ctx = browser.contexts[0] if browser.contexts else await browser.new_context()
         st.pw, st.browser, st.context = pw, browser, ctx
         st.info = {"engine": name, "mode": "cdp", "channel": None, "version": _version(browser),
                    "persistent_profile": False, "cdp": True, "launched": True}
@@ -1237,7 +1354,12 @@ async def _launch(st: _State) -> None:
 
     last: Exception | None = None
     for name in engines:
-        pw = await _engine_factory(name)().start()
+        try:
+            pw = await _engine_factory(name)().start()
+        except Exception as e:  # noqa: BLE001 - e.g. the engine's driver is missing: try the next one
+            last = e
+            log.info("%s driver could not start: %s", name, _first_line(e))
+            continue
         args = list(_BASE_ARGS) + ([] if name == "patchright" else _PLAYWRIGHT_ARGS)
         if st.h1_mode:
             args.append("--disable-http2")
@@ -1254,28 +1376,32 @@ async def _launch(st: _State) -> None:
             args.append(f"--window-size={_WINDOW[0]},{_WINDOW[1]}")
         ctx = None
         used_channel = channel
-        for ch in ([channel, None] if channel else [None]):
-            try:
-                ctx = await pw.chromium.launch_persistent_context(user_data_dir, channel=ch, **opts) if ch else \
-                    await pw.chromium.launch_persistent_context(user_data_dir, **opts)
-                used_channel = ch
-                break
-            except Exception as e:  # noqa: BLE001 - e.g. Chrome not installed, browser build missing
-                last = e
-                if ch:
-                    log.info("browser channel %r unavailable with %s (%s); trying the bundled build", ch, name,
-                             _first_line(e))
-                # A failed launch can leave its lock behind.
+        try:
+            for ch in ([channel, None] if channel else [None]):
+                try:
+                    opts["timeout"] = _launch_timeout_ms()
+                    ctx = await pw.chromium.launch_persistent_context(user_data_dir, channel=ch, **opts) if ch \
+                        else await pw.chromium.launch_persistent_context(user_data_dir, **opts)
+                    used_channel = ch
+                    break
+                except Exception as e:  # noqa: BLE001 - e.g. Chrome not installed, browser build missing
+                    last = e
+                    if ch:
+                        log.info("browser channel %r unavailable with %s (%s); trying the bundled build", ch, name,
+                                 _first_line(e))
+                    # A failed launch can leave its lock behind.
+                    with contextlib.suppress(Exception):
+                        clear_stale_profile_locks(Path(user_data_dir))
+            if ctx is not None and name != "patchright" and headless:
                 with contextlib.suppress(Exception):
-                    clear_stale_profile_locks(Path(user_data_dir))
+                    await ctx.add_init_script(_STEALTH_JS)
+        except BaseException:  # cancelled (the caller's time cap): don't leave the driver + browser running
+            await _stop_driver(pw)
+            raise
         if ctx is None:
             log.info("%s could not start a browser: %s", name, _first_line(last) if last else "")
-            with contextlib.suppress(Exception):
-                await pw.stop()
+            await _stop_driver(pw)
             continue
-        if name != "patchright" and headless:
-            with contextlib.suppress(Exception):
-                await ctx.add_init_script(_STEALTH_JS)
         st.pw, st.context, st.browser = pw, ctx, getattr(ctx, "browser", None)
         version = _version(st.browser) if st.browser is not None else None
         st.version = version
@@ -1310,6 +1436,9 @@ async def _get_browser(h1: bool = False) -> Any:
             return st.context
         if st.launch_error is not None and time.monotonic() - st.launch_failed_at < _LAUNCH_RETRY_AFTER:
             raise st.launch_error
+        if _clamp_ms(BROWSER_LAUNCH_TIMEOUT_MS) < _MIN_BROWSER_TIME * 1000:
+            # This fetch's budget is used up (no page could load anyway): not a launch failure to cache.
+            raise FetchError("Timed out starting the browser (time budget used up)")
         await _close_browser(st)
         st.closed = False
         try:
@@ -1322,6 +1451,12 @@ async def _get_browser(h1: bool = False) -> Any:
                 await _launch(st)
         except FetchError as e:
             st.launch_error, st.launch_failed_at = e, time.monotonic()
+            raise
+        except asyncio.CancelledError:
+            # Cut off by the caller's time cap: as good as hung. Fail fast for a while instead of
+            # every check starting (and abandoning) another launch.
+            st.launch_error = FetchError("Could not start browser: the launch did not finish in time")
+            st.launch_failed_at = time.monotonic()
             raise
         except Exception as e:  # noqa: BLE001
             err = FetchError(f"Could not start browser: {_first_line(e)}")
@@ -1472,7 +1607,8 @@ def challenge_vendor(html: str) -> str:
         return "datadome"
     if "px-captcha" in h or "perimeterx" in h or "press &amp; hold" in h or "press & hold" in h:
         return "perimeterx"
-    if "sec-if-cpt-container" in h or "_sec/cp_challenge" in h or ("access denied" in h and "reference #" in h):
+    if "sec-if-cpt-container" in h or "_sec/cp_challenge" in h \
+            or ("access denied" in h and _AKAMAI_REFERENCE_RE.search(h)):
         return "akamai"
     return "other"
 
@@ -1674,7 +1810,9 @@ async def _browser_fetch_once(url: str, capture: Callable[[str], bool] | None, *
             doc = resp
             status = doc.status if doc is not None else 200
             # After a solved challenge the final document is fine even if the first response was 403/503.
-            if status >= 400 and not looks_like_challenge(html, final_url) and has_product_signals(html):
+            # (Not a 404/410: a dead link's error page has product tiles and JSON-LD too.)
+            if (status in RETRY_WITH_BROWSER_STATUSES and not looks_like_challenge(html, final_url)
+                    and has_product_signals(html)):
                 status = 200
             headers: dict = {}
             with contextlib.suppress(Exception):
@@ -1704,8 +1842,9 @@ async def browser_fetch_from_page(page_url: str, target_url: str, accept: str = 
     (same-origin XHR with the page's cookies). Returns (status, body, cookies). With ``binary`` the body is
     the raw bytes, base64-encoded (a gzipped sitemap read as text comes back mangled)."""
     script = """
-    async ([u, accept, binary]) => {
-        const r = await fetch(u, {credentials: 'include', headers: {'Accept': accept, 'x-skip-redirect': 'true'}});
+    async ([u, accept, binary, timeoutMs]) => {
+        const r = await fetch(u, {credentials: 'include', headers: {'Accept': accept, 'x-skip-redirect': 'true'},
+                                  signal: AbortSignal.timeout(timeoutMs)});
         const headers = {};
         r.headers.forEach((v, k) => { headers[k] = v; });
         if (binary) {
@@ -1722,7 +1861,9 @@ async def browser_fetch_from_page(page_url: str, target_url: str, accept: str = 
     try:
         async with browser_page() as page:
             await _open(page, page_url, interactive=st.info.get("mode") == "cdp")
-            res = await page.evaluate(script, [target_url, accept, binary])
+            # The in-page fetch (body included) is aborted when the deadline is near.
+            timeout_ms = max(1, _clamp_ms(BROWSER_NAV_TIMEOUT_MS, reserve=2.0))
+            res = await page.evaluate(script, [target_url, accept, binary, timeout_ms])
             cookies = await page.context.cookies([page_url, target_url])
             status, text = int(res.get("status") or 0), str(res.get("text") or "")
             _record(target_url, via="browser", t0=t0, status=status, final_url=str(res.get("url") or target_url),

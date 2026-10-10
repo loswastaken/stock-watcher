@@ -9,6 +9,7 @@ import { Button } from '@/components/ui/button';
 import { Field, Input } from '@/components/ui/input';
 import { api, errorMessage } from '@/lib/api';
 import { useAuthStatus, useSetAuth } from '@/lib/auth';
+import { usernameError } from '@/lib/utils';
 
 export default function Setup() {
   const { data, isLoading, isError, refetch } = useAuthStatus();
@@ -28,12 +29,13 @@ export default function Setup() {
   });
 
   if (isLoading) return <FullScreenLoader />;
-  if (isError) return <FullScreenLoader error onRetry={() => refetch()} />;
+  if (isError && !data) return <FullScreenLoader error onRetry={() => refetch()} />;
   if (data && !data.setup_required && !setup.isPending) return <Navigate to={data.user ? '/' : '/login'} replace />;
 
   const pwShort = password.length > 0 && password.length < 8;
   const mismatch = confirm.length > 0 && confirm !== password;
-  const valid = username.trim().length > 0 && password.length >= 8 && confirm === password;
+  const nameErr = usernameError(username);
+  const valid = !nameErr && password.length >= 8 && confirm === password;
 
   const onSubmit = (e: FormEvent) => {
     e.preventDefault();
@@ -49,7 +51,7 @@ export default function Setup() {
     >
       <form onSubmit={onSubmit} className="space-y-4" noValidate>
         <FormError>{setup.error ? errorMessage(setup.error) : null}</FormError>
-        <Field label="Username" htmlFor="username" error={touched && !username.trim() ? 'Username is required' : undefined}>
+        <Field label="Username" htmlFor="username" error={touched ? nameErr : undefined}>
           <Input
             id="username"
             autoComplete="username"
@@ -61,6 +63,8 @@ export default function Setup() {
             onChange={(e) => setUsername(e.target.value)}
             leading={<UserIcon />}
             className="h-10"
+            maxLength={64}
+            invalid={touched && !!nameErr}
           />
         </Field>
         <Field label="Password" htmlFor="password" hint="At least 8 characters." error={pwShort && touched ? 'Password must be at least 8 characters' : undefined}>

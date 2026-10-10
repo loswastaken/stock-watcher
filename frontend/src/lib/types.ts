@@ -16,11 +16,6 @@ export interface AuthStatus {
   user: User | null;
 }
 
-export interface Health {
-  status: 'ok';
-  version: string;
-}
-
 export interface Settings {
   ntfy_server: string;
   ntfy_topic: string | null;
@@ -149,7 +144,6 @@ export interface AppleDelivery {
 export interface AppleResult {
   stores?: AppleStore[];
   delivery?: AppleDelivery[];
-  display?: string;
   /** Stores found beyond max_distance_miles that were hidden. */
   stores_out_of_range?: number;
   /** Explanation shown when no stores are returned. */
@@ -218,7 +212,6 @@ export interface ItemCreate {
 export type ItemUpdate = Partial<{
   name: string;
   url: string;
-  kind: ItemKind;
   enabled: boolean;
   notify_enabled: boolean;
   interval_minutes: number;

@@ -158,6 +158,7 @@ async def test_official_api_marketplace_and_sold_out(monkeypatch):
     route = respx.get(url__startswith=API + ".json").mock(return_value=httpx.Response(200, json=body))
     res = await bestbuy.check(OLD, ctx())
     assert res.status == "out_of_stock" and res.status_text == "Third-party sellers only"
+    assert res.price is None and res.detail["third_party_price"] == "$1,999.99"
     body.update(marketplace=False, orderable="SoldOut", onlineAvailability=False)
     route.mock(return_value=httpx.Response(200, json=body))
     res = await bestbuy.check(OLD, ctx())
@@ -264,7 +265,8 @@ async def test_marketplace_bsin_url_is_third_party_not_in_stock():
     assert "skus=12357608" in str(route.calls.last.request.url)
     assert res.status == "out_of_stock" and res.status_text == "Third-party sellers only (Abe's Electronics Center)"
     assert res.detail["seller"] == "Abe's Electronics Center" and res.detail["third_party"] is True
-    assert res.price == "$1,395.99"
+    # the marketplace seller's price isn't Best Buy's: kept aside, never the item's price
+    assert res.price is None and "price_value" not in res.detail and res.detail["third_party_price"] == "$1,395.99"
     # official sellers off: a marketplace listing in Best Buy's reservation flow still isn't "In stock"
     res = await bestbuy.check(MKT, ctx(official_only=False))
     assert res.status == "unknown" and res.status_text == bestbuy.HIGH_DEMAND_TEXT
@@ -293,6 +295,7 @@ async def test_marketplace_fields_in_price_blocks_need_no_page():
     res = await bestbuy.check(MKT_SKU, ctx())
     assert not page.called
     assert res.status == "out_of_stock" and res.status_text == "Third-party sellers only (Abe's Electronics Center)"
+    assert res.price is None and res.detail["third_party_price"] == "$1,395.99"
     block[0]["sku"].pop("seller")
     block[0]["sku"]["isMarketplace"] = True
     res = await bestbuy.check(MKT_SKU, ctx())
@@ -337,3 +340,36 @@ async def test_preview_uses_official_seller_default_and_reports_seller():
     assert p["status"] == "out_of_stock" and p["status_text"].startswith("Third-party sellers only")
     assert p["seller"] == "Abe's Electronics Center" and p["third_party"] is True
     assert p["name"].startswith("Canon")
+
+
+# ------------------------------------------------------------------ pre-release audit fixes
+
+
+@respx.mock
+async def test_official_api_store_lookup_failure_is_not_the_websites_answer(monkeypatch):
+    # stores.json failing used to abandon the API answer for the website's "Pickup needs BESTBUY_API_KEY"
+    # (though the key is set) — and a definite out_of_stock while pickup was never answered
+    monkeypatch.setenv("BESTBUY_API_KEY", "k3y")
+    body = fj("bestbuy_api_product.json")
+    prod = respx.get(url__startswith=API + ".json").mock(return_value=httpx.Response(200, json=body))
+    stores = respx.get(url__startswith=API + "/stores.json").mock(
+        return_value=httpx.Response(200, json=fj("bestbuy_api_stores.json")))
+    pb = respx.get(url__startswith=PRICE_BLOCKS).mock(
+        return_value=httpx.Response(200, json=fj("bestbuy_priceblocks_soldout.json")))
+    body.update(orderable="SoldOut", onlineAvailability=False)
+    prod.mock(return_value=httpx.Response(200, json=body))
+    res = await bestbuy.check(OLD, ctx(fulfillment="any", zip="55423"))
+    assert res.status == "in_stock" and [a.key for a in res.available] == ["pickup:281", "pickup:12"]
+    stores.mock(return_value=httpx.Response(503))
+    res = await bestbuy.check(OLD, ctx(fulfillment="any", zip="55423"))
+    assert res.status == "unknown" and res.available == []
+    assert res.status_text == "Sold out · Pickup check failed (Best Buy API error)"
+    assert res.detail["source"] == "api" and not pb.called
+    res = await bestbuy.check(OLD, ctx(fulfillment="pickup", zip="55423"))
+    assert res.status == "unknown" and res.status_text == bestbuy.PICKUP_FAILED_TEXT
+    # delivery is in stock: that verdict stands, with a note that pickup wasn't checked
+    prod.mock(return_value=httpx.Response(200, json=fj("bestbuy_api_product.json")))
+    res = await bestbuy.check(OLD, ctx(fulfillment="any", zip="55423"))
+    assert res.status == "in_stock" and [a.key for a in res.available] == ["stock"]
+    assert res.status_text == "In stock · Pickup check failed (Best Buy API error)"
+    assert not pb.called

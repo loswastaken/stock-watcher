@@ -56,6 +56,7 @@ WWW = "https://www.bestbuy.com"
 API_FIELDS = ("sku,name,salePrice,regularPrice,onlineAvailability,orderable,inStoreAvailability,marketplace,"
               "image,url")
 PICKUP_NEEDS_KEY = "Pickup needs BESTBUY_API_KEY"
+PICKUP_FAILED_TEXT = "Pickup check failed (Best Buy API error)"
 
 
 def sku_from_url(url: str) -> str | None:
@@ -147,6 +148,16 @@ def third_party_text(seller: str | None) -> str:
     return f"{THIRD_PARTY_TEXT} ({seller[:60]})" if seller and not _is_best_buy(seller) else THIRD_PARTY_TEXT
 
 
+def _set_aside_price(res: CheckResult) -> CheckResult:
+    """A "Third-party sellers only" verdict: the price is the marketplace seller's, not Best Buy's — kept
+    aside so it never reads as the watched price."""
+    if res.price is not None:
+        res.detail["third_party_price"] = res.price
+    res.price = None
+    res.detail.pop("price_value", None)
+    return res
+
+
 UNAVAILABLE_ONLINE = "Unavailable online"
 HIGH_DEMAND_TEXT = "High-demand item (reservation flow) — stock not confirmed"
 SELLER_UNCONFIRMED = "Couldn't confirm the seller (Best Buy Marketplace listing?)"
@@ -160,7 +171,8 @@ def _build(ctx: AdapterContext, sku: str, verdict: str | None, text: str, *, sou
                          cart_url=cart_url(sku), button_state=button_state)
     detail.update({k: v for k, v in extra.items() if v is not None})
     if verdict == "in" and third_party and ctx.retailer_config.official_only:
-        return result("out", third_party_text(seller), price=price, title=title, image_url=image, detail=detail)
+        return _set_aside_price(result("out", third_party_text(seller), price=price, title=title, image_url=image,
+                                       detail=detail))
     return result(verdict, text, available=available, price=price, title=title, image_url=image, detail=detail)
 
 
@@ -225,34 +237,43 @@ async def _api_check(sku: str, key: str, ctx: AdapterContext) -> CheckResult:
             texts.append(ORDERABLE_OUT.get(orderable or "", "Sold out online" if online is False else "Out of stock"))
 
     stores_detail = None
+    pickup_failed = False
     if rc.wants_pickup:
         if not rc.zip:
             if rc.fulfillment == "pickup":
                 return error_result(ctx, "Set a ZIP code for pickup", sku=sku, cart_url=cart_url(sku))
         else:
             sq = urlencode({"postalCode": rc.zip, "apiKey": key, "format": "json"})
-            sj = await get_json(f"{API}/products/{sku}/stores.json?{sq}")
-            stores_detail = []
-            for s in (sj or {}).get("stores") or []:
-                sid = str(s.get("storeID") or s.get("storeId") or "")
-                if not sid:
-                    continue
-                try:
-                    dist = float(s["distance"]) if s.get("distance") is not None else None
-                except (TypeError, ValueError):
-                    dist = None
-                if rc.store_id and sid != rc.store_id:
-                    continue
-                if not rc.store_id and dist is not None and dist > rc.radius_miles:
-                    continue
-                name = clean_text(s.get("name")) or f"store #{sid}"
-                low = bool(s.get("lowStock"))
-                stores_detail.append({"id": sid, "name": name, "distance": dist, "low_stock": low})
-                label = f"Pickup · {name}" + (f" ({dist:.1f} mi)" if dist is not None else "")
-                available.append(Availability(key=f"pickup:{sid}", label=label + (" · low stock" if low else "")))
-            n = len(stores_detail)
-            texts.append(available[-1].label if n == 1 else f"Pickup at {n} stores" if n else
-                         f"No pickup within {rc.radius_miles} mi of {rc.zip}")
+            try:
+                sj = await get_json(f"{API}/products/{sku}/stores.json?{sq}")
+            except FetchError as e:
+                # keep the API's delivery answer (the website's would claim "Pickup needs BESTBUY_API_KEY")
+                log.info("bestbuy stores.json failed for %s: %s", sku, e)
+                pickup_failed = True
+                texts.append(PICKUP_FAILED_TEXT)
+            else:
+                stores_detail = []
+                for s in (sj or {}).get("stores") or []:
+                    sid = str(s.get("storeID") or s.get("storeId") or "")
+                    if not sid:
+                        continue
+                    try:
+                        dist = float(s["distance"]) if s.get("distance") is not None else None
+                    except (TypeError, ValueError):
+                        dist = None
+                    if rc.store_id and sid != rc.store_id:
+                        continue
+                    if not rc.store_id and dist is not None and dist > rc.radius_miles:
+                        continue
+                    name = clean_text(s.get("name")) or f"store #{sid}"
+                    low = bool(s.get("lowStock"))
+                    stores_detail.append({"id": sid, "name": name, "distance": dist, "low_stock": low})
+                    label = f"Pickup · {name}" + (f" ({dist:.1f} mi)" if dist is not None else "")
+                    available.append(Availability(key=f"pickup:{sid}",
+                                                  label=label + (" · low stock" if low else "")))
+                n = len(stores_detail)
+                texts.append(available[-1].label if n == 1 else f"Pickup at {n} stores" if n else
+                             f"No pickup within {rc.radius_miles} mi of {rc.zip}")
 
     detail = base_detail(ctx, sku=sku, source="api", seller=seller, third_party=third,
                          cart_url=cart_url(sku), orderable=orderable, pickup_stores=stores_detail)
@@ -260,8 +281,10 @@ async def _api_check(sku: str, key: str, ctx: AdapterContext) -> CheckResult:
         in_texts = [t for t in texts if t in ORDERABLE_IN.values() or t.startswith("Pickup")]
         return result("in", " · ".join(in_texts), available=available, price=price, title=title, image_url=image,
                       detail=detail)
-    return result("out", " · ".join(texts) or "Out of stock", price=price, title=title, image_url=image,
-                  detail=detail)
+    # a failed store lookup is no answer for pickup: a store nearby may have it, so not a definite "out"
+    res = result(None if pickup_failed else "out", " · ".join(texts) or "Out of stock", price=price, title=title,
+                 image_url=image, detail=detail)
+    return _set_aside_price(res) if third and rc.official_only else res
 
 
 # --------------------------------------------------------------------------- www endpoints
@@ -349,7 +372,7 @@ async def check(url: str, ctx: AdapterContext) -> CheckResult | None:
     if rc.fulfillment == "pickup":
         # The website endpoints only describe shipping: an online "Add to cart" says nothing about
         # any store, so a pickup-only watch can't be answered without the official API.
-        text = PICKUP_NEEDS_KEY if api_error is None else "Pickup check failed (Best Buy API error)"
+        text = PICKUP_NEEDS_KEY if api_error is None else PICKUP_FAILED_TEXT
         return result(None, text, detail=base_detail(ctx, sku=sku, source="none", cart_url=cart_url(sku),
                                                      pickup_unavailable=True))
 
@@ -441,8 +464,8 @@ def apply_page_signals(res: CheckResult, sig: dict, ctx: AdapterContext) -> Chec
     if sig.get("unavailable_online"):
         return override(res, "out", UNAVAILABLE_ONLINE, matched="page: currently unavailable for online purchase")
     if res.detail.get("third_party") and ctx.retailer_config.official_only:
-        return override(res, "out", third_party_text(res.detail.get("seller")),
-                        matched=f"seller: {res.detail.get('seller')}")
+        return _set_aside_price(override(res, "out", third_party_text(res.detail.get("seller")),
+                                         matched=f"seller: {res.detail.get('seller')}"))
     if sig.get("high_demand") and (res.detail.get("source") == "page-generic" or res.detail.get("third_party")):
         # the reservation flow decides at add-to-cart time (a marketplace listing's cart then said "currently
         # unavailable for online purchase"): structured data or a marketplace button can't confirm stock

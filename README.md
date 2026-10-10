@@ -87,11 +87,12 @@ If using a reverse proxy (e.g., Synology DSM reverse proxy):
 | `DATA_DIR` | `/data` | SQLite database and images location |
 | `SECRET_KEY` | auto-generated | Persisted to `$DATA_DIR/secret.key` |
 | `COOKIE_SECURE` | `auto` | `auto` = Secure cookie only over HTTPS; `true`/`false` to force |
+| `FORWARDED_ALLOW_IPS` | `*` | Proxies whose `X-Forwarded-For`/`-Proto` headers are trusted. Set it to your reverse proxy's IP/CIDR (e.g. `172.17.0.1` or `192.168.1.0/24`): with `*` any client can claim any IP, which weakens the per-IP login limit |
 | `SESSION_DAYS` | `30` | Session cookie expiry |
 | `MIN_INTERVAL_SECONDS` | `60` | Minimum check interval per item (seconds) |
 | `CHECK_CONCURRENCY` | `4` | Concurrent checks during scheduler loop |
 | `STATIC_DIR` | `/app/static` | Built SPA location (inside container) |
-| `TZ` | `UTC` | Timezone for scheduler and logs |
+| `TZ` | `UTC` | Timezone for log timestamps (scheduling and stored times are always UTC) |
 | `ENABLE_BROWSER` | `true` | Allow the real-browser (Chromium) fallback for JS pages and bot-protected stores |
 | `BROWSER_MODE` | `auto` | `auto` = headed on a screen, or on a built-in virtual display (Xvfb) in Docker; `headed`; `headless` |
 | `BROWSER_CHANNEL` | bundled Chromium | `chrome` = the installed Google Chrome (desktop only; not in the Docker image) |
@@ -222,7 +223,7 @@ pages. See [tools/site-probe/README.md](tools/site-probe/README.md).
 - Each check queries Apple's pickup/delivery availability for your parts around your ZIP.
 - The item page shows every nearby store with a per-model pill (Today / Later / Unavailable) and a 2-hour delivery panel.
 - You get one alert per check listing every **newly** available store/delivery option — no repeats while it stays available.
-- If Apple blocks the plain request, Stock Watcher retries through the built-in headless Chromium.
+- If Apple blocks the plain request, Stock Watcher retries through the built-in real browser (see [Bot-protected stores](#bot-protected-stores-real-browser)).
 - Keep the interval at 2 minutes or more to avoid rate limiting.
 
 ### Verify after first deploy
@@ -301,7 +302,29 @@ Frontend dev server runs on `http://localhost:5173` and proxies `/api` requests 
 
 ### Reset admin password
 
-Coming soon: CLI utility to reset credentials. For now, you can connect to the running container and reset via database (details to follow).
+Run this on the NAS (the container keeps running). It asks for the username and the new password, and signs that
+user out everywhere:
+
+```bash
+sudo docker exec -it stock-watcher python -c "
+import getpass
+from app import db
+from app.models import Session, User
+from app.security import hash_password
+db.init_engine()
+with db.SessionLocal() as s:
+    user = s.query(User).filter_by(username_key=input('Username: ').strip().lower()).one_or_none()
+    if user is None:
+        raise SystemExit('No such user. Users: ' + ', '.join(u.username for u in s.query(User)))
+    pw = getpass.getpass('New password (8+ characters): ')
+    if len(pw) < 8:
+        raise SystemExit('Too short; nothing changed.')
+    user.password_hash = hash_password(pw)
+    s.query(Session).filter_by(user_id=user.id).delete()
+    s.commit()
+    print('Password reset for', user.username)
+"
+```
 
 ## License
 

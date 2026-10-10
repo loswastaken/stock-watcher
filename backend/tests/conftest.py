@@ -4,10 +4,12 @@ Only `_isolated_env` is autouse (pure env isolation); everything else is opt-in.
 """
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from fastapi.testclient import TestClient
 
-from app import config, db, scheduler, security
+from app import config, db, security
 from app.checkers import Availability, CheckResult
 
 PW = "correct horse battery"
@@ -41,11 +43,15 @@ def client(monkeypatch):
     """TestClient with lifespan running (DB init, no scheduler loop)."""
     from app.main import app
 
-    # never let background first-checks hit a real checker
-    async def _noop(*a, **k):
-        return None
+    # never let background first-checks hit a real checker; like the real spawn, it must be
+    # called on the event loop (a sync route runs in a worker thread and would fail there)
+    def _spawn(coro):
+        try:
+            asyncio.get_running_loop()
+        finally:
+            coro.close()
 
-    monkeypatch.setattr("app.routers.items.scheduler.spawn", lambda coro: coro.close())
+    monkeypatch.setattr("app.routers.items.scheduler.spawn", _spawn)
     with TestClient(app) as c:
         yield c
 

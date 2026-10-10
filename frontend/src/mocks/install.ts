@@ -51,16 +51,19 @@ const json = (data: unknown, status = 200) =>
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 function stats(): Stats {
+  // Like the backend: purchased items only count towards `purchased`.
+  const active = items.filter((i) => !i.purchased_at);
   return {
-    total: items.length,
-    in_stock: items.filter((i) => i.status === 'in_stock').length,
-    out_of_stock: items.filter((i) => i.status === 'out_of_stock').length,
-    unknown: items.filter((i) => i.status === 'unknown').length,
-    error: items.filter((i) => i.status === 'error').length,
-    paused: items.filter((i) => !i.enabled).length,
+    total: active.length,
+    in_stock: active.filter((i) => i.status === 'in_stock').length,
+    out_of_stock: active.filter((i) => i.status === 'out_of_stock').length,
+    unknown: active.filter((i) => i.status === 'unknown').length,
+    error: active.filter((i) => i.status === 'error').length,
+    paused: active.filter((i) => !i.enabled).length,
     unread_notifications: notifications.filter((n) => !n.read).length,
     checks_24h: 4213,
     alerts_24h: notifications.filter((n) => Date.now() - Date.parse(n.created_at) < 86_400_000).length,
+    purchased: items.length - active.length,
   };
 }
 
@@ -108,7 +111,7 @@ async function handle(path: string, method: string, body: unknown): Promise<Resp
     if (users.some((u) => u.username.toLowerCase() === b.username.toLowerCase())) return json({ detail: 'Username already exists' }, 409);
     const u = { id: nextId++, username: b.username, is_admin: b.is_admin, created_at: ago(0) };
     users.push(u);
-    return json(u);
+    return json(u, 201);
   }
   let mm = p.match(/^\/users\/(\d+)$/);
   if (mm) {
@@ -198,7 +201,7 @@ async function handle(path: string, method: string, body: unknown): Promise<Resp
   }
   if (p === '/system/update/apply') return json({ started: true }, 202);
   if (p === '/items/check-all' && method === 'POST') {
-    const active = items.filter((x) => x.enabled);
+    const active = items.filter((x) => x.enabled && !x.purchased_at);
     setTimeout(() => {
       for (const x of active) x.last_checked_at = new Date().toISOString();
     }, 3000);
@@ -211,7 +214,8 @@ async function handle(path: string, method: string, body: unknown): Promise<Resp
     const sub = mm[2] ?? '';
     if (sub === '' && method === 'GET') return json(it);
     if (sub === '' && method === 'PATCH') {
-      Object.assign(it, body, { updated_at: new Date().toISOString() });
+      const { kind: _kind, ...patch } = (body ?? {}) as Record<string, unknown>; // kind can't be changed
+      Object.assign(it, patch, { updated_at: new Date().toISOString() });
       if (body && typeof body === 'object' && 'notify_enabled' in body) it.muted_by_alert = false;
       return json(it);
     }
@@ -232,12 +236,12 @@ async function handle(path: string, method: string, body: unknown): Promise<Resp
       return json(it);
     }
     if (sub === '/unpurchase') {
+      // rearm=false (Undo of "Mark purchased") only clears the purchase
+      const rearm = url.searchParams.get('rearm') !== 'false';
       Object.assign(it, {
         purchased_at: null,
         purchased_price: null,
-        enabled: true,
-        notify_enabled: true,
-        muted_by_alert: false,
+        ...(rearm ? { enabled: true, notify_enabled: true, muted_by_alert: false } : {}),
       });
       return json(it);
     }

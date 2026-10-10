@@ -130,7 +130,7 @@ export function StoresPanel({ item }: { item: Item }) {
         <CardBody className="space-y-2">
           <Skeleton className="h-10 w-full" />
         </CardBody>
-      ) : stores.isError ? (
+      ) : stores.isError && !stores.data ? (
         <CardBody>
           <p className="text-sm text-rose-600 dark:text-rose-400">{errorMessage(stores.error)}</p>
         </CardBody>
@@ -193,7 +193,7 @@ export function RestockPanel({ item }: { item: Item }) {
       <CardBody className={cn(rows.length > 0 && 'p-0')}>
         {restocks.isLoading ? (
           <Skeleton className="h-10 w-full" />
-        ) : restocks.isError ? (
+        ) : restocks.isError && !restocks.data ? (
           <p className="text-sm text-rose-600 dark:text-rose-400">{errorMessage(restocks.error)}</p>
         ) : !rows.length ? (
           <p className="text-sm text-zinc-500 dark:text-zinc-400">

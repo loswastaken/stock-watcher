@@ -12,7 +12,7 @@ import re
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlsplit
 
 from bs4 import BeautifulSoup
 
@@ -20,7 +20,7 @@ from .. import fetcher, generic
 from ..base import Availability, CheckResult
 from ..fetcher import FetchError, FetchResult
 from ..util import clean_text, parse_amount
-from .base import STOCK_KEY, AdapterContext, next_data, result, soup_of
+from .base import STOCK_KEY, AdapterContext, dig, next_data, result, soup_of
 
 QUEUE_TEXT = "Waiting room active — drop may be live"
 THIRD_PARTY_TEXT = "Third-party sellers only"
@@ -79,11 +79,10 @@ def blocked(host: str) -> FetchError:
     return FetchError(f"Blocked by bot protection on {host}")
 
 
-async def fetch_page(url: str, ctx: AdapterContext, *, render_js: bool = False,
+async def fetch_page(url: str, ctx: AdapterContext, *,
                      needs: Callable[[str], bool] | None = fetcher.has_product_signals) -> FetchResult:
     """fetch_html honouring the item's own render_js switch."""
-    rjs = bool(render_js or (ctx.generic_config or {}).get("render_js"))
-    return await fetcher.fetch_html(url, render_js=rjs, needs=needs)
+    return await fetcher.fetch_html(url, render_js=bool((ctx.generic_config or {}).get("render_js")), needs=needs)
 
 
 def price_value(price: Any) -> float | None:
@@ -286,11 +285,10 @@ def apply_rules(html: str, rules: Iterable[Rule], mv: _Main | None = None) -> tu
     return None
 
 
-async def dom_check(url: str, ctx: AdapterContext, rules: list[Rule], *, render_js: bool = False,
-                    needs: Callable[[str], bool] | None = fetcher.has_product_signals,
+async def dom_check(url: str, ctx: AdapterContext, rules: list[Rule], *,
                     fetched: FetchResult | None = None) -> CheckResult:
     if fetched is None:
-        fetched = await fetch_page(url, ctx, render_js=render_js, needs=needs)
+        fetched = await fetch_page(url, ctx)
     if is_queued(fetched):
         return queued_result(ctx)
     if looks_blocked(fetched.text):
@@ -675,17 +673,48 @@ def _sx_product(nd: dict, url: str | None) -> dict | None:
     return cands[0] if cands else None
 
 
-def stockx_lowest_ask(html: str, url: str | None = None) -> tuple[bool, float | None]:
+def _sx_size(url: str | None) -> str | None:
+    """The size a StockX link names (``/air-jordan-1-…?size=10``), or None."""
+    return clean_text(dict(parse_qsl(urlsplit(url or "").query)).get("size")) or None
+
+
+def _sx_norm(v: Any) -> str:
+    return re.sub(r"\s+", "", str(v)).lower()
+
+
+def _sx_variant_sizes(var: dict) -> set[str]:
+    """A variant's size labels: ``traits.size``, ``size``, ``sizeChart.baseSize`` and the chart's display
+    sizes ("US M 10" also counts as "10")."""
+    opts = dig(var, "sizeChart", "displayOptions")
+    vals = [dig(var, "traits", "size"), var.get("size"), dig(var, "sizeChart", "baseSize")] + [
+        o.get("size") for o in (opts if isinstance(opts, list) else []) if isinstance(o, dict)]
+    out: set[str] = set()
+    for v in vals:
+        if isinstance(v, (str, int, float)) and not isinstance(v, bool) and str(v).strip():
+            out.add(_sx_norm(v))
+            m = re.match(r"^\s*us\s*(?:[mw]\s+)?(\S.*)$", str(v), re.IGNORECASE)
+            if m:
+                out.add(_sx_norm(m.group(1)))
+    return out
+
+
+def stockx_lowest_ask(html: str, url: str | None = None, *, size: str | None = None) -> tuple[bool, float | None]:
     """(found a lowestAsk field on the page's product, its lowest positive ask) from __NEXT_DATA__.
-    Asks on related / recommended products don't count."""
+    Asks on related / recommended products don't count. With ``size`` (the link's ``?size=``) only the
+    product's variants of that size count: (False, None) when no variant names it."""
     nd = next_data(html)
     if nd is None:
         return False, None
     prod = _sx_product(nd, url)
     if prod is None:
         return False, None
+    roots: list[Any] = [prod]
+    if size:
+        variants = prod.get("variants")
+        roots = [v for v in (variants if isinstance(variants, list) else [])
+                 if isinstance(v, dict) and _sx_norm(size) in _sx_variant_sizes(v)]
     found, best = False, None
-    stack: list[Any] = [prod]
+    stack: list[Any] = roots
     while stack:
         cur = stack.pop()
         if isinstance(cur, dict):
@@ -706,7 +735,8 @@ async def stockx(url: str, ctx: AdapterContext) -> CheckResult | None:
     fetched = await fetch_page(url, ctx, needs=lambda h: "__NEXT_DATA__" in h or fetcher.has_product_signals(h))
     if is_queued(fetched):
         return queued_result(ctx)
-    found, ask = stockx_lowest_ask(fetched.text, fetched.url or url)
+    size = _sx_size(url) or _sx_size(fetched.url)
+    found, ask = stockx_lowest_ask(fetched.text, fetched.url or url, size=size)
     if not found:
         # an unknown slug renders StockX's catch-all 404 page (HTTP 200, homepage title, <h1>404</h1>,
         # data-testid="NotFound") — recorded 2026-09-29 for /nintendo-switch-2-console-us-version
@@ -715,7 +745,10 @@ async def stockx(url: str, ctx: AdapterContext) -> CheckResult | None:
             dead = generic.missing_result(generic.NOT_FOUND_TEXT, url, fetched.url)
         if dead is not None:
             return dead
-    res = generic_result(fetched, url, ctx, third_party=True)
+    res = generic_result(fetched, url, ctx, third_party=True, size=size)
+    if size and not found:
+        # the page's other asks (and its JSON-LD offers) span every size: none of them answers for this one
+        return override(res, None, f"Couldn't read the asks for size {size[:16]}", matched=f"?size={size[:16]}")
     if ask is not None:
         text = f"Lowest ask ${ask:,.2f}"
         override(res, "in", text, matched="__NEXT_DATA__ lowestAsk")
