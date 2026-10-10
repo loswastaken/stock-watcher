@@ -220,7 +220,9 @@ def test_retailers_endpoint(admin):
     assert {"target", "bestbuy", "amazon", "walmart"} <= keys
     target = next(r for r in rs if r["key"] == "target")
     assert target["pickup"] is True and target["seller_filter"] is True and target["color"].startswith("#")
-    assert set(target) == {"key", "name", "domain", "color", "pickup", "seller_filter", "note"}
+    assert set(target) == {"key", "name", "domain", "hosts", "color", "pickup", "seller_filter", "note"}
+    kroger = next(r for r in rs if r["key"] == "kroger")
+    assert "ralphs.com" in kroger["hosts"]
 
 
 def test_retailers_requires_auth(client):

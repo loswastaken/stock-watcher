@@ -871,7 +871,6 @@ _BASE_ARGS = [
 ]
 # Plain Playwright only (patchright already hides these).
 _PLAYWRIGHT_ARGS = ["--disable-blink-features=AutomationControlled"]
-_LAUNCH_ARGS = _BASE_ARGS + _PLAYWRIGHT_ARGS  # kept for compatibility
 _WINDOW = (1440, 900)
 _XVFB_SCREEN = "1920x1080x24"
 

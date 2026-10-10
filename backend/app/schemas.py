@@ -416,6 +416,7 @@ class RetailerOut(BaseModel):
     key: str
     name: str
     domain: str
+    hosts: list[str] = Field(default_factory=list)
     color: str
     pickup: bool
     seller_filter: bool

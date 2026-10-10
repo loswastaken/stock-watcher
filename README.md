@@ -91,7 +91,7 @@ If using a reverse proxy (e.g., Synology DSM reverse proxy):
 | `MIN_INTERVAL_SECONDS` | `60` | Minimum check interval per item (seconds) |
 | `CHECK_CONCURRENCY` | `4` | Concurrent checks during scheduler loop |
 | `STATIC_DIR` | `/app/static` | Built SPA location (inside container) |
-| `TZ` | `UTC` | Timezone for scheduler and logs |
+| `TZ` | `UTC` | Timezone for log timestamps (scheduling and stored times are always UTC) |
 | `ENABLE_BROWSER` | `true` | Allow the real-browser (Chromium) fallback for JS pages and bot-protected stores |
 | `BROWSER_MODE` | `auto` | `auto` = headed on a screen, or on a built-in virtual display (Xvfb) in Docker; `headed`; `headless` |
 | `BROWSER_CHANNEL` | bundled Chromium | `chrome` = the installed Google Chrome (desktop only; not in the Docker image) |
@@ -222,7 +222,7 @@ pages. See [tools/site-probe/README.md](tools/site-probe/README.md).
 - Each check queries Apple's pickup/delivery availability for your parts around your ZIP.
 - The item page shows every nearby store with a per-model pill (Today / Later / Unavailable) and a 2-hour delivery panel.
 - You get one alert per check listing every **newly** available store/delivery option — no repeats while it stays available.
-- If Apple blocks the plain request, Stock Watcher retries through the built-in headless Chromium.
+- If Apple blocks the plain request, Stock Watcher retries through the built-in real browser (see [Bot-protected stores](#bot-protected-stores-real-browser)).
 - Keep the interval at 2 minutes or more to avoid rate limiting.
 
 ### Verify after first deploy
